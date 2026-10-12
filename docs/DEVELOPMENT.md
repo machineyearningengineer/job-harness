@@ -2,6 +2,52 @@
 
 Use the pinned Rust 1.97.1 toolchain and a platform C compiler. Core minimum Rust is 1.88; the optional desktop has its own minimum. Ordinary checks need no model weights, vendor SDKs or real candidate data.
 
+## Keep development separate from your career
+
+Keep the product checkout wherever you normally keep your own projects, for
+example `~/dev/personal/job-harness`. `~/dev/work` is equally valid if that is
+your convention. The directory name has no effect on the engine or Git branch.
+Your real career workspace stays outside the product checkout and does not
+need a copy for each branch.
+
+For a checkout named `job-harness`, development defaults are:
+
+| What | Location |
+|---|---|
+| Source and Git history | `job-harness/` |
+| Separate test data | `job-harness-development/workspace/`, beside the checkout |
+| Development folder selection | `job-harness-development/host-settings/job-harness/settings.json` |
+| Installed app/agent's career data | The folder selected with the installed toolkit, outside the checkout |
+
+This applies to executables running from the source checkout or its Cargo build
+output, including debug, release and desktop builds. An installed CLI invoked
+**from inside a Job Harness checkout** also uses development selection. It
+ignores the live `JOB_HARNESS_WORKSPACE` and saved user settings; configuring a
+source run writes only development settings. Outside a checkout, a copied or
+installed binary uses the normal user selection. Explicit `--root` always wins,
+so use it only for an intentionally selected synthetic workspace during testing.
+Development defaults protect selection mistakes; they are not an OS sandbox.
+
+Initialize an empty development workspace once:
+
+```sh
+cargo run --locked -- init
+cargo run --locked -- status
+```
+
+Initialization refuses existing nonempty data. To start with fictional cards
+instead, before initializing, use `cargo run --locked -- demo --workspace PATH`
+with the absolute development folder shown above. Paths must be normalized,
+without `..` traversal. Replace the basename if your checkout has another name. The desktop source build
+opens this same development workspace; if it is missing or invalid, it stops
+rather than opening a live folder chooser. No command silently creates a
+development workspace. Normal tests use their own temporary synthetic workspaces.
+
+Keep installed MCP launch arguments fixed to the real workspace for daily career
+work. Test MCP, ACP, GUI and model changes with the development workspace and
+fixture connectors. Building source does not replace installed executables;
+install only after verification. Installing does not move or copy career data.
+
 **GitHub Actions are manual-only.** Pushes, pull requests and tags start no jobs. This preserves the owner's limited Actions minutes; it does not remove regression tests or turn local checks into remote CI proof. Run the relevant checks locally first, and request a remote platform check only when it resolves a concrete gap.
 
 ## Start with the change you made

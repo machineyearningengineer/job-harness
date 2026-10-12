@@ -1,6 +1,7 @@
 //! Native CLI: compact JSON for piping; help and progress never contaminate MCP.
 mod context;
 mod daily;
+mod development;
 pub mod host;
 mod onboarding;
 mod presentation;

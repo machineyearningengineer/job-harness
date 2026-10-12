@@ -43,6 +43,10 @@ Connect your agent, add your existing CV and confirmed answers, and start with o
 
 Switch agents or stop using the toolkit while keeping your history. [Back up, disconnect or remove it](docs/INSTALL.md#leave-or-switch-tools).
 
+You choose where your data lives; it stays outside the software repo.
+[Data locations and folder selection](docs/INSTALL.md#where-your-data-lives) ·
+[Develop safely with separate test data](docs/DEVELOPMENT.md#keep-development-separate-from-your-career)
+
 **Private preview.** macOS, Linux and experimental Windows builds are available. Windows packages were cross-built and have not been run on Windows; a known notification stall is tracked in [issue 1](https://github.com/KingPsychopath/job-harness/issues/1). Packages are unsigned. [Platform requirements and checksums](docs/INSTALL.md) · [Validation record](docs/VALIDATION.md)
 
 ## Ask your agent

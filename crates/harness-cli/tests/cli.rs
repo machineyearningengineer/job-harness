@@ -341,14 +341,21 @@ fn host_default_roundtrip_and_invalid_input_are_json() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("workspace");
     assert_eq!(output(run(&root, &["init"]))["ok"], true);
-    assert_eq!(
-        output(run(
-            &root,
-            &["configure", "--workspace", root.to_str().unwrap()]
-        ))["ok"],
-        true
-    );
-    let default = Command::new(env!("CARGO_BIN_EXE_job-harness"))
+    let installed = temp.path().join(if cfg!(windows) {
+        "installed.exe"
+    } else {
+        "installed"
+    });
+    std::fs::copy(env!("CARGO_BIN_EXE_job-harness"), &installed).unwrap();
+    let configured = Command::new(&installed)
+        .current_dir(temp.path())
+        .args(["configure", "--workspace", root.to_str().unwrap()])
+        .env("XDG_CONFIG_HOME", temp.path().join("host-settings"))
+        .output()
+        .unwrap();
+    assert_eq!(output(configured)["ok"], true);
+    let default = Command::new(&installed)
+        .current_dir(temp.path())
         .args(["call", "bootstrap"])
         .env("XDG_CONFIG_HOME", temp.path().join("host-settings"))
         .env_remove("JOB_HARNESS_WORKSPACE")
@@ -363,6 +370,76 @@ fn host_default_roundtrip_and_invalid_input_are_json() {
     );
     assert!(!result.status.success());
     assert_eq!(output(result)["error"]["code"], "invalid_arguments");
+}
+
+#[test]
+fn source_default_ignores_live_environment_and_saved_settings() {
+    let temp = tempfile::tempdir().unwrap();
+    let personal = temp.path().join("fictional-personal");
+    assert_eq!(output(run(&personal, &["init"]))["ok"], true);
+    let state_path = personal.join("applications/operations/state.json");
+    let before = std::fs::read(&state_path).unwrap();
+    let settings = temp.path().join("host-settings/job-harness/settings.json");
+    std::fs::create_dir_all(settings.parent().unwrap()).unwrap();
+    let settings_bytes = json!({"schema_version":1,"workspace":personal}).to_string();
+    std::fs::write(&settings, &settings_bytes).unwrap();
+    let selected = job_harness::host::resolve(None).unwrap();
+    assert_ne!(selected, personal);
+    let result = Command::new(env!("CARGO_BIN_EXE_job-harness"))
+        .args(["call", "bootstrap"])
+        .current_dir(temp.path())
+        .env("JOB_HARNESS_WORKSPACE", &personal)
+        .env("XDG_CONFIG_HOME", temp.path().join("host-settings"))
+        .output()
+        .unwrap();
+    let value = output(result);
+    if value["ok"] == true {
+        assert_eq!(
+            value["data"]["ledger"],
+            json!(selected.canonicalize().unwrap())
+        );
+    } else {
+        // A missing development fixture must fail, never fall back to the live one.
+        assert!(
+            ["invalid_arguments", "missing_resource"]
+                .contains(&value["error"]["code"].as_str().unwrap())
+        );
+    }
+    assert_eq!(std::fs::read(&state_path).unwrap(), before);
+    assert_eq!(std::fs::read_to_string(&settings).unwrap(), settings_bytes);
+    let installed = temp.path().join(if cfg!(windows) {
+        "copied.exe"
+    } else {
+        "copied"
+    });
+    std::fs::copy(env!("CARGO_BIN_EXE_job-harness"), &installed).unwrap();
+    let in_checkout = Command::new(installed)
+        .current_dir(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .unwrap()
+                .parent()
+                .unwrap(),
+        )
+        .args(["call", "bootstrap"])
+        .env("JOB_HARNESS_WORKSPACE", &personal)
+        .env("XDG_CONFIG_HOME", temp.path().join("host-settings"))
+        .output()
+        .unwrap();
+    let value = output(in_checkout);
+    if value["ok"] == true {
+        assert_ne!(value["data"]["ledger"], json!(personal));
+    } else {
+        assert!(
+            ["invalid_arguments", "missing_resource"]
+                .contains(&value["error"]["code"].as_str().unwrap())
+        );
+    }
+    assert_eq!(std::fs::read(&state_path).unwrap(), before);
+    assert_eq!(
+        job_harness::host::resolve(Some(personal.clone())).unwrap(),
+        personal
+    );
 }
 
 #[test]
@@ -467,7 +544,10 @@ fn windows_host_settings_use_appdata_and_preserve_drive_paths_with_spaces() {
     let root = temp.path().join("career workspace with spaces");
     assert_eq!(output(run(&root, &["init"]))["ok"], true);
     let appdata = temp.path().join("Host Settings");
-    let configured = Command::new(env!("CARGO_BIN_EXE_job-harness"))
+    let installed = temp.path().join("installed.exe");
+    std::fs::copy(env!("CARGO_BIN_EXE_job-harness"), &installed).unwrap();
+    let configured = Command::new(&installed)
+        .current_dir(temp.path())
         .args(["configure", "--workspace"])
         .arg(&root)
         .env_remove("XDG_CONFIG_HOME")
@@ -477,7 +557,8 @@ fn windows_host_settings_use_appdata_and_preserve_drive_paths_with_spaces() {
         .unwrap();
     assert_eq!(output(configured)["ok"], true);
     assert!(appdata.join("job-harness/settings.json").is_file());
-    let selected = Command::new(env!("CARGO_BIN_EXE_job-harness"))
+    let selected = Command::new(&installed)
+        .current_dir(temp.path())
         .args(["call", "bootstrap"])
         .env_remove("JOB_HARNESS_WORKSPACE")
         .env_remove("XDG_CONFIG_HOME")

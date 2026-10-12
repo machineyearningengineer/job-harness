@@ -32,6 +32,12 @@ lets you select an existing one. It never initializes or resets that folder.
 Remembering the location is optional and stores only a path in owner-only host
 settings, shared with the CLI.
 
+Source development opens the separate sibling development workspace instead of
+live environment/user settings. Initialize it once with the source CLI. If it is
+not ready, the source app stops before opening a live folder chooser; `--root`
+can intentionally select an initialized test folder. Installed apps launched
+outside a checkout retain normal user selection. [Development setup](../../docs/DEVELOPMENT.md#keep-development-separate-from-your-career)
+
 The native app enables its named, reviewed local edits like a document app.
 Choose **Workspace → Read only** to lock them, or launch with `--read-only`.
 The menu is owned by Rust; the page cannot change this policy. The legacy

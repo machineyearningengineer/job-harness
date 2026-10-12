@@ -27,6 +27,12 @@ Use the same Engine::call API for CLI, MCP and GUI consumers. Preserve versioned
 
 Run make check for behavior changes and make check-package for packaging/resources. Test meaningful failure and recovery paths using temporary synthetic workspaces. Keep scripts, fixtures, docs and native release contents free of personal data. Verify the actual pushed commit and CI before calling a remote change verified.
 
+Source executables and CLI calls made inside this checkout use a separate sibling
+development workspace and host settings, ignoring live defaults. See
+docs/DEVELOPMENT.md. Use cargo run for development, initialize only that test
+workspace, and keep explicit --root arguments pointed at synthetic data. Do not
+reconfigure or install over a person's daily tools merely to run a code check.
+
 Generic skills/guides are canonical under resources/. .agents/skills/job-harness is a small portable entrypoint, not another copy. Package resource updates so installed binaries work outside the checkout. Keep private guides from falling back to original candidate content.
 
 Do not reset a private workspace's state or retry a begun/unknown external action. Keep local data separate from execution lifetime; no VM or cloud service is required. Arbitrary untrusted execution belongs in a host-selected isolated runtime, never in a general tool added to this ledger API.

@@ -47,12 +47,13 @@ Cloning this repository gives the agent the toolkit source and reusable guidance
 ```sh
 gh repo clone KingPsychopath/job-harness
 cd job-harness
-cargo build --release --bins --locked
-./target/release/jh setup --workspace "$HOME/Career/workspace" --json
-./target/release/jh --root "$HOME/Career/workspace" connect mcp
+./scripts/install.sh
+cd ..
+jh setup --workspace "$HOME/Career/workspace" --json
+jh --root "$HOME/Career/workspace" connect mcp
 ```
 
-In PowerShell, use `.\target\release\jh.exe`, and `(Join-Path $HOME "Career/workspace")` for the workspace argument. The repository pins its Rust toolchain; desktop and model-provider builds are separate optional components.
+In PowerShell use `./scripts/install.ps1`, then `Set-Location ..` before configuring installed use; use `(Join-Path $HOME "Career/workspace")` for the workspace argument. Add the installed bin folder to PATH. Direct source calls use an explicit `--root` for career work. The repository pins its Rust toolchain; desktop and model-provider builds are separate optional components.
 
 Open the cloned folder as your agent project and give it this prompt, replacing the private path:
 
@@ -67,6 +68,13 @@ request. Do not put my career data, credentials or private bundles in the repo.
 ```
 
 Setup saves a host-local default folder, but explicit `--root` remains useful for agents. Repeated setup selects an existing valid workspace without resetting its history. `--plan --json` previews setup without creating files or saving a default. [First-source onboarding](../resources/guides/job-harness-onboarding.md#add-your-first-sources)
+
+For product development, stay in the checkout and use `cargo run --locked --
+init` once, then `cargo run --locked -- status`. Source executables and installed
+CLI calls inside this checkout use a separate sibling development workspace,
+ignoring live environment and saved defaults. Setup/configure from that context
+save development settings only. Use explicit `--root` for intentionally selected
+career work, and synthetic folders for testing. [Development isolation](DEVELOPMENT.md#keep-development-separate-from-your-career)
 
 ## Give the agent a bounded task
 

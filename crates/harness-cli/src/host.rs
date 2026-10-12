@@ -15,6 +15,9 @@ fn user_settings_base() -> Option<PathBuf> {
     std::env::var_os("HOME").map(|p| PathBuf::from(p).join(".config"))
 }
 pub fn settings_path() -> anyhow::Result<PathBuf> {
+    if let Some(development) = super::development::current() {
+        return Ok(development.settings);
+    }
     let base = std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .or_else(user_settings_base)
@@ -31,18 +34,36 @@ pub fn resolve(explicit: Option<PathBuf>) -> anyhow::Result<PathBuf> {
     if let Some(path) = explicit {
         return Ok(path);
     }
+    if let Some(development) = super::development::current() {
+        return development_selection(&development);
+    }
     if let Some(path) = std::env::var_os("JOB_HARNESS_WORKSPACE") {
         return Ok(PathBuf::from(path));
     }
-    let path = settings_path()?;
+    read_selection(&settings_path()?, None)
+}
+
+/// Source CLI and desktop selection share this boundary before any live env fallback.
+pub fn development_workspace() -> Option<PathBuf> {
+    super::development::current().map(|development| development.workspace)
+}
+
+fn development_selection(development: &super::development::Development) -> anyhow::Result<PathBuf> {
+    read_selection(&development.settings, Some(&development.workspace))
+}
+
+fn read_selection(path: &Path, fallback: Option<&Path>) -> anyhow::Result<PathBuf> {
     if !path.is_file() {
+        if let Some(path) = fallback {
+            return Ok(path.to_owned());
+        }
         return Err(HarnessError::new(
             "invalid_arguments",
             "Select --root PATH or run job-harness configure --workspace PATH.",
         )
         .into());
     }
-    let data: Value = serde_json::from_slice(&fs::read(&path)?)?;
+    let data: Value = serde_json::from_slice(&fs::read(path)?)?;
     if data["schema_version"] != 1 || !data["workspace"].is_string() {
         return Err(HarnessError::new(
             "invalid_arguments",
@@ -93,4 +114,39 @@ pub fn configure(root: &Path) -> anyhow::Result<Value> {
     Ok(
         json!({"workspace":root,"settings":path,"note":"Host-local path only. Credentials stay in the host's secure store."}),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn missing_development_settings_choose_only_the_development_workspace() {
+        let root = tempfile::tempdir().unwrap();
+        let development = super::super::development::Development {
+            workspace: root.path().join("development/workspace"),
+            settings: root.path().join("development/host-settings/settings.json"),
+        };
+        assert_eq!(
+            development_selection(&development).unwrap(),
+            development.workspace
+        );
+        assert!(!development.workspace.exists());
+    }
+
+    #[test]
+    fn invalid_development_settings_fail_without_falling_back_to_live_settings() {
+        let root = tempfile::tempdir().unwrap();
+        let development = super::super::development::Development {
+            workspace: root.path().join("development/workspace"),
+            settings: root.path().join("development-settings.json"),
+        };
+        fs::write(
+            &development.settings,
+            r#"{"schema_version":1,"workspace":null}"#,
+        )
+        .unwrap();
+        assert!(development_selection(&development).is_err());
+        assert!(read_selection(&root.path().join("missing.json"), None).is_err());
+    }
 }

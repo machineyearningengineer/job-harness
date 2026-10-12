@@ -2,6 +2,36 @@
 
 Start with the **core release** and your existing agent. No compiler, model download or new AI account is needed. Your private career workspace is a separate folder containing your CV, answers, notes and application history; the toolkit repository contains reusable software.
 
+## Where your data lives
+
+You choose the data folder with `jh setup --workspace PATH`. The example
+`~/Career/workspace` is a suggestion, not a fixed location. You can use another
+local disk or folder outside the software checkout. `jh status` displays the
+selected folder; `jh status --json` exposes it as `data.workspace`.
+
+| Data | Location and control |
+|---|---|
+| CVs, answers, notes, applications, original evidence and durable action history | Your chosen workspace. Markdown/JSON are canonical; `.harness/` contains the rebuildable SQLite search index. |
+| The default workspace's location | A small owner-only `settings.json`; it contains a path, not your career history or credentials. |
+| Backups | The output filename you explicitly choose when exporting. They are private plaintext bundles. |
+| Optional downloaded models | A separate cache; no model is downloaded by setup. See [model storage](MODELS.md). |
+| Credentials and browser/mail/calendar sessions | Your connected agent/provider's secure stores, outside the workspace and product repo. |
+
+For installed use outside a source checkout, selection is `--root PATH`, then
+`JOB_HARNESS_WORKSPACE`, then the saved default. `jh configure --workspace PATH`
+selects an existing initialized folder without copying or moving its data. The
+desktop can select and optionally remember an existing folder too. Changing the
+selection is not synchronization; use one canonical folder for an active search.
+
+User settings are `$XDG_CONFIG_HOME/job-harness/settings.json` when set;
+otherwise `%APPDATA%/job-harness/settings.json` on Windows or
+`~/.config/job-harness/settings.json` on macOS/Linux. Workspace settings such as
+timezone and primary CV stay in the chosen folder's `config/career-ledger.json`.
+
+Development has a separate default and settings file. Source-built executables,
+and installed CLI commands run inside a Job Harness checkout, ignore live
+defaults. See [development isolation](DEVELOPMENT.md#keep-development-separate-from-your-career).
+
 | You want to… | Start here |
 |---|---|
 | Use an existing agent | Download the core archive, set up a private workspace, then connect MCP or use the CLI |
@@ -100,12 +130,13 @@ Release users can skip this section. Source builds need [Rust](https://rustup.rs
 ```sh
 gh repo clone KingPsychopath/job-harness
 cd job-harness
-cargo build --release --bins --locked
-./target/release/jh setup --workspace "$HOME/Career/workspace" --json
-./target/release/jh --root "$HOME/Career/workspace" connect mcp
+./scripts/install.sh
+cd ..
+jh setup --workspace "$HOME/Career/workspace" --json
+jh --root "$HOME/Career/workspace" connect mcp
 ```
 
-In PowerShell the executable is `.\target\release\jh.exe`; use `(Join-Path $HOME "Career/workspace")` for the workspace. You can open this checkout in your agent and use [the short setup prompt](AGENTS.md#open-the-checkout-in-your-agent).
+In PowerShell use `./scripts/install.ps1`, leave the checkout with `Set-Location ..`, and use `(Join-Path $HOME "Career/workspace")` for the workspace. Add the installation's bin directory to PATH. For a one-off source binary call, select the real workspace explicitly with `--root`; implicit source selection is for development. You can open this checkout in your agent and use [the short setup prompt](AGENTS.md#open-the-checkout-in-your-agent).
 
 For a persistent source installation, `./scripts/install.sh` or `./scripts/install.ps1` uses `cargo install --locked` from this checkout. The default destination is `~/.local/bin`; the shell script accepts `--prefix PATH` and PowerShell accepts `-Prefix PATH`. Add the selected bin directory to PATH. These scripts build the core; they do not initialize private data, install models or register an agent connection. Embedded guides make the installed binary independent of the checkout.
 
@@ -113,7 +144,7 @@ For a persistent source installation, `./scripts/install.sh` or `./scripts/insta
 
 Keep the previous executable until your private backup restores and the new binary reads it correctly. Reload the agent host after changing its server command, then call `bootstrap` through that actual connection. Saved configuration does not establish that an old process restarted. The default focused MCP profile starts with 12 tools; use `inspect_tools` to discover specialized schemas. Full mode exposes the complete catalog.
 
-The CLI selects `--root` first, then `JOB_HARNESS_WORKSPACE`, then its saved default. [Agent setup](AGENTS.md) explains fixed workspaces and access boundaries. A new agent can use the same private folder without rebuilding your history.
+Outside source development, the CLI selects `--root` first, then `JOB_HARNESS_WORKSPACE`, then its saved default. [Agent setup](AGENTS.md) explains fixed workspaces and access boundaries. A new agent can use the same private folder without rebuilding your history.
 
 ## Leave or switch tools
 

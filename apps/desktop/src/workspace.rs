@@ -8,12 +8,23 @@ fn ready(path: PathBuf) -> Option<PathBuf> {
 }
 
 pub fn select(explicit: Option<PathBuf>) -> anyhow::Result<Option<PathBuf>> {
-    let selected = explicit
-        .or_else(|| std::env::var_os("JOB_HARNESS_WORKSPACE").map(PathBuf::from))
-        .or_else(|| std::env::var_os("JOB_HARNESS_ROOT").map(PathBuf::from))
-        .or_else(|| harness_cli::host::resolve(None).ok());
+    let development = harness_cli::host::development_workspace();
+    let selected = if development.is_some() {
+        Some(harness_cli::host::resolve(explicit)?)
+    } else {
+        explicit
+            .or_else(|| std::env::var_os("JOB_HARNESS_WORKSPACE").map(PathBuf::from))
+            .or_else(|| std::env::var_os("JOB_HARNESS_ROOT").map(PathBuf::from))
+            .or_else(|| harness_cli::host::resolve(None).ok())
+    };
     if let Some(path) = selected.and_then(ready) {
         return Ok(Some(path));
+    }
+    if let Some(path) = development {
+        anyhow::bail!(
+            "Development workspace is not ready: {}. Initialize it with the source CLI (cargo run --locked -- init), or select an initialized test workspace with --root. Live defaults and the folder chooser are disabled for source development.",
+            path.display()
+        );
     }
     loop {
         let Some(path) = rfd::FileDialog::new()
