@@ -852,6 +852,42 @@ fn derived_search_preserves_source_kind_and_does_not_drive_submission_guards() {
     assert_eq!(batch["completed"], 1);
 }
 
+#[test]
+fn duplicate_batches_match_single_checks_and_refresh_after_a_reservation() {
+    let directory = fixture();
+    let engine = Engine::open(directory.path()).unwrap();
+    let run = start(&engine, 1);
+    let steps = json!([
+        {"id":"acme","tool":"check_duplicate","arguments":{"company":"Acme","vacancy_url":"https://jobs.example.com/acme/123?utm_source=new","posting_id":"123"}},
+        {"id":"other","tool":"check_duplicate","arguments":{"company":"Other","vacancy_url":"https://jobs.example.com/other/456"}}
+    ]);
+    let args = json!({"steps": steps});
+    let state_file = directory.path().join(crate::state::DB_REL_PATH);
+    for expected_block in [false, true] {
+        if expected_block {
+            prepare(&engine, &run, "reserve");
+        }
+        let before = fs::read(&state_file).unwrap();
+        let batch = call(&engine, "query_batch", args.clone());
+        assert_eq!(batch["completed"], 2);
+        for (step, result) in steps
+            .as_array()
+            .unwrap()
+            .iter()
+            .zip(batch["results"].as_array().unwrap())
+        {
+            let single = engine.call("check_duplicate", &step["arguments"]);
+            assert_eq!(result["result"]["data"], single["data"]);
+        }
+        assert_eq!(
+            batch["results"][0]["result"]["data"]["blocked"],
+            expected_block
+        );
+        assert_eq!(batch["results"][1]["result"]["data"]["blocked"], false);
+        assert_eq!(fs::read(&state_file).unwrap(), before);
+    }
+}
+
 #[cfg(unix)]
 #[test]
 fn mutation_refuses_internal_record_symlinks_before_committing_a_journal() {

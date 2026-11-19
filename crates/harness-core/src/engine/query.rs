@@ -1,6 +1,14 @@
 //! Evidence reads, source-scoped answers, duplicates and tracker health.
 use super::*;
 
+pub(super) struct DuplicateRecord {
+    row: Value,
+    employer_key: String,
+    urls: BTreeSet<String>,
+    folded_text: String,
+    lower_filename: String,
+}
+
 impl Engine {
     pub(super) fn read_record(&self, rel: &str) -> Result<Value> {
         let mut origin = "ledger";
@@ -88,15 +96,24 @@ impl Engine {
         exclude: Option<&str>,
     ) -> Result<Value> {
         let url = domain::normal_url(vacancy_url)?;
+        Self::match_duplicates(
+            &self.duplicate_records()?,
+            state,
+            company,
+            &url,
+            posting_id,
+            exclude,
+        )
+    }
+
+    pub(super) fn duplicate_records(&self) -> Result<Vec<DuplicateRecord>> {
         let rows = pipeline::build(&self.root)?.records;
-        let mut same = vec![];
-        let mut exact = vec![];
         let employer_pattern = Regex::new(r"\s+[—–-]\s+").unwrap();
         let urls_pattern = Regex::new(r#"https?://[^\s<>\)\]\",]+"#).unwrap();
+        let mut records = Vec::with_capacity(rows.len());
         for row in rows {
-            let text = fs::read_to_string(
-                self.text_path(&format!("applications/{}", s(&row, "record")?))?,
-            )?;
+            let filename = s(&row, "record")?;
+            let text = fs::read_to_string(self.text_path(&format!("applications/{filename}"))?)?;
             let employer = row
                 .get("company")
                 .and_then(Value::as_str)
@@ -106,31 +123,55 @@ impl Engine {
                         .next()
                         .unwrap_or_default()
                 });
-            let company_matches = domain::company_key(company) == domain::company_key(employer);
-            let mut urls = vec![];
+            let employer_key = domain::company_key(employer);
+            let mut urls = BTreeSet::new();
             if let Some(v) = row.get("vacancy_url").and_then(Value::as_str) {
-                urls.push(domain::normal_url(v)?);
+                urls.insert(domain::normal_url(v)?);
             }
             for value in urls_pattern.find_iter(&text) {
                 if let Ok(v) = domain::normal_url(value.as_str().trim_end_matches(['.', ';'])) {
-                    urls.push(v);
+                    urls.insert(v);
                 }
             }
-            let identity = urls.contains(&url)
-                || posting_id.is_some_and(|id| {
+            let lower_filename = filename.to_lowercase();
+            records.push(DuplicateRecord {
+                row,
+                employer_key,
+                urls,
+                folded_text: domain::casefold(&text),
+                lower_filename,
+            });
+        }
+        Ok(records)
+    }
+
+    pub(super) fn match_duplicates(
+        records: &[DuplicateRecord],
+        state: &Value,
+        company: &str,
+        url: &str,
+        posting_id: Option<&str>,
+        exclude: Option<&str>,
+    ) -> Result<Value> {
+        let employer_key = domain::company_key(company);
+        let posting_keys = posting_id.map(|id| (id, domain::casefold(id), id.to_lowercase()));
+        let mut same = vec![];
+        let mut exact = vec![];
+        for record in records {
+            let row = &record.row;
+            let company_matches = employer_key == record.employer_key;
+            let identity = record.urls.contains(url)
+                || posting_keys.as_ref().is_some_and(|(id, folded, lower)| {
                     company_matches
-                        && (row.get("posting_id").and_then(Value::as_str) == Some(id)
-                            || domain::casefold(&text).contains(&domain::casefold(id))
-                            || s(&row, "record")
-                                .unwrap_or_default()
-                                .to_lowercase()
-                                .contains(&id.to_lowercase()))
+                        && (row.get("posting_id").and_then(Value::as_str) == Some(*id)
+                            || record.folded_text.contains(folded.as_str())
+                            || record.lower_filename.contains(lower.as_str()))
                 });
             if company_matches || identity {
                 same.push(row.clone());
             }
             if identity {
-                exact.push(row);
+                exact.push(row.clone());
             }
         }
         let blocked_records: Vec<Value> = exact
@@ -148,7 +189,7 @@ impl Engine {
             if (status.unresolved()
                 && (stored_url == url
                     || domain::company_key(a["company"].as_str().unwrap_or_default())
-                        == domain::company_key(company)))
+                        == employer_key))
                 || (status == SubmissionState::Submitted && stored_url == url)
             {
                 blockers.push(a.clone());

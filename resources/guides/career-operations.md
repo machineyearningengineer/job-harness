@@ -24,7 +24,7 @@ Call bootstrap with the operation and the host's capabilities. It returns settin
 ## Efficient path
 
 1. `bootstrap`: discover routing, configuration and recovery in one read-only call. Read the returned shared-learning summary and role-context workflow, then the focused skill/adapter; the configured shared reads apply across career tasks.
-2. `query_batch`: fetch relevant records, approved answers and exact/employer duplicate checks together.
+2. `query_batch`: fetch relevant records and approved answers together. Send `check_duplicate` steps in their own batch to reuse one canonical ledger snapshot. Each later reservation rechecks current state, including work committed by other workers.
 3. `execute_batch`: start a bounded run and chain local record updates using prior-result references. Each mutation keeps its own idempotency key. Earlier commits survive a later failure.
 4. For applications, `prepare_application` freezes/reserves with one call. Use frozen bytes; call `begin_submission` separately immediately before one external Submit, then `finish_submission` with observed evidence.
 5. For external tracking, `plan_adapter` combines stage and note into one provider-neutral action. The host changes only differences, verifies live state and records it with `record_adapter_result`.
