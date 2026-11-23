@@ -29,7 +29,6 @@ const ALLOWED: &[&str] = &[
     "apps",
     "xtask",
     "resources",
-    "gui",
     "examples",
     "providers",
     "docs",

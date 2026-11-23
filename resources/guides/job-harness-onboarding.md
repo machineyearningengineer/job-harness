@@ -26,7 +26,7 @@ In PowerShell, use `(Join-Path $HOME "Career/workspace")` for the workspace argu
 
 The toolkit checkout is reusable software. Keep private data outside it. One person's agents use the same private workspace; copies on different machines have independent locks and do not synchronize automatically.
 
-For a fictional trial, run `jh demo --workspace PATH` with a new folder, then `jh --root PATH gui`. The demo is clearly fictional and does not change your saved workspace selection. Open the desktop app or the local URL printed by `gui`; `gui/index.html` in the code checkout is not a standalone application.
+For a fictional trial, run `jh demo --workspace PATH` with a new folder, then open it in the native desktop app (`job-harness-desktop --root PATH`) or inspect it via `jh --root PATH status`. The demo is clearly fictional and does not change your saved workspace selection.
 
 ## Add your first sources
 

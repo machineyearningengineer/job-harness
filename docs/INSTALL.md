@@ -30,5 +30,5 @@ jh --root "$HOME/Career/workspace" connect mcp
 
 - **Selection order:** `--root PATH` → `JOB_HARNESS_WORKSPACE` → saved default (`~/.config/job-harness/settings.json`).
 - **Agent setup:** See [docs/AGENT-SETUP.md](AGENT-SETUP.md) for Claude Code, Codex, Hermes, Cursor, Windsurf, and OpenCode wiring.
-- **Optional components:** Local web UI (`jh gui`), standalone desktop window ([apps/desktop/README.md](../apps/desktop/README.md)), local model provider ([docs/MODELS.md](MODELS.md)), and Typst CV builder ([docs/CV.md](CV.md)).
+- **Optional components:** Native GPUI desktop app ([apps/desktop/README.md](../apps/desktop/README.md)), headless remote server (`jh serve`), local model provider ([docs/MODELS.md](MODELS.md)), and Typst CV builder ([docs/CV.md](CV.md)).
 - **Backups & migration:** `jh workspace export` / `jh workspace import` ([docs/BUNDLES.md](BUNDLES.md)).

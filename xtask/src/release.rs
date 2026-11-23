@@ -202,7 +202,7 @@ fn installation(component: Component, windows: bool, macos: bool) -> String {
             "# Job Harness for macOS\n\nCopy Job Harness.app to Applications and open it. Choose an existing private workspace when the window asks. Private workspace data stays outside this archive.\n\nThis preview has no Developer ID signature or notarization. Verify its archive SHA256 and use your normal macOS approval process before opening it. The app grants no browser, mail, calendar or model credentials.\n\n{documentation}/blob/main/apps/desktop/README.md\n"
         ),
         Component::Desktop => format!(
-            "# Optional desktop window\n\nInstall job-harness-desktop separately. It uses the same local workspace and the platform webview; its dependencies are documented in the desktop guide. Private workspace data stays outside this archive. A window grants no browser, mail, calendar or model credentials.\n\n{documentation}/blob/main/apps/desktop/README.md\n"
+            "# Optional native desktop app\n\nInstall job-harness-desktop separately. It renders natively with GPUI (Metal/Vulkan/DirectX) against the same local workspace or a remote `jh serve` endpoint. Private workspace data stays outside this archive. A window grants no browser, mail, calendar or model credentials.\n\n{documentation}/blob/main/apps/desktop/README.md\n"
         ),
     }
 }
@@ -605,7 +605,7 @@ mod tests {
             installation(Component::Local, false, false)
                 .contains("no weights or vendor native libraries")
         );
-        assert!(installation(Component::Desktop, false, false).contains("platform webview"));
+        assert!(installation(Component::Desktop, false, false).contains("GPUI"));
     }
     #[test]
     fn macos_desktop_archive_has_one_executable_inside_a_real_app_bundle() {

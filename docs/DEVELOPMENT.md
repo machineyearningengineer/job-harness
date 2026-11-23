@@ -24,7 +24,7 @@ Source-built binaries and `jh` commands run inside this checkout automatically t
 
 ## Cutting a release
 
-1. Bump `version` in `Cargo.toml`, `apps/desktop/Cargo.toml`, `apps/desktop/tauri.conf.json`, and `providers/local/native/Cargo.toml`, and refresh lockfiles.
+1. Bump `version` in `Cargo.toml`, `apps/desktop/Cargo.toml`, and `providers/local/native/Cargo.toml`, and refresh lockfiles.
 2. Add release notes in `docs/releases/vX.Y.Z.md` and update `CHANGELOG.md`.
 3. Pass all checks above, commit, push `main`, and push tag `vX.Y.Z`.
 4. Dispatch `.github/workflows/release.yml` with `tag=vX.Y.Z` and `confirm_full_release=true` to build all five native targets and publish checksummed archives (`SHA256SUMS`).

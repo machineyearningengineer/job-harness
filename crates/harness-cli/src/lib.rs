@@ -131,13 +131,10 @@ enum Command {
         #[command(subcommand)]
         action: Cv,
     },
-    /// Open a read-only local dashboard. No writable or arbitrary-tool HTTP API.
-    Gui {
-        #[arg(long, default_value = "0")]
-        port: u16,
-        /// Enable explicit reviewed local changes. External actions stay unavailable.
-        #[arg(long)]
-        allow_local_writes: bool,
+    /// Serve typed workspace JSON-RPC and live change events for remote GPUI clients (SSH/Tailscale).
+    Serve {
+        #[arg(long, default_value = "127.0.0.1:7420")]
+        bind: String,
     },
     /// Run a bounded local-tool loop with a local or remote compatible model.
     Agent {
@@ -515,11 +512,8 @@ async fn execute(cli: Cli) -> anyhow::Result<Option<Value>> {
             Cv::Build { content, output } => job_harness_core::cv::build(&root, &content, &output)?,
             Cv::Validate { .. } => unreachable!(),
         },
-        Command::Gui {
-            port,
-            allow_local_writes,
-        } => {
-            job_harness_protocol::dashboard::serve(&root, port, allow_local_writes).await?;
+        Command::Serve { bind } => {
+            job_harness_protocol::remote::serve(&root, &bind).await?;
             return Ok(None);
         }
         Command::Agent {

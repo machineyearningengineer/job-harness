@@ -118,7 +118,7 @@ jobs:
           df -h .
       - name: Linux optional desktop dependencies
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev librsvg2-dev libayatana-appindicator3-dev
+        run: sudo apt-get update && sudo apt-get install -y build-essential pkg-config libssl-dev libfontconfig1-dev libxcb1-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libxkbcommon-x11-dev libvulkan-dev
       - name: Install the pinned Rust toolchain
         run: |
           rustup toolchain install 1.97.1 --profile minimal --component rustfmt,clippy

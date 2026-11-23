@@ -121,7 +121,7 @@ pub fn generate(root: &Path, check: bool) -> Result<Value> {
     let specs =
         serde_json::from_slice::<Value>(&fs::read(root.join("resources/schemas/tools.json"))?)?;
     let result = render(&specs)?;
-    let destination = root.join("gui/contracts.d.ts");
+    let destination = root.join("resources/schemas/contracts.d.ts");
     if check {
         ensure!(
             fs::read_to_string(&destination).ok().as_deref() == Some(&result),

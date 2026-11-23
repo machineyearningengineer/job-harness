@@ -79,7 +79,7 @@ Every new workspace starts **review-only**: all five external action switches in
 | `auto_apply_portal` | `false` | Submits eligible ATS portal applications within your daily cap (`max_daily_submissions` / `daily_channel_limits`) |
 | `auto_send_first_contact_email` | `false` | Sends initial direct-email applications (only after verifying zero prior Sent emails to that contact) |
 | `auto_reply_threads` | `false` | Replies to existing recruiter threads without asking first |
-| `auto_book_calendar` | `false` | Books interview slots on your calendar |
+| `auto_book_calendar` | `false` | Auto-accepts confirmed invites & finishes bookings for slots you approved (always asks before locking in a brand-new time) |
 | `auto_archive_mail` | `false` | Archives verified receipts and rejections |
 
 - **Default (all `false`):** Scouts roles, deduplicates, prepares briefs, and drafts replies/applications for your approval.
@@ -113,7 +113,8 @@ Single native binary (`job-harness`, aliased as `jh`) with zero runtime dependen
 | **Rust Cargo** | `cargo install --git https://github.com/machineyearningengineer/job-harness job-harness` |
 | **Prebuilt archives** | [GitHub Releases](https://github.com/machineyearningengineer/job-harness/releases) *(macOS, Linux, Windows + SHA256SUMS)* |
 | **From cloned checkout** | `./scripts/install.sh` *(Windows: `./scripts/install.ps1`)* |
-| **Optional local web UI** | `jh gui` |
+| **Native GPUI desktop app** | `cargo run --release --manifest-path apps/desktop/Cargo.toml` *(see [apps/desktop/README.md](apps/desktop/README.md))* |
+| **Remote VPS sync server** | `jh serve --bind 127.0.0.1:7420` *(HTTP + SSE for remote desktop clients)* |
 
 ---
 

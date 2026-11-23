@@ -1221,6 +1221,7 @@ dependencies = [
  "notify",
  "reqwest",
  "rmcp",
+ "serde",
  "serde_json",
  "subtle",
  "tempfile",

@@ -5,9 +5,10 @@ Job Harness is a deterministic local state, safety, and workflow engine. It neve
 ## Layers
 
 1. **Core engine (`crates/harness-core`):** SQLite WAL coordinator (`applications/operations/harness.sqlite`), exact deduplication, immutable SHA-256 submission packets, atomic total + per-channel daily caps, derived attention (`review_queue`), and typed v2 JSON schemas (`resources/schemas/tools.json`).
-2. **Transports (`crates/harness-protocol`):** Focused/full stdio MCP server (`rmcp`) and optional loopback web UI (`jh gui`).
-3. **CLI (`crates/harness-cli`):** Single static binary (`job-harness`, aliased as `jh`) with embedded skills, guides, and schemas.
-4. **Private workspace (user-owned):** Canonical Markdown/JSON career facts, CVs, 2-layer company/round briefs, and `harness.sqlite` stored outside this repository.
+2. **Transports (`crates/harness-protocol`):** Focused/full stdio MCP server (`rmcp`) and headless HTTP/SSE workspace server (`jh serve`) for remote VPS clients.
+3. **Desktop UI (`apps/desktop`):** Optional native GPUI desktop app (Metal/Vulkan/DirectX) with live local (`Engine` + filesystem watcher) or remote (`jh serve` SSE) sync, draggable Kanban board, CVs master/track tree, and zero-duplication streaming chat bridge to your host agent.
+4. **CLI (`crates/harness-cli`):** Single static binary (`job-harness`, aliased as `jh`) with embedded skills, guides, and schemas.
+5. **Private workspace (user-owned):** Canonical Markdown/JSON career facts, CVs, 2-layer company/round briefs, and `harness.sqlite` stored outside this repository.
 
 ## Key invariants
 

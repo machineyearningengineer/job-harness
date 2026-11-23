@@ -1,8 +1,8 @@
 //! Thin transports. Domain rules and workspace authority remain in harness-core.
 pub mod context_host;
-pub mod dashboard;
 pub mod mcp;
 pub mod provider;
+pub mod remote;
 
 use serde_json::{Value, json};
 use std::path::Path;

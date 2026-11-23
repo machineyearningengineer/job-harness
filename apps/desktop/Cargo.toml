@@ -2,34 +2,29 @@
 name = "job-harness-desktop"
 version = "0.3.0"
 edition = "2024"
-rust-version = "1.90"
+rust-version = "1.88"
 license = "MIT"
-description = "Optional native window for a private Job Harness workspace"
 publish = false
+description = "Native GPUI desktop interface for Job Harness"
 
-# The desktop renderer is opt-in; it adds no dependencies to the main CLI workspace.
 [workspace]
 
 [dependencies]
+gpui = "0.2.2"
+job-harness-core = { path = "../../crates/harness-core" }
 anyhow = "1"
-axum = "0.8"
-clap = { version = "4", features = ["derive", "env"] }
-harness-core = { package = "job-harness-core", path = "../../crates/harness-core" }
-harness-cli = { package = "job-harness", path = "../../crates/harness-cli" }
-rfd = "0.17"
-job-harness-protocol = { path = "../../crates/harness-protocol" }
-open = "5"
-tauri = { version = "2.12.3", default-features = false, features = ["wry"] }
-tokio = { version = "1", features = ["rt-multi-thread", "net", "sync", "time"] }
-url = "2"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+notify = "8.2"
+reqwest = { version = "0.13.4", default-features = false, features = ["blocking", "json", "rustls"] }
+rfd = "0.15"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4"] }
 
-[build-dependencies]
-tauri-build = { version = "2", features = [] }
+[dev-dependencies]
+tempfile = "3.27.0"
 
 [profile.release]
 lto = "thin"
 codegen-units = 1
 strip = true
-
-[dev-dependencies]
-tempfile = "3"
