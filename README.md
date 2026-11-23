@@ -72,18 +72,17 @@ jh --root "$HOME/Career/workspace" connect mcp
 
 ## Permissions & Control
 
-Every new workspace starts **review-only**: all five external action switches in `config/career-ledger.json` default to `false`.
+Every new workspace starts **review-only**: all four external action switches in `config/career-ledger.json` default to `false`.
 
 | Switch | Default | When turned `true` |
 |---|---|---|
 | `auto_apply_portal` | `false` | Submits eligible ATS portal applications within your daily cap (`max_daily_submissions` / `daily_channel_limits`) |
 | `auto_send_first_contact_email` | `false` | Sends initial direct-email applications (only after verifying zero prior Sent emails to that contact) |
 | `auto_reply_threads` | `false` | Replies to existing recruiter threads without asking first |
-| `auto_book_calendar` | `false` | Auto-accepts confirmed invites & finishes bookings for slots you approved (always asks before locking in a brand-new time) |
 | `auto_archive_mail` | `false` | Archives verified receipts and rejections |
 
 - **Default (all `false`):** Scouts roles, deduplicates, prepares briefs, and drafts replies/applications for your approval.
-- **Always human:** Interviews, offer negotiations, and final decisions.
+- **Always human-confirmed:** Scheduling new interview times (checks live calendar + buffers, suggests 2–3 slots with rationale, then finishes booking & accepts the invite once you pick one), live interviews, and offers.
 - **Local & portable:** Your career history stays in one private folder on your disk — zero cloud lock-in, zero telemetry. Switch between Claude Code, Codex, Cursor, or Hermes without losing history.
 
 ---

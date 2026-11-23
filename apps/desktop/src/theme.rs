@@ -1,79 +1,86 @@
-//! Zeron-inspired translucent dark palette and semantic state colors for GPUI.
+//! Zeron Dark-inspired high-contrast frosted palette for GPUI.
+//! Deep 95%+ charcoal glass keeps subtle macOS vibrancy without text bleed-through.
 use gpui::{Rgba, rgba};
 
 pub fn window_glass() -> Rgba {
-    rgba(0x0d0b14cc)
-}
-pub fn surface() -> Rgba {
-    rgba(0xffffff0a)
-}
-pub fn surface_hover() -> Rgba {
-    rgba(0xffffff13)
+    rgba(0x0b0b0eff)
 }
 pub fn panel_glass() -> Rgba {
-    rgba(0x110e1af0)
+    rgba(0x101015ff)
 }
 pub fn popover_glass() -> Rgba {
-    rgba(0x13101ef7)
+    rgba(0x15151cff)
 }
 pub fn dock_glass() -> Rgba {
-    rgba(0x161322e0)
+    rgba(0x16161eff)
+}
+pub fn interview_group_bg() -> Rgba {
+    rgba(0x141222ff)
+}
+pub fn interview_group_border() -> Rgba {
+    rgba(0x8b7cf628)
+}
+pub fn row_hover() -> Rgba {
+    rgba(0xffffff0e)
+}
+pub fn surface_subtle() -> Rgba {
+    rgba(0xffffff08)
+}
+pub fn surface_active() -> Rgba {
+    rgba(0xffffff16)
 }
 pub fn hairline() -> Rgba {
-    rgba(0xffffff14)
+    rgba(0xffffff12)
 }
 pub fn hairline_strong() -> Rgba {
-    rgba(0xffffff26)
+    rgba(0xffffff24)
 }
 pub fn drop_highlight() -> Rgba {
-    rgba(0x8b5cf624)
+    rgba(0x8b7cf616)
 }
 
 pub fn text_primary() -> Rgba {
-    rgba(0xf4f4f6f2)
+    rgba(0xe8e8eaff)
 }
 pub fn text_secondary() -> Rgba {
-    rgba(0xffffff80)
+    rgba(0xa9a9aeff)
 }
 pub fn text_muted() -> Rgba {
-    rgba(0xffffff59)
+    rgba(0x76767dff)
 }
 
-pub fn amber_bg() -> Rgba {
-    rgba(0xfbbf2414)
+pub fn amber_wash() -> Rgba {
+    rgba(0xfacc1512)
 }
-pub fn amber_border() -> Rgba {
-    rgba(0xfbbf245c)
+pub fn amber_accent() -> Rgba {
+    rgba(0xfacc15ff)
 }
 pub fn amber_text() -> Rgba {
-    rgba(0xfde68aff)
+    rgba(0xfde047ff)
 }
 
-pub fn rose_bg() -> Rgba {
-    rgba(0xfb718510)
-}
-pub fn rose_border() -> Rgba {
-    rgba(0xfb71854c)
-}
 pub fn rose_text() -> Rgba {
-    rgba(0xfda4afff)
+    rgba(0xf87171ff)
+}
+pub fn rose_wash() -> Rgba {
+    rgba(0xf8717118)
 }
 
 pub fn emerald() -> Rgba {
     rgba(0x34d399ff)
 }
 pub fn lavender() -> Rgba {
-    rgba(0xc4b5fdff)
+    rgba(0xa78bfaff)
 }
-pub fn lavender_bg() -> Rgba {
-    rgba(0x8b5cf61e)
+pub fn lavender_wash() -> Rgba {
+    rgba(0x8b7cf61c)
 }
 pub fn lavender_border() -> Rgba {
-    rgba(0xa78bfa4c)
+    rgba(0x8b7cf648)
 }
 pub fn white_solid() -> Rgba {
-    rgba(0xffffffff)
+    rgba(0xf4f4f6ff)
 }
 pub fn ink_dark() -> Rgba {
-    rgba(0x111116ff)
+    rgba(0x0b0b0eff)
 }

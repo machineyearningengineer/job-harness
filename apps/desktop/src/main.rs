@@ -1,6 +1,7 @@
 //! Native GPUI desktop binary for Job Harness.
 mod app;
 mod chat_bridge;
+mod icons;
 mod theme;
 mod transport;
 
@@ -44,7 +45,6 @@ fn resolve_target() -> WorkspaceTarget {
     {
         return WorkspaceTarget::Local(PathBuf::from(root));
     }
-    // Fall back to saved user host setting (~/.config/job-harness/settings.json)
     if let Ok(home) = std::env::var("HOME") {
         let cfg = PathBuf::from(&home).join(".config/job-harness/settings.json");
         if let Ok(bytes) = std::fs::read(&cfg)
@@ -53,30 +53,48 @@ fn resolve_target() -> WorkspaceTarget {
         {
             return WorkspaceTarget::Local(PathBuf::from(ws));
         }
-        let fallback = PathBuf::from(&home).join("Career/workspace");
-        return WorkspaceTarget::Local(fallback);
+        return WorkspaceTarget::Local(PathBuf::from(&home).join("Career/workspace"));
     }
     WorkspaceTarget::Local(PathBuf::from("."))
 }
 
-fn main() {
-    let target = resolve_target();
-    Application::new().run(move |cx: &mut App| {
-        let bounds = Bounds::centered(None, size(px(1220.0), px(760.0)), cx);
-        cx.open_window(
+fn open_main_window(target: WorkspaceTarget, cx: &mut App) {
+    let bounds = Bounds::centered(None, size(px(1260.0), px(780.0)), cx);
+    let handle = cx
+        .open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
                 titlebar: Some(TitlebarOptions {
                     title: Some("Job Harness".into()),
                     appears_transparent: true,
-                    traffic_light_position: Some(point(px(14.0), px(14.0))),
+                    traffic_light_position: Some(point(px(14.0), px(15.0))),
                 }),
-                window_background: WindowBackgroundAppearance::Blurred,
+                window_background: WindowBackgroundAppearance::Opaque,
                 ..Default::default()
             },
-            |window, cx| cx.new(|cx| JobHarnessApp::new(target, window, cx)),
+            |window, cx| {
+                window.activate_window();
+                cx.new(|cx| JobHarnessApp::new(target, window, cx))
+            },
         )
         .expect("open Job Harness GPUI window");
-        cx.activate(true);
+    let _ = handle.update(cx, |_, window, _| window.activate_window());
+    cx.activate(true);
+}
+
+fn main() {
+    let target = resolve_target();
+    let reopen_target = target.clone();
+    let app = Application::new().with_assets(icons::EmbeddedIcons);
+    app.on_reopen(move |cx: &mut App| {
+        if let Some(win) = cx.windows().into_iter().next() {
+            let _ = win.update(cx, |_, window, _| window.activate_window());
+            cx.activate(true);
+        } else {
+            open_main_window(reopen_target.clone(), cx);
+        }
+    });
+    app.run(move |cx: &mut App| {
+        open_main_window(target, cx);
     });
 }

@@ -23,11 +23,7 @@ pub enum WorkspaceTarget {
 impl WorkspaceTarget {
     pub fn label(&self) -> String {
         match self {
-            Self::Local(p) => p
-                .file_name()
-                .and_then(|s| s.to_str())
-                .unwrap_or("workspace")
-                .to_owned(),
+            Self::Local(_) => "Job Harness".to_owned(),
             Self::Remote { url, .. } => format!(
                 "VPS · {}",
                 url.trim_start_matches("http://")
@@ -55,6 +51,7 @@ pub struct RoleCard {
     pub column: &'static str,
     pub urgency: String,
     pub urgency_reason: String,
+    pub quiet_days: Option<u64>,
     pub note_line: Option<String>,
     pub checked: String,
     pub scheduled_start: Option<String>,
@@ -91,7 +88,6 @@ pub struct PermissionsState {
     pub auto_apply_portal: bool,
     pub auto_send_first_contact_email: bool,
     pub auto_reply_threads: bool,
-    pub auto_book_calendar: bool,
     pub auto_archive_mail: bool,
     pub brief_lead_time_minutes: i64,
 }
@@ -102,7 +98,6 @@ impl Default for PermissionsState {
             auto_apply_portal: false,
             auto_send_first_contact_email: false,
             auto_reply_threads: false,
-            auto_book_calendar: false,
             auto_archive_mail: false,
             brief_lead_time_minutes: 90,
         }
@@ -154,11 +149,14 @@ pub fn column_to_stage(column: &str) -> &'static str {
         "Saved" => "saved",
         "Applied" => "applied",
         "Screening" => "screening",
-        "Interviews" => "technical",
+        "Interviews" | "Technical" => "technical",
+        "Final" => "final",
+        "Offer" => "offer",
         _ => "closed",
     }
 }
 
+#[derive(Clone)]
 pub struct WorkspaceClient {
     pub target: WorkspaceTarget,
     http: reqwest::blocking::Client,
@@ -253,9 +251,6 @@ impl WorkspaceClient {
             auto_reply_threads: perms
                 .and_then(|p| p["auto_reply_threads"].as_bool())
                 .unwrap_or(false),
-            auto_book_calendar: perms
-                .and_then(|p| p["auto_book_calendar"].as_bool())
-                .unwrap_or(false),
             auto_archive_mail: perms
                 .and_then(|p| p["auto_archive_mail"].as_bool())
                 .unwrap_or(false),
@@ -283,7 +278,7 @@ impl WorkspaceClient {
                         .or_else(|| item["title"].as_str())
                         .unwrap_or("Role")
                         .to_owned(),
-                    detail: reason,
+                    detail: concise_reason(&reason),
                     record_path: rpath,
                 });
             }
@@ -353,6 +348,7 @@ impl WorkspaceClient {
             )
             .to_ascii_lowercase();
 
+            let quiet_days = extract_quiet_days(&urgency_reason);
             let card = RoleCard {
                 record_path,
                 company,
@@ -361,6 +357,7 @@ impl WorkspaceClient {
                 column,
                 urgency,
                 urgency_reason,
+                quiet_days,
                 note_line,
                 checked,
                 scheduled_start,
@@ -728,11 +725,38 @@ fn short_time_label(iso: &str) -> String {
     iso.chars().take(16).collect()
 }
 
-fn extract_quiet_badge(reason: &str) -> Option<String> {
+fn extract_quiet_days(reason: &str) -> Option<u64> {
     let idx = reason.find("quiet for ")?;
     let rest = &reason[idx + 10..];
-    let days = rest.split_whitespace().next()?;
-    Some(format!("Quiet {days}"))
+    let token = rest.split_whitespace().next()?;
+    token.trim_end_matches('d').parse::<u64>().ok()
+}
+
+fn extract_quiet_badge(reason: &str) -> Option<String> {
+    let days = extract_quiet_days(reason)?;
+    Some(format!("Quiet {days}d"))
+}
+
+fn concise_reason(reason: &str) -> String {
+    if let Some(days) = extract_quiet_days(reason) {
+        let lower = reason.to_ascii_lowercase();
+        let stage = if lower.contains("introduction") {
+            "Intro"
+        } else if lower.contains("screening") {
+            "Screening"
+        } else if lower.contains("technical") {
+            "Technical"
+        } else if lower.contains("final") {
+            "Final"
+        } else {
+            "Active"
+        };
+        return format!("Quiet {days}d · {stage}");
+    }
+    if reason.contains("within 24 hours") {
+        return "Interview within 24h".into();
+    }
+    reason.split(" (").next().unwrap_or(reason).to_owned()
 }
 
 fn build_cv_tree(local_root: Option<&Path>, settings: &Value, track_fit: &Value) -> Vec<CvNode> {
