@@ -1844,59 +1844,12 @@ impl JobHarnessApp {
         col_cards: Vec<&RoleCard>,
         col_total: usize,
         expandable_interviews: bool,
+        collapse_interviews_inline: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let scroll_handle = self.col_scrolls.get(col_name).cloned();
-        let hidden_by_attention = self.only_attention && col_total == 0;
-        let is_collapsed = self.collapsed_cols.contains(col_name) && !hidden_by_attention;
-
-        if is_collapsed {
-            let short: String = col_name.chars().take(3).collect();
-            let epoch = self.collapse_anim_epoch;
-            return div()
-                .id(SharedString::from(format!("col-collapsed-{col_name}")))
-                .mr_3()
-                .h_full()
-                .flex_shrink_0()
-                .w(px(40.0))
-                .rounded(px(9.0))
-                .bg(theme::surface_subtle())
-                .hover(|s| s.bg(theme::row_hover()))
-                .drag_over::<DragCard>(|style, _, _, _| style.bg(theme::drop_highlight()))
-                .on_drop(cx.listener(move |this, drag: &DragCard, _, cx| {
-                    this.move_card_optimistic(drag, col_name, cx);
-                }))
-                .cursor_pointer()
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.collapsed_cols.remove(col_name);
-                    this.collapse_anim_epoch = this.collapse_anim_epoch.wrapping_add(1);
-                    cx.notify();
-                }))
-                .py_3()
-                .flex()
-                .flex_col()
-                .items_center()
-                .gap_2()
-                .child(div().text_xs().text_color(theme::text_muted()).child("›"))
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(theme::text_secondary())
-                        .child(short),
-                )
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(theme::text_muted())
-                        .child(col_total.to_string()),
-                )
-                .with_animation(
-                    SharedString::from(format!("col-rail-{col_name}-{epoch}")),
-                    Animation::new(Duration::from_millis(160)).with_easing(ease_out_quint()),
-                    |el, t| el.opacity(0.6 + 0.4 * t),
-                )
-                .into_any_element();
-        }
+        let hidden =
+            (self.only_attention && col_total == 0) || self.collapsed_cols.contains(col_name);
 
         let col_div = div()
             .id(SharedString::from(format!("col-{col_name}")))
@@ -1940,6 +1893,24 @@ impl JobHarnessApp {
                             }))
                             .child("Interviews  ›")
                             .into_any_element()
+                    } else if collapse_interviews_inline {
+                        div()
+                            .id("collapse-interviews-col")
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .cursor_pointer()
+                            .text_xs()
+                            .text_color(theme::lavender())
+                            .hover(|s| s.text_color(theme::text_primary()))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.interviews_expanded = false;
+                                this.interviews_anim_epoch =
+                                    this.interviews_anim_epoch.wrapping_add(1);
+                                cx.notify();
+                            }))
+                            .child(format!("‹  {col_name}"))
+                            .into_any_element()
                     } else {
                         div()
                             .text_xs()
@@ -1958,28 +1929,36 @@ impl JobHarnessApp {
                                     .text_color(theme::text_muted())
                                     .child(col_total.to_string()),
                             )
-                            .when(!expandable_interviews, |d| {
-                                d.child(
-                                    div()
-                                        .id(SharedString::from(format!("collapse-col-{col_name}")))
-                                        .px(px(3.0))
-                                        .rounded(px(4.0))
-                                        .cursor_pointer()
-                                        .hover(|s| {
-                                            s.bg(theme::row_hover())
-                                                .text_color(theme::text_primary())
-                                        })
-                                        .text_xs()
-                                        .text_color(theme::text_muted())
-                                        .on_click(cx.listener(move |this, _, _, cx| {
-                                            this.collapsed_cols.insert(col_name);
-                                            this.collapse_anim_epoch =
-                                                this.collapse_anim_epoch.wrapping_add(1);
-                                            cx.notify();
-                                        }))
-                                        .child("‹"),
-                                )
-                            }),
+                            .when(
+                                !expandable_interviews
+                                    && !collapse_interviews_inline
+                                    && !matches!(col_name, "Final" | "Offer"),
+                                |d| {
+                                    d.child(
+                                        div()
+                                            .id(SharedString::from(format!(
+                                                "collapse-col-{col_name}"
+                                            )))
+                                            .px(px(3.0))
+                                            .rounded(px(4.0))
+                                            .cursor_pointer()
+                                            .hover(|s| {
+                                                s.bg(theme::row_hover())
+                                                    .text_color(theme::text_primary())
+                                            })
+                                            .text_xs()
+                                            .text_color(theme::text_muted())
+                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                this.collapsed_cols.insert(col_name);
+                                                this.attention_toggled = true;
+                                                this.collapse_anim_epoch =
+                                                    this.collapse_anim_epoch.wrapping_add(1);
+                                                cx.notify();
+                                            }))
+                                            .child("−"),
+                                    )
+                                },
+                            ),
                     ),
             )
             .child({
@@ -2108,52 +2087,19 @@ impl JobHarnessApp {
                 }))
             });
 
-        // Smoothly collapse empty columns to 0px when Attention-only is active so
-        // active columns glide cleanly into place, and expand back when toggled off.
-        if !self.attention_toggled {
-            return div()
-                .mr_4()
-                .flex_shrink_0()
-                .h_full()
-                .child(col_div)
-                .into_any_element();
-        }
-        let epoch = self.attention_anim_epoch;
-        if hidden_by_attention {
-            div()
-                .h_full()
-                .flex_shrink_0()
-                .overflow_hidden()
-                .child(col_div)
-                .with_animation(
-                    SharedString::from(format!("att-hide-{col_name}-{epoch}")),
-                    Animation::new(Duration::from_millis(220)).with_easing(ease_out_quint()),
-                    |el, t| {
-                        let inv = 1.0 - t;
-                        el.w(px(268.0 * inv)).mr(px(16.0 * inv)).opacity(inv)
-                    },
-                )
-                .into_any_element()
-        } else if !self.only_attention {
-            div()
-                .h_full()
-                .flex_shrink_0()
-                .overflow_hidden()
-                .child(col_div)
-                .with_animation(
-                    SharedString::from(format!("att-show-{col_name}-{epoch}")),
-                    Animation::new(Duration::from_millis(220)).with_easing(ease_out_quint()),
-                    |el, t| el.w(px(268.0 * t)).mr(px(16.0 * t)).opacity(t),
-                )
-                .into_any_element()
-        } else {
-            div()
-                .mr_4()
-                .flex_shrink_0()
-                .h_full()
-                .child(col_div)
-                .into_any_element()
-        }
+        // Single standardized DRY clip-rect column slide (no text reflow, zero squashed rails)
+        let epoch = self
+            .attention_anim_epoch
+            .wrapping_add(self.collapse_anim_epoch);
+        clip_column_slide(
+            col_div,
+            col_name,
+            268.0,
+            16.0,
+            hidden,
+            self.attention_toggled,
+            epoch,
+        )
     }
 
     fn render_board(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -2247,6 +2193,35 @@ impl JobHarnessApp {
                             .flex()
                             .items_center()
                             .gap_2()
+                            // Clean Linear-style restore links for any hidden columns (zero squashed vertical rails)
+                            .children(["Saved", "Applied", "Screening"].into_iter().filter_map(
+                                |name| {
+                                    if !self.collapsed_cols.contains(name) {
+                                        return None;
+                                    }
+                                    let count = cards.iter().filter(|c| c.column == name).count();
+                                    Some(
+                                        div()
+                                            .id(SharedString::from(format!("restore-col-{name}")))
+                                            .px_2()
+                                            .py_1()
+                                            .rounded(px(6.0))
+                                            .bg(theme::surface_subtle())
+                                            .hover(|s| s.bg(theme::row_hover()))
+                                            .cursor_pointer()
+                                            .text_xs()
+                                            .text_color(theme::text_secondary())
+                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                this.collapsed_cols.remove(name);
+                                                this.attention_toggled = true;
+                                                this.collapse_anim_epoch =
+                                                    this.collapse_anim_epoch.wrapping_add(1);
+                                                cx.notify();
+                                            }))
+                                            .child(format!("+ {name} ({count})")),
+                                    )
+                                },
+                            ))
                             .child(
                                 div()
                                     .id("toggle-attention-only")
@@ -2365,7 +2340,7 @@ impl JobHarnessApp {
                             .take(28)
                             .collect();
                         let col_total = cards.iter().filter(|c| c.column == col_name).count();
-                        self.render_kanban_column(col_name, col_cards, col_total, false, cx)
+                        self.render_kanban_column(col_name, col_cards, col_total, false, false, cx)
                     }))
                     .child(if !self.interviews_expanded {
                         let col_cards: Vec<&RoleCard> = cards
@@ -2379,66 +2354,58 @@ impl JobHarnessApp {
                             col_cards,
                             interviews_total,
                             true,
+                            false,
                             cx,
                         )
-                        .into_any_element()
                     } else {
+                        // Zero downward content shift: headers sit flush at y=0 with Saved/Applied/Screening,
+                        // inside a subtle distinct surface tint with standardized clip-rect width slide.
                         let epoch = self.interviews_anim_epoch;
+                        let group_w = 268.0 * 3.0 + 16.0 * 3.0 + 16.0;
                         div()
                             .h_full()
+                            .mr_4()
                             .flex_shrink_0()
-                            .px_3()
-                            .py_2()
-                            .rounded(px(12.0))
-                            .bg(theme::interview_group_bg())
-                            .border_1()
-                            .border_color(theme::interview_group_border())
-                            .flex()
-                            .flex_col()
-                            .gap_2()
+                            .overflow_hidden()
                             .child(
                                 div()
-                                    .px_1()
+                                    .w(px(group_w))
+                                    .h_full()
+                                    .px_2()
+                                    .rounded(px(12.0))
+                                    .bg(theme::interview_group_bg())
+                                    .border_1()
+                                    .border_color(theme::interview_group_border())
                                     .flex()
-                                    .items_center()
-                                    .justify_between()
-                                    .child(
-                                        div()
-                                            .id("collapse-interviews-col")
-                                            .cursor_pointer()
-                                            .text_xs()
-                                            .text_color(theme::lavender())
-                                            .hover(|s| s.text_color(theme::text_primary()))
-                                            .on_click(cx.listener(|this, _, _, cx| {
-                                                this.interviews_expanded = false;
-                                                cx.notify();
-                                            }))
-                                            .child(format!("‹  Interviews ({interviews_total})")),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_xs()
-                                            .text_color(theme::text_muted())
-                                            .child("Interview stages"),
-                                    ),
+                                    .children(interview_stages.into_iter().enumerate().map(
+                                        |(idx, (label, stage))| {
+                                            let stage_cards: Vec<&RoleCard> = cards
+                                                .iter()
+                                                .copied()
+                                                .filter(|c| c.stage == stage)
+                                                .take(28)
+                                                .collect();
+                                            let total =
+                                                cards.iter().filter(|c| c.stage == stage).count();
+                                            self.render_kanban_column(
+                                                label,
+                                                stage_cards,
+                                                total,
+                                                false,
+                                                idx == 0,
+                                                cx,
+                                            )
+                                        },
+                                    )),
                             )
-                            .child(div().flex_1().min_h_0().flex().gap_3().children(
-                                interview_stages.into_iter().map(|(label, stage)| {
-                                    let stage_cards: Vec<&RoleCard> = cards
-                                        .iter()
-                                        .copied()
-                                        .filter(|c| c.stage == stage)
-                                        .take(28)
-                                        .collect();
-                                    let total = cards.iter().filter(|c| c.stage == stage).count();
-                                    self.render_kanban_column(label, stage_cards, total, false, cx)
-                                }),
-                            ))
                             .with_animation(
                                 SharedString::from(format!("iv-expand-{epoch}")),
-                                Animation::new(Duration::from_millis(180))
+                                Animation::new(Duration::from_millis(200))
                                     .with_easing(ease_out_quint()),
-                                |el, t| el.opacity(t),
+                                move |el, t| {
+                                    let w = 268.0 + (group_w - 268.0) * t;
+                                    el.w(px(w)).opacity(0.75 + 0.25 * t)
+                                },
                             )
                             .into_any_element()
                     })
@@ -2453,6 +2420,7 @@ impl JobHarnessApp {
                                     "Archive",
                                     archive_cards,
                                     archive_total,
+                                    false,
                                     false,
                                     cx,
                                 ))
@@ -4103,6 +4071,58 @@ fn switch_pill(on: bool) -> impl IntoElement {
                 .rounded(px(99.0))
                 .bg(theme::white_solid()),
         )
+}
+
+/// Standardized DRY clip-rect column slide (Zeron motion pattern: fixed inner width,
+/// animating outer clip box so zero text re-wraps mid-flight).
+fn clip_column_slide(
+    inner: impl IntoElement + 'static,
+    name: &'static str,
+    width: f32,
+    gap: f32,
+    hidden: bool,
+    animated: bool,
+    epoch: u64,
+) -> AnyElement {
+    if !animated {
+        if hidden {
+            return div().w(px(0.0)).into_any_element();
+        }
+        return div()
+            .mr(px(gap))
+            .flex_shrink_0()
+            .h_full()
+            .child(inner)
+            .into_any_element();
+    }
+    if hidden {
+        div()
+            .h_full()
+            .flex_shrink_0()
+            .overflow_hidden()
+            .child(inner)
+            .with_animation(
+                SharedString::from(format!("col-hide-{name}-{epoch}")),
+                Animation::new(Duration::from_millis(200)).with_easing(ease_out_quint()),
+                move |el, t| {
+                    let inv = 1.0 - t;
+                    el.w(px(width * inv)).mr(px(gap * inv)).opacity(inv)
+                },
+            )
+            .into_any_element()
+    } else {
+        div()
+            .h_full()
+            .flex_shrink_0()
+            .overflow_hidden()
+            .child(inner)
+            .with_animation(
+                SharedString::from(format!("col-show-{name}-{epoch}")),
+                Animation::new(Duration::from_millis(200)).with_easing(ease_out_quint()),
+                move |el, t| el.w(px(width * t)).mr(px(gap * t)).opacity(t),
+            )
+            .into_any_element()
+    }
 }
 
 fn title_case_stage(stage: &str) -> String {
