@@ -166,6 +166,7 @@ fn run_streaming(
     let stdout = child.stdout.take().context("Missing stdout pipe")?;
     let reader = BufReader::new(stdout);
     let mut emitted_any = false;
+    let mut saw_incremental_delta = false;
 
     for line in reader.lines() {
         if cancel.load(Ordering::Relaxed) {
@@ -178,9 +179,14 @@ fn run_streaming(
             continue;
         }
         if json_stream && let Ok(v) = serde_json::from_str::<Value>(&line) {
-            if let Some(text) = extract_stream_text(&v) {
+            if let Some(chunk) = extract_incremental_delta(&v) {
                 emitted_any = true;
-                let _ = tx.send(StreamEvent::Delta(text));
+                saw_incremental_delta = true;
+                let _ = tx.send(StreamEvent::Delta(chunk));
+            } else if !saw_incremental_delta && let Some(final_text) = extract_final_text(&v) {
+                // Only emit final summary object if the runtime didn't already stream deltas
+                emitted_any = true;
+                let _ = tx.send(StreamEvent::Delta(final_text));
             } else if let Some(status) = extract_stream_status(&v) {
                 let _ = tx.send(StreamEvent::Status(status));
             }
@@ -207,13 +213,11 @@ fn run_streaming(
     Ok(())
 }
 
-fn extract_stream_text(v: &Value) -> Option<String> {
-    for key in ["delta", "text", "content", "message", "response"] {
-        if let Some(s) = v.get(key).and_then(Value::as_str)
-            && !s.is_empty()
-        {
-            return Some(s.to_owned());
-        }
+fn extract_incremental_delta(v: &Value) -> Option<String> {
+    if let Some(s) = v.get("delta").and_then(Value::as_str)
+        && !s.is_empty()
+    {
+        return Some(s.to_owned());
     }
     if let Some(s) = v
         .pointer("/choices/0/delta/content")
@@ -221,6 +225,27 @@ fn extract_stream_text(v: &Value) -> Option<String> {
         && !s.is_empty()
     {
         return Some(s.to_owned());
+    }
+    if let Some(kind) = v.get("type").and_then(Value::as_str)
+        && kind.contains("delta")
+        && let Some(s) = v
+            .get("text")
+            .or_else(|| v.get("content"))
+            .and_then(Value::as_str)
+        && !s.is_empty()
+    {
+        return Some(s.to_owned());
+    }
+    None
+}
+
+fn extract_final_text(v: &Value) -> Option<String> {
+    for key in ["response", "message", "content", "text"] {
+        if let Some(s) = v.get(key).and_then(Value::as_str)
+            && !s.is_empty()
+        {
+            return Some(s.to_owned());
+        }
     }
     None
 }
@@ -297,7 +322,16 @@ mod tests {
     #[test]
     fn parses_stream_json_text_and_tool_status() {
         let delta = serde_json::json!({"delta": "Hello world"});
-        assert_eq!(extract_stream_text(&delta).as_deref(), Some("Hello world"));
+        assert_eq!(
+            extract_incremental_delta(&delta).as_deref(),
+            Some("Hello world")
+        );
+        let final_msg = serde_json::json!({"response": "Done reply"});
+        assert_eq!(extract_incremental_delta(&final_msg), None);
+        assert_eq!(
+            extract_final_text(&final_msg).as_deref(),
+            Some("Done reply")
+        );
         let status = serde_json::json!({"tool": "review_queue"});
         assert_eq!(
             extract_stream_status(&status).as_deref(),

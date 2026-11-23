@@ -162,6 +162,17 @@ pub struct WorkspaceClient {
     http: reqwest::blocking::Client,
 }
 
+#[derive(Clone, Debug, Default)]
+pub struct RoleOverviewDetails {
+    pub salary: Option<String>,
+    pub location_mode: Option<String>,
+    pub fit_summary: Option<String>,
+    pub status_detail: Option<String>,
+    pub packet_cv: Option<String>,
+    pub packet_sha: Option<String>,
+    pub full_text: String,
+}
+
 impl WorkspaceClient {
     pub fn new(target: WorkspaceTarget) -> Self {
         let http = reqwest::blocking::Client::builder()
@@ -553,6 +564,77 @@ impl WorkspaceClient {
         Ok(format!("Moved to {target_stage}"))
     }
 
+    /// Loads a role's canonical Markdown record + linked packet metadata off-thread
+    /// and extracts at-a-glance Overview fields (salary, location/work mode, fit summary, CV proof).
+    pub fn load_role_details(&self, record_path: &str) -> Result<RoleOverviewDetails> {
+        let res = self.call("read_record", json!({"path": record_path}))?;
+        if res["ok"] != true {
+            bail!(
+                "{}",
+                res["error"]["message"]
+                    .as_str()
+                    .unwrap_or("Could not read role record")
+            );
+        }
+        let raw = res["data"]["text"]
+            .as_str()
+            .or_else(|| res["data"]["content"].as_str())
+            .unwrap_or("");
+        let tracking = parse_tracking_json(raw);
+        let status_detail = tracking
+            .as_ref()
+            .and_then(|t| t["status_detail"].as_str())
+            .map(str::to_owned);
+        let mut packet_sha = tracking
+            .as_ref()
+            .and_then(|t| t["record_evidence"].as_str())
+            .and_then(|ev| {
+                ev.rsplit('/')
+                    .next()
+                    .and_then(|f| f.strip_suffix(".json"))
+                    .filter(|h| h.len() == 64)
+                    .map(str::to_owned)
+            });
+        let mut packet_cv = None;
+        if let Some(root) = self.target.local_root()
+            && let Some(ev_rel) = tracking
+                .as_ref()
+                .and_then(|t| t["record_evidence"].as_str())
+        {
+            let full_ev = if ev_rel.starts_with("applications/") {
+                root.join(ev_rel)
+            } else {
+                root.join("applications").join(ev_rel)
+            };
+            if let Ok(bytes) = fs::read(&full_ev)
+                && let Ok(pkt) = serde_json::from_slice::<Value>(&bytes)
+            {
+                packet_cv = pkt["cv"]["original_path"]
+                    .as_str()
+                    .or_else(|| pkt["cv"]["path"].as_str())
+                    .map(str::to_owned);
+                if packet_sha.is_none() {
+                    packet_sha = pkt["cv"]["sha256"].as_str().map(str::to_owned);
+                }
+            }
+        }
+        let cleaned = strip_tracking_comment(raw);
+        let fit_summary = extract_fit_summary(&cleaned);
+        let salary = extract_salary_hint(&cleaned);
+        let location_mode = extract_location_hint(&cleaned);
+        let full_text: String = cleaned.trim().chars().take(2800).collect();
+
+        Ok(RoleOverviewDetails {
+            salary,
+            location_mode,
+            fit_summary,
+            status_detail,
+            packet_cv,
+            packet_sha,
+            full_text,
+        })
+    }
+
     pub fn read_text_preview(&self, rel_path: &str) -> Result<String> {
         let res = self.call("read_record", json!({"path": rel_path}))?;
         if res["ok"] != true {
@@ -563,9 +645,18 @@ impl WorkspaceClient {
                     .unwrap_or("Could not read cited file")
             );
         }
-        let content = res["data"]["content"].as_str().unwrap_or("");
-        let trimmed: String = content.chars().take(1400).collect();
-        Ok(trimmed)
+        let raw = res["data"]["text"]
+            .as_str()
+            .or_else(|| res["data"]["content"].as_str())
+            .unwrap_or("");
+        // Strip machine tracking comment block for clean human reading
+        let cleaned = strip_tracking_comment(raw);
+        let trimmed: String = cleaned.trim().chars().take(2400).collect();
+        if trimmed.is_empty() {
+            Ok("Empty record.".into())
+        } else {
+            Ok(trimmed)
+        }
     }
 
     pub fn update_ledger_config(&self, mutate: impl FnOnce(&mut Value)) -> Result<()> {
@@ -831,6 +922,109 @@ fn build_cv_tree(local_root: Option<&Path>, settings: &Value, track_fit: &Value)
         });
     }
     nodes
+}
+
+fn parse_tracking_json(raw: &str) -> Option<Value> {
+    let start = raw.find("<!-- tracking")?;
+    let body = &raw[start + "<!-- tracking".len()..];
+    let end = body.find("-->")?;
+    serde_json::from_str::<Value>(body[..end].trim()).ok()
+}
+
+fn extract_fit_summary(cleaned: &str) -> Option<String> {
+    let mut in_fit = false;
+    for line in cleaned.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("## ") {
+            in_fit = trimmed.to_ascii_lowercase().contains("vacancy")
+                || trimmed.to_ascii_lowercase().contains("fit")
+                || trimmed.to_ascii_lowercase().contains("summary");
+            continue;
+        }
+        if in_fit
+            && !trimmed.is_empty()
+            && !trimmed.starts_with("Source URL:")
+            && !trimmed.starts_with("Evidence:")
+        {
+            return Some(trimmed.chars().take(260).collect());
+        }
+    }
+    None
+}
+
+fn extract_salary_hint(text: &str) -> Option<String> {
+    for tok in text.split_whitespace() {
+        let clean = tok.trim_matches(|c: char| matches!(c, '(' | ')' | ',' | '.' | ';'));
+        if (clean.starts_with('£') || clean.starts_with('$') || clean.starts_with('€'))
+            && clean.chars().skip(1).any(|c| c.is_ascii_digit())
+        {
+            return Some(clean.to_owned());
+        }
+    }
+    None
+}
+
+fn extract_location_hint(text: &str) -> Option<String> {
+    let lower = text.to_ascii_lowercase();
+    let city = if lower.contains("london") {
+        Some("London")
+    } else if lower.contains("uk ") || lower.contains("united kingdom") {
+        Some("UK")
+    } else if lower.contains("eu ") || lower.contains("europe") {
+        Some("Europe")
+    } else if lower.contains("us ") || lower.contains("new york") || lower.contains("san francisco")
+    {
+        Some("US")
+    } else {
+        None
+    };
+    let mode = if lower.contains("fully remote") || lower.contains("uk remote") {
+        Some("Remote")
+    } else if lower.contains("two ") && lower.contains("office") {
+        Some("Hybrid (2d/wk)")
+    } else if lower.contains("three ") && lower.contains("office") {
+        Some("Hybrid (3d/wk)")
+    } else if lower.contains("hybrid") {
+        Some("Hybrid")
+    } else if lower.contains("remote") {
+        Some("Remote")
+    } else if lower.contains("onsite") || lower.contains("on-site") {
+        Some("Onsite")
+    } else {
+        None
+    };
+    match (city, mode) {
+        (Some(c), Some(m)) => Some(format!("{c} · {m}")),
+        (Some(c), None) => Some(c.into()),
+        (None, Some(m)) => Some(m.into()),
+        (None, None) => None,
+    }
+}
+
+fn strip_tracking_comment(raw: &str) -> String {
+    let mut out = raw.to_owned();
+    while let Some(start) = out.find("<!-- tracking") {
+        if let Some(end_rel) = out[start..].find("-->") {
+            out.replace_range(start..start + end_rel + 3, "");
+        } else {
+            break;
+        }
+    }
+    out
+}
+
+pub fn open_url(url: &str) {
+    if !(url.starts_with("https://") || url.starts_with("http://")) {
+        return;
+    }
+    #[cfg(target_os = "macos")]
+    let _ = std::process::Command::new("open").arg(url).spawn();
+    #[cfg(target_os = "linux")]
+    let _ = std::process::Command::new("xdg-open").arg(url).spawn();
+    #[cfg(target_os = "windows")]
+    let _ = std::process::Command::new("cmd")
+        .args(["/C", "start", "", url])
+        .spawn();
 }
 
 pub fn open_in_system(path: &Path) {

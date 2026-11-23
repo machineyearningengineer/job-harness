@@ -5,8 +5,8 @@ use crate::{
     chat_bridge::{AgentRuntime, StreamEvent, extract_citations},
     theme,
     transport::{
-        RoleCard, WorkspaceClient, WorkspaceSnapshot, WorkspaceTarget, column_to_stage,
-        open_in_system, reveal_in_file_manager, spawn_change_listener,
+        RoleCard, RoleOverviewDetails, WorkspaceClient, WorkspaceSnapshot, WorkspaceTarget,
+        column_to_stage, open_in_system, open_url, reveal_in_file_manager, spawn_change_listener,
     },
 };
 use gpui::{
@@ -182,12 +182,15 @@ pub struct JobHarnessApp {
 
     // Selected role & citation drilldown
     selected_role: Option<RoleCard>,
+    role_details: Option<RoleOverviewDetails>,
+    archive_anim_epoch: u64,
     citation_title: Option<String>,
     citation_body: Option<String>,
 
-    // Chat & quick-ask (streaming + queue + cancel)
+    // Chat & quick-ask (streaming + queue + cancel + attached role context chip)
     chat_messages: Vec<ChatMessage>,
     chat_input: String,
+    attached_role: Option<(String, String)>,
     quick_input: String,
     quick_popover_open: bool,
     quick_reply_preview: String,
@@ -268,10 +271,13 @@ impl JobHarnessApp {
             collapse_anim_epoch: 1,
             last_moved_record: None,
             selected_role: None,
+            role_details: None,
+            archive_anim_epoch: 1,
             citation_title: None,
             citation_body: None,
             chat_messages: Vec::new(),
             chat_input: String::new(),
+            attached_role: None,
             quick_input: String::new(),
             quick_popover_open: false,
             quick_reply_preview: String::new(),
@@ -413,15 +419,45 @@ impl JobHarnessApp {
         if self.right_drawer == RightDrawer::Closed {
             self.drawer_anim_epoch = self.drawer_anim_epoch.wrapping_add(1);
         }
+        let rec_path = card.record_path.clone();
         self.selected_role = Some(card);
+        self.role_details = None;
         self.drawer_tab = tab;
         self.right_drawer = RightDrawer::Role;
         self.citation_title = None;
         self.citation_body = None;
+        self.load_role_details_async(rec_path, cx);
         if tab == DrawerTab::Brief {
             self.load_selected_brief_async(cx);
         }
         cx.notify();
+    }
+
+    fn load_role_details_async(&mut self, record_path: String, cx: &mut Context<Self>) {
+        let client = self.client.clone();
+        let expected_path = record_path.clone();
+        cx.spawn(async move |this, cx| {
+            let res = cx
+                .background_executor()
+                .spawn(async move { client.load_role_details(&record_path) })
+                .await;
+            let _ = this.update(cx, |app, cx| {
+                if app
+                    .selected_role
+                    .as_ref()
+                    .is_some_and(|r| r.record_path == expected_path)
+                    && let Ok(details) = res
+                {
+                    if app.drawer_tab == DrawerTab::Notes {
+                        app.citation_title = Some(expected_path);
+                        app.citation_body = Some(details.full_text.clone());
+                    }
+                    app.role_details = Some(details);
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
     }
 
     fn load_selected_brief_async(&mut self, cx: &mut Context<Self>) {
@@ -854,6 +890,7 @@ impl JobHarnessApp {
             }
             CommandAction::ToggleArchive => {
                 self.show_archive = !self.show_archive;
+                self.archive_anim_epoch = self.archive_anim_epoch.wrapping_add(1);
                 cx.notify();
             }
             CommandAction::RefreshWorkspace => {
@@ -908,6 +945,26 @@ impl JobHarnessApp {
                 });
             })
             .detach();
+        }
+    }
+
+    fn submit_chat_input(&mut self, cx: &mut Context<Self>) {
+        let raw = std::mem::take(&mut self.chat_input);
+        let trimmed = raw.trim();
+        let prompt = match self.attached_role.take() {
+            Some((company, record_path)) => {
+                if trimmed.is_empty() {
+                    format!(
+                        "Brief me on {company} (`{record_path}`) and suggest the clearest next step."
+                    )
+                } else {
+                    format!("{trimmed}\n\n[Role context: {company} — `{record_path}`]")
+                }
+            }
+            None => trimmed.to_owned(),
+        };
+        if !prompt.is_empty() {
+            self.submit_prompt(prompt, false, cx);
         }
     }
 
@@ -1134,8 +1191,7 @@ impl JobHarnessApp {
                         self.submit_prompt(q, true, cx);
                     }
                     ActiveInput::Chat => {
-                        let q = std::mem::take(&mut self.chat_input);
-                        self.submit_prompt(q, false, cx);
+                        self.submit_chat_input(cx);
                     }
                     _ => {}
                 },
@@ -1548,11 +1604,53 @@ impl JobHarnessApp {
                     .p_3()
                     .border_t_1()
                     .border_color(theme::hairline())
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    // Attached role context chip (from "Ask in Chat about this role")
+                    .when_some(self.attached_role.clone(), |d, (company, path)| {
+                        let short = path.rsplit('/').next().unwrap_or(&path).to_owned();
+                        d.child(
+                            div()
+                                .px_2()
+                                .py(px(4.0))
+                                .rounded(px(6.0))
+                                .bg(theme::lavender_wash())
+                                .border_1()
+                                .border_color(theme::lavender_border())
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .gap_2()
+                                .child(
+                                    div()
+                                        .min_w_0()
+                                        .overflow_hidden()
+                                        .text_xs()
+                                        .text_color(theme::lavender())
+                                        .child(format!("{company} · {short}")),
+                                )
+                                .child(
+                                    div()
+                                        .id("clear-role-chip")
+                                        .flex_shrink_0()
+                                        .text_xs()
+                                        .text_color(theme::text_muted())
+                                        .hover(|s| s.text_color(theme::text_primary()))
+                                        .cursor_pointer()
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.attached_role = None;
+                                            cx.notify();
+                                        }))
+                                        .child("✕"),
+                                ),
+                        )
+                    })
                     .child(
                         div()
                             .id("chat-input-box")
                             .px_3()
-                            .py_2()
+                            .py(px(7.0))
                             .rounded(px(9.0))
                             .bg(theme::surface_subtle())
                             .border_1()
@@ -1564,40 +1662,99 @@ impl JobHarnessApp {
                             .flex()
                             .items_center()
                             .justify_between()
+                            .gap_2()
                             .cursor_text()
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.active_input = ActiveInput::Chat;
                                 cx.notify();
                             }))
-                            .child(
+                            .child({
+                                let has_text = !self.chat_input.is_empty();
+                                let placeholder = if self.streaming {
+                                    "Queue a follow-up…".to_owned()
+                                } else if let Some((company, _)) = &self.attached_role {
+                                    format!("Ask about {company} or press ⏎…")
+                                } else {
+                                    display_input
+                                };
                                 div()
                                     .flex_1()
                                     .min_w_0()
                                     .overflow_hidden()
-                                    .text_xs()
-                                    .text_color(if self.chat_input.is_empty() {
-                                        theme::text_muted()
-                                    } else {
-                                        theme::text_primary()
+                                    .flex()
+                                    .items_center()
+                                    .when(has_text, |d| {
+                                        d.child(
+                                            div()
+                                                .text_xs()
+                                                .text_color(theme::text_primary())
+                                                .child(self.chat_input.clone()),
+                                        )
                                     })
-                                    .child(display_input),
-                            )
-                            .when(self.streaming, |d| {
-                                d.child(
-                                    div()
-                                        .id("stop-stream")
-                                        .px_2()
-                                        .py(px(2.0))
-                                        .rounded(px(5.0))
-                                        .bg(theme::rose_wash())
-                                        .text_xs()
-                                        .text_color(theme::rose_text())
-                                        .cursor_pointer()
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.stop_stream(cx);
-                                        }))
-                                        .child("Stop"),
-                                )
+                                    .when(input_active, |d| {
+                                        d.child(
+                                            div()
+                                                .w(px(1.5))
+                                                .h(px(13.0))
+                                                .ml(px(1.0))
+                                                .rounded(px(1.0))
+                                                .bg(theme::lavender()),
+                                        )
+                                    })
+                                    .when(!has_text && !input_active, |d| {
+                                        d.child(
+                                            div()
+                                                .text_xs()
+                                                .text_color(theme::text_muted())
+                                                .child(placeholder.clone()),
+                                        )
+                                    })
+                                    .when(!has_text && input_active, |d| {
+                                        d.child(
+                                            div()
+                                                .ml_1()
+                                                .text_xs()
+                                                .text_color(theme::text_muted())
+                                                .opacity(0.6)
+                                                .child(placeholder),
+                                        )
+                                    })
+                            })
+                            .child(if self.streaming {
+                                div()
+                                    .id("stop-stream")
+                                    .px_2()
+                                    .py(px(2.0))
+                                    .rounded(px(5.0))
+                                    .bg(theme::rose_wash())
+                                    .text_xs()
+                                    .text_color(theme::rose_text())
+                                    .cursor_pointer()
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.stop_stream(cx);
+                                    }))
+                                    .child("Stop")
+                                    .into_any_element()
+                            } else {
+                                let ready = !self.chat_input.trim().is_empty()
+                                    || self.attached_role.is_some();
+                                div()
+                                    .id("chat-send-btn")
+                                    .px(px(4.0))
+                                    .rounded(px(4.0))
+                                    .cursor_pointer()
+                                    .hover(|s| s.bg(theme::row_hover()))
+                                    .text_xs()
+                                    .text_color(if ready {
+                                        theme::text_primary()
+                                    } else {
+                                        theme::text_muted()
+                                    })
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.submit_chat_input(cx);
+                                    }))
+                                    .child("⏎")
+                                    .into_any_element()
                             }),
                     ),
             )
@@ -2127,6 +2284,8 @@ impl JobHarnessApp {
                                     })
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.show_archive = !this.show_archive;
+                                        this.archive_anim_epoch =
+                                            this.archive_anim_epoch.wrapping_add(1);
                                         cx.notify();
                                     }))
                                     .child(format!("Archive ({})", self.snapshot.closed_count)),
@@ -2284,13 +2443,26 @@ impl JobHarnessApp {
                             .into_any_element()
                     })
                     .when(self.show_archive, |d| {
-                        d.child(self.render_kanban_column(
-                            "Archive",
-                            archive_cards,
-                            archive_total,
-                            false,
-                            cx,
-                        ))
+                        let epoch = self.archive_anim_epoch;
+                        d.child(
+                            div()
+                                .h_full()
+                                .flex_shrink_0()
+                                .overflow_hidden()
+                                .child(self.render_kanban_column(
+                                    "Archive",
+                                    archive_cards,
+                                    archive_total,
+                                    false,
+                                    cx,
+                                ))
+                                .with_animation(
+                                    SharedString::from(format!("archive-slide-{epoch}")),
+                                    Animation::new(Duration::from_millis(200))
+                                        .with_easing(ease_out_quint()),
+                                    |el, t| el.w(px(284.0 * t)).opacity(t),
+                                ),
+                        )
                     })
             })
             // Quick-Ask upward reply popover
@@ -2338,8 +2510,15 @@ impl JobHarnessApp {
                                                         this.chat_anim_epoch =
                                                             this.chat_anim_epoch.wrapping_add(1);
                                                     }
+                                                    if !this.quick_input.is_empty()
+                                                        && this.chat_input.is_empty()
+                                                    {
+                                                        this.chat_input =
+                                                            std::mem::take(&mut this.quick_input);
+                                                    }
                                                     this.chat_open = true;
                                                     this.active_input = ActiveInput::Chat;
+                                                    this.chat_scroll.scroll_to_bottom();
                                                     cx.notify();
                                                 }))
                                                 .child("Open in Chat →"),
@@ -2367,7 +2546,7 @@ impl JobHarnessApp {
                         )),
                 )
             })
-            // Bottom floating bar: Quick Ask + borderless 0 / 25 + subtle emerald status dot
+            // Bottom floating bar: Quick Ask (hidden when Chat rail is open so only 1 input exists)
             .child(
                 div()
                     .absolute()
@@ -2378,7 +2557,11 @@ impl JobHarnessApp {
                     .items_center()
                     .justify_between()
                     .gap_3()
-                    .child(
+                    .child(if self.chat_open {
+                        div().w(px(0.0)).into_any_element()
+                    } else {
+                        let epoch = self.chat_anim_epoch;
+                        let has_text = !self.quick_input.is_empty();
                         div()
                             .id("quick-ask-bar")
                             .flex_1()
@@ -2396,6 +2579,7 @@ impl JobHarnessApp {
                             .flex()
                             .items_center()
                             .justify_between()
+                            .gap_2()
                             .cursor_text()
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.active_input = ActiveInput::QuickAsk;
@@ -2406,20 +2590,72 @@ impl JobHarnessApp {
                                     .flex_1()
                                     .min_w_0()
                                     .overflow_hidden()
-                                    .text_xs()
-                                    .text_color(if self.quick_input.is_empty() {
-                                        theme::text_muted()
-                                    } else {
-                                        theme::text_primary()
+                                    .flex()
+                                    .items_center()
+                                    .when(has_text, |d| {
+                                        d.child(
+                                            div()
+                                                .text_xs()
+                                                .text_color(theme::text_primary())
+                                                .child(self.quick_input.clone()),
+                                        )
                                     })
-                                    .child(if self.quick_input.is_empty() {
-                                        "Ask anything…".to_owned()
-                                    } else {
-                                        self.quick_input.clone()
+                                    .when(quick_active, |d| {
+                                        d.child(
+                                            div()
+                                                .w(px(1.5))
+                                                .h(px(13.0))
+                                                .ml(px(1.0))
+                                                .rounded(px(1.0))
+                                                .bg(theme::lavender()),
+                                        )
+                                    })
+                                    .when(!has_text && !quick_active, |d| {
+                                        d.child(
+                                            div()
+                                                .text_xs()
+                                                .text_color(theme::text_muted())
+                                                .child("Ask anything…"),
+                                        )
+                                    })
+                                    .when(!has_text && quick_active, |d| {
+                                        d.child(
+                                            div()
+                                                .ml_1()
+                                                .text_xs()
+                                                .text_color(theme::text_muted())
+                                                .opacity(0.6)
+                                                .child("Ask anything…"),
+                                        )
                                     }),
                             )
-                            .child(div().text_xs().text_color(theme::text_muted()).child("⏎")),
-                    )
+                            .child(
+                                div()
+                                    .id("quick-send-btn")
+                                    .px(px(4.0))
+                                    .rounded(px(4.0))
+                                    .cursor_pointer()
+                                    .hover(|s| s.bg(theme::row_hover()))
+                                    .text_xs()
+                                    .text_color(if has_text {
+                                        theme::text_primary()
+                                    } else {
+                                        theme::text_muted()
+                                    })
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        let q = std::mem::take(&mut this.quick_input);
+                                        this.submit_prompt(q, true, cx);
+                                    }))
+                                    .child("⏎"),
+                            )
+                            .with_animation(
+                                SharedString::from(format!("quick-in-{epoch}")),
+                                Animation::new(Duration::from_millis(160))
+                                    .with_easing(ease_out_quint()),
+                                |el, t| el.opacity(t),
+                            )
+                            .into_any_element()
+                    })
                     .child(
                         div()
                             .flex()
@@ -2518,38 +2754,59 @@ impl JobHarnessApp {
                 let role = self.selected_role.as_ref()?;
                 let role_company = role.company.clone();
                 let role_path = role.record_path.clone();
+                let role_path_for_chat = role.record_path.clone();
                 let brief_opt = role.brief_path.clone();
+                let source_opt = role.source_url.clone();
+                let stage_label = title_case_stage(&role.stage);
 
                 Some(
                     div()
                         .id("role-drawer")
-                        .w(px(340.0))
+                        .w(px(360.0))
                         .flex_shrink_0()
                         .h_full()
-                        .p_4()
+                        .p_5()
                         .bg(theme::panel_glass())
                         .border_l_1()
                         .border_color(theme::hairline())
                         .flex()
                         .flex_col()
-                        .gap_3()
+                        .gap_4()
                         .overflow_y_scroll()
+                        // Spacious header block
                         .child(
                             div()
                                 .flex()
                                 .items_start()
                                 .justify_between()
-                                .gap_2()
+                                .gap_3()
                                 .child(
                                     div()
                                         .flex()
                                         .flex_col()
+                                        .gap_1()
                                         .min_w_0()
                                         .child(
                                             div()
-                                                .text_sm()
-                                                .text_color(theme::text_primary())
-                                                .child(role.company.clone()),
+                                                .flex()
+                                                .items_center()
+                                                .gap_2()
+                                                .child(
+                                                    div()
+                                                        .text_base()
+                                                        .text_color(theme::text_primary())
+                                                        .child(role.company.clone()),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .px_2()
+                                                        .py(px(1.0))
+                                                        .rounded(px(5.0))
+                                                        .bg(theme::surface_subtle())
+                                                        .text_xs()
+                                                        .text_color(theme::text_secondary())
+                                                        .child(stage_label),
+                                                ),
                                         )
                                         .child(
                                             div()
@@ -2561,6 +2818,9 @@ impl JobHarnessApp {
                                 .child(
                                     div()
                                         .id("close-drawer")
+                                        .p_1()
+                                        .rounded(px(5.0))
+                                        .hover(|s| s.bg(theme::row_hover()))
                                         .cursor_pointer()
                                         .text_xs()
                                         .text_color(theme::text_muted())
@@ -2571,11 +2831,11 @@ impl JobHarnessApp {
                                         .child("✕"),
                                 ),
                         )
-                        // Clean underline tabs (no box pills)
+                        // Clean underline tabs
                         .child(
                             div()
                                 .flex()
-                                .gap_4()
+                                .gap_5()
                                 .border_b_1()
                                 .border_color(theme::hairline())
                                 .children(
@@ -2609,7 +2869,9 @@ impl JobHarnessApp {
                                                     && let Some(r) = &this.selected_role
                                                 {
                                                     let p = r.record_path.clone();
-                                                    this.open_citation(&p, cx);
+                                                    this.citation_title = Some(p.clone());
+                                                    this.citation_body = Some("Loading…".into());
+                                                    this.read_citation_async(p, cx);
                                                 }
                                                 cx.notify();
                                             }))
@@ -2617,141 +2879,323 @@ impl JobHarnessApp {
                                     }),
                                 ),
                         )
-                        // Metadata rows
-                        .child(
-                            div()
-                                .py_2()
-                                .border_b_1()
-                                .border_color(theme::hairline())
-                                .flex()
-                                .flex_col()
-                                .gap_2()
-                                .child(kv_row("Stage", role.stage.clone()))
-                                .child(kv_row("Checked", role.checked.clone()))
-                                .when_some(role.scheduled_start.clone(), |d, s| {
-                                    d.child(kv_row("Scheduled", s))
-                                })
-                                .when_some(role.cv_track.clone(), |d, tr| {
-                                    d.child(kv_row("CV Track", tr))
-                                })
-                                .when_some(role.packet_hash.clone(), |d, h| {
-                                    let short: String = h.chars().take(12).collect();
-                                    d.child(kv_row("Packet SHA", short))
-                                })
-                                .when_some(role.source_url.clone(), |d, u| {
-                                    let short: String = u.chars().take(32).collect();
-                                    d.child(kv_row("Source", short))
-                                })
-                                .child(
-                                    div()
-                                        .flex()
-                                        .items_center()
-                                        .justify_between()
-                                        .text_xs()
-                                        .child(div().text_color(theme::text_muted()).child("Record"))
-                                        .child(
-                                            div()
-                                                .id("cite-record")
-                                                .text_color(theme::lavender())
-                                                .cursor_pointer()
-                                                .on_click(cx.listener(move |this, _, _, cx| {
-                                                    this.open_citation(&role_path, cx);
-                                                }))
-                                                .child(
-                                                    role.record_path
-                                                        .rsplit('/')
-                                                        .next()
-                                                        .unwrap_or(&role.record_path)
-                                                        .to_owned(),
-                                                ),
-                                        ),
-                                )
-                                .when_some(brief_opt, |d, bp| {
-                                    let short = bp.rsplit('/').next().unwrap_or(&bp).to_owned();
-                                    d.child(
+                        // Tab-specific focused body
+                        .child(match self.drawer_tab {
+                            DrawerTab::Overview => {
+                                let det = self.role_details.as_ref();
+                                let salary_val = det
+                                    .and_then(|d| d.salary.clone())
+                                    .unwrap_or_else(|| "Not listed".into());
+                                let loc_val = det
+                                    .and_then(|d| d.location_mode.clone())
+                                    .unwrap_or_else(|| "Not listed".into());
+                                let fit_opt = det.and_then(|d| d.fit_summary.clone());
+                                let status_opt = det.and_then(|d| d.status_detail.clone());
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .gap_4()
+                                    // At-a-glance snapshot (Location/Mode · Comp · Checked)
+                                    .child(
                                         div()
                                             .flex()
-                                            .items_center()
-                                            .justify_between()
-                                            .text_xs()
+                                            .flex_col()
+                                            .gap_2()
+                                            .child(kv_row("Location", loc_val))
+                                            .child(kv_row("Comp", salary_val))
+                                            .child(kv_row("Last checked", role.checked.clone()))
+                                            .when_some(role.scheduled_start.clone(), |d, s| {
+                                                d.child(kv_row("Scheduled", s))
+                                            }),
+                                    )
+                                    // Fit & role summary (from ## Vacancy and fit)
+                                    .when_some(fit_opt, |d, fit| {
+                                        d.child(
+                                            div()
+                                                .pt_3()
+                                                .border_t_1()
+                                                .border_color(theme::hairline())
+                                                .flex()
+                                                .flex_col()
+                                                .gap_1()
+                                                .child(
+                                                    div()
+                                                        .text_xs()
+                                                        .text_color(theme::text_muted())
+                                                        .child("Summary"),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .text_xs()
+                                                        .text_color(theme::text_secondary())
+                                                        .child(fit),
+                                                ),
+                                        )
+                                    })
+                                    // Next step & latest recorded status
+                                    .child(
+                                        div()
+                                            .pt_3()
+                                            .border_t_1()
+                                            .border_color(theme::hairline())
+                                            .flex()
+                                            .flex_col()
+                                            .gap_1()
                                             .child(
-                                                div().text_color(theme::text_muted()).child("Brief"),
+                                                div()
+                                                    .text_xs()
+                                                    .text_color(theme::text_muted())
+                                                    .child("Next step"),
                                             )
                                             .child(
                                                 div()
-                                                    .id("cite-brief")
-                                                    .text_color(theme::lavender())
-                                                    .cursor_pointer()
-                                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                                        this.open_citation(&bp, cx);
-                                                    }))
-                                                    .child(short),
-                                            ),
+                                                    .text_xs()
+                                                    .text_color(theme::text_primary())
+                                                    .child(if !role.urgency_reason.is_empty() {
+                                                        format!(
+                                                            "{}\n{}",
+                                                            role.urgency_reason, role.next_action
+                                                        )
+                                                    } else if !role.next_action.is_empty() {
+                                                        role.next_action.clone()
+                                                    } else {
+                                                        "No pending action recorded.".into()
+                                                    }),
+                                            )
+                                            .when_some(status_opt, |d, st| {
+                                                d.child(
+                                                    div()
+                                                        .pt_1()
+                                                        .text_xs()
+                                                        .text_color(theme::text_muted())
+                                                        .child(st),
+                                                )
+                                            }),
                                     )
-                                }),
-                        )
-                        // Next action
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(theme::text_secondary())
-                                .child(if !role.urgency_reason.is_empty() {
-                                    format!("{}\n\nNext: {}", role.urgency_reason, role.next_action)
-                                } else {
-                                    format!("Next: {}", role.next_action)
-                                }),
-                        )
-                        // Citation preview
-                        .when_some(self.citation_body.clone(), |d, body| {
-                            d.child(
+                                    // Source links
+                                    .child(
+                                        div()
+                                            .pt_3()
+                                            .border_t_1()
+                                            .border_color(theme::hairline())
+                                            .flex()
+                                            .flex_col()
+                                            .gap_2()
+                                            .when_some(source_opt, |d, url| {
+                                                let short = url
+                                                    .trim_start_matches("https://")
+                                                    .trim_start_matches("http://")
+                                                    .split('/')
+                                                    .next()
+                                                    .unwrap_or(&url)
+                                                    .to_owned();
+                                                d.child(
+                                                    div()
+                                                        .flex()
+                                                        .items_center()
+                                                        .justify_between()
+                                                        .text_xs()
+                                                        .child(
+                                                            div()
+                                                                .text_color(theme::text_muted())
+                                                                .child("Posting"),
+                                                        )
+                                                        .child(
+                                                            div()
+                                                                .id("open-role-url")
+                                                                .text_color(theme::text_secondary())
+                                                                .underline()
+                                                                .hover(|s| {
+                                                                    s.text_color(
+                                                                        theme::text_primary(),
+                                                                    )
+                                                                })
+                                                                .cursor_pointer()
+                                                                .on_click(cx.listener(
+                                                                    move |_, _, _, _| {
+                                                                        open_url(&url);
+                                                                    },
+                                                                ))
+                                                                .child(format!("{short} ↗")),
+                                                        ),
+                                                )
+                                            })
+                                            .child(
+                                                div()
+                                                    .flex()
+                                                    .items_center()
+                                                    .justify_between()
+                                                    .text_xs()
+                                                    .child(
+                                                        div()
+                                                            .text_color(theme::text_muted())
+                                                            .child("Record"),
+                                                    )
+                                                    .child(
+                                                        div()
+                                                            .id("cite-record")
+                                                            .text_color(theme::lavender())
+                                                            .underline()
+                                                            .cursor_pointer()
+                                                            .on_click(cx.listener(
+                                                                move |this, _, _, cx| {
+                                                                    this.drawer_tab =
+                                                                        DrawerTab::Notes;
+                                                                    this.citation_title =
+                                                                        Some(role_path.clone());
+                                                                    if let Some(d) =
+                                                                        &this.role_details
+                                                                    {
+                                                                        this.citation_body = Some(
+                                                                            d.full_text.clone(),
+                                                                        );
+                                                                    } else {
+                                                                        this.citation_body =
+                                                                            Some("Loading…".into());
+                                                                        this.read_citation_async(
+                                                                            role_path.clone(),
+                                                                            cx,
+                                                                        );
+                                                                    }
+                                                                    cx.notify();
+                                                                },
+                                                            ))
+                                                            .child(
+                                                                role.record_path
+                                                                    .rsplit('/')
+                                                                    .next()
+                                                                    .unwrap_or(&role.record_path)
+                                                                    .to_owned(),
+                                                            ),
+                                                    ),
+                                            )
+                                            .when_some(brief_opt, |d, bp| {
+                                                let short =
+                                                    bp.rsplit('/').next().unwrap_or(&bp).to_owned();
+                                                d.child(
+                                                    div()
+                                                        .flex()
+                                                        .items_center()
+                                                        .justify_between()
+                                                        .text_xs()
+                                                        .child(
+                                                            div()
+                                                                .text_color(theme::text_muted())
+                                                                .child("Brief"),
+                                                        )
+                                                        .child(
+                                                            div()
+                                                                .id("cite-brief")
+                                                                .text_color(theme::lavender())
+                                                                .underline()
+                                                                .cursor_pointer()
+                                                                .on_click(cx.listener(
+                                                                    move |this, _, _, cx| {
+                                                                        this.drawer_tab =
+                                                                            DrawerTab::Brief;
+                                                                        this.read_citation_async(
+                                                                            bp.clone(),
+                                                                            cx,
+                                                                        );
+                                                                        cx.notify();
+                                                                    },
+                                                                ))
+                                                                .child(short),
+                                                        ),
+                                                )
+                                            }),
+                                    )
+                                    .into_any_element()
+                            }
+                            DrawerTab::Packet => {
+                                let det = self.role_details.as_ref();
+                                let cv_val = det
+                                    .and_then(|d| d.packet_cv.clone())
+                                    .or_else(|| role.cv_track.clone())
+                                    .unwrap_or_else(|| "Not frozen yet".into());
+                                let sha_val = det
+                                    .and_then(|d| d.packet_sha.clone())
+                                    .or_else(|| role.packet_hash.clone())
+                                    .map(|h| h.chars().take(12).collect())
+                                    .unwrap_or_else(|| "—".into());
                                 div()
-                                    .pt_3()
-                                    .border_t_1()
-                                    .border_color(theme::hairline())
                                     .flex()
                                     .flex_col()
-                                    .gap_1()
+                                    .gap_3()
+                                    .child(kv_row("CV submitted", cv_val))
+                                    .child(kv_row("Packet SHA", sha_val))
                                     .child(
                                         div()
+                                            .pt_2()
                                             .text_xs()
-                                            .text_color(theme::lavender())
-                                            .child(
-                                                self.citation_title
-                                                    .clone()
-                                                    .unwrap_or_else(|| "Citation".into()),
-                                            ),
+                                            .text_color(theme::text_muted())
+                                            .child("Frozen packets preserve the exact CV bytes, screening answers, and timestamp used at submission."),
                                     )
-                                    .child(
+                                    .into_any_element()
+                            }
+                            DrawerTab::Brief | DrawerTab::Notes => div()
+                                .flex()
+                                .flex_col()
+                                .gap_2()
+                                .when_some(self.citation_title.clone(), |d, t| {
+                                    d.child(
                                         div()
                                             .text_xs()
-                                            .text_color(theme::text_secondary())
-                                            .child(body),
-                                    ),
-                            )
+                                            .text_color(theme::text_muted())
+                                            .child(t),
+                                    )
+                                })
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(theme::text_secondary())
+                                        .child(
+                                            self.citation_body
+                                                .clone()
+                                                .unwrap_or_else(|| "Loading…".into()),
+                                        ),
+                                )
+                                .into_any_element(),
                         })
+                        // Refined subtle bottom CTA that attaches the role chip cleanly in Chat
                         .child(
                             div()
                                 .id("ask-role-chat")
                                 .mt_auto()
                                 .py_2()
+                                .px_3()
                                 .rounded(px(8.0))
-                                .bg(theme::white_solid())
-                                .text_xs()
-                                .text_color(theme::ink_dark())
+                                .bg(theme::surface_active())
+                                .border_1()
+                                .border_color(theme::hairline_strong())
+                                .hover(|s| s.bg(theme::row_hover()))
                                 .flex()
-                                .justify_center()
+                                .items_center()
+                                .justify_between()
                                 .cursor_pointer()
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     if !this.chat_open {
                                         this.chat_anim_epoch = this.chat_anim_epoch.wrapping_add(1);
                                     }
                                     this.chat_open = true;
+                                    this.attached_role =
+                                        Some((role_company.clone(), role_path_for_chat.clone()));
+                                    this.chat_input.clear();
                                     this.active_input = ActiveInput::Chat;
-                                    this.chat_input =
-                                        format!("Brief me on {role_company} and next steps");
                                     cx.notify();
                                 }))
-                                .child("Ask in Chat about this role →"),
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(theme::text_primary())
+                                        .child("Ask in Chat about this role"),
+                                )
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(theme::lavender())
+                                        .child("→"),
+                                ),
                         )
                         .into_any_element(),
                 )
@@ -3198,6 +3642,14 @@ impl JobHarnessApp {
         }
     }
 
+    fn bottom_popover_right_offset(&self) -> f32 {
+        match self.right_drawer {
+            RightDrawer::Closed => 16.0,
+            RightDrawer::Cvs => 340.0 + 16.0,
+            RightDrawer::Role | RightDrawer::Tidy => 360.0 + 16.0,
+        }
+    }
+
     fn render_popover(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         match self.active_popover {
             ActivePopover::None => None,
@@ -3312,7 +3764,7 @@ impl JobHarnessApp {
                 )
             }
             ActivePopover::Bell => Some(
-                popover_shell(false, 370.0)
+                popover_shell(false, 370.0, 16.0)
                     .child(popover_header("Attention", cx))
                     .when(self.snapshot.attention_items.is_empty(), |d| {
                         d.child(
@@ -3410,8 +3862,9 @@ impl JobHarnessApp {
             ),
             ActivePopover::Budget => {
                 let b = &self.snapshot.daily_budget;
+                let right_off = self.bottom_popover_right_offset();
                 Some(
-                    popover_shell(true, 330.0)
+                    popover_shell(true, 330.0, right_off)
                         .child(popover_header("Daily Submission Cap", cx))
                         .child(stepper_row(
                             "Portals",
@@ -3437,37 +3890,40 @@ impl JobHarnessApp {
                         .into_any_element(),
                 )
             }
-            ActivePopover::Health => Some(
-                popover_shell(true, 330.0)
-                    .child(popover_header("Workspace Status", cx))
-                    .child(kv_row("Storage", self.snapshot.status_note.clone()))
-                    .child(kv_row(
-                        "Mode",
-                        if self.client.target.is_remote() {
-                            "Remote VPS".into()
-                        } else {
-                            "Local in-process".into()
-                        },
-                    ))
-                    .child(kv_row("Chat runtime", self.runtime.label()))
-                    .child(kv_row(
-                        "Tracked roles",
-                        format!(
-                            "{} ({} upcoming)",
-                            self.snapshot.total_records, self.snapshot.upcoming_count
-                        ),
-                    ))
-                    .child(kv_row(
-                        "Unknown guards",
-                        self.snapshot.unresolved_attempts.to_string(),
-                    ))
-                    .into_any_element(),
-            ),
+            ActivePopover::Health => {
+                let right_off = self.bottom_popover_right_offset();
+                Some(
+                    popover_shell(true, 330.0, right_off)
+                        .child(popover_header("Workspace Status", cx))
+                        .child(kv_row("Storage", self.snapshot.status_note.clone()))
+                        .child(kv_row(
+                            "Mode",
+                            if self.client.target.is_remote() {
+                                "Remote VPS".into()
+                            } else {
+                                "Local in-process".into()
+                            },
+                        ))
+                        .child(kv_row("Chat runtime", self.runtime.label()))
+                        .child(kv_row(
+                            "Tracked roles",
+                            format!(
+                                "{} ({} upcoming)",
+                                self.snapshot.total_records, self.snapshot.upcoming_count
+                            ),
+                        ))
+                        .child(kv_row(
+                            "Unknown guards",
+                            self.snapshot.unresolved_attempts.to_string(),
+                        ))
+                        .into_any_element(),
+                )
+            }
             ActivePopover::Settings => {
                 let p = &self.snapshot.permissions;
                 let info = self.expanded_info;
                 Some(
-                    popover_shell(false, 360.0)
+                    popover_shell(false, 360.0, 16.0)
                         .child(popover_header("Permissions & Timing", cx))
                         .child(perm_row(
                             "Auto-apply portals",
@@ -3576,10 +4032,9 @@ impl Render for JobHarnessApp {
                     .child(self.render_board(cx))
                     .when_some(self.render_right_drawer(cx), |d, drawer| {
                         let epoch = self.drawer_anim_epoch;
-                        let target_w = if self.right_drawer == RightDrawer::Tidy {
-                            360.0
-                        } else {
-                            340.0
+                        let target_w = match self.right_drawer {
+                            RightDrawer::Role | RightDrawer::Tidy => 360.0,
+                            _ => 340.0,
                         };
                         d.child(
                             div()
@@ -3650,10 +4105,26 @@ fn switch_pill(on: bool) -> impl IntoElement {
         )
 }
 
-fn popover_shell(bottom: bool, width: f32) -> gpui::Div {
+fn title_case_stage(stage: &str) -> String {
+    match stage {
+        "saved" => "Saved".into(),
+        "prepared" => "Prepared".into(),
+        "applied" => "Applied".into(),
+        "introduction" => "Introduction".into(),
+        "screening" => "Screening".into(),
+        "technical" => "Technical".into(),
+        "final" => "Final".into(),
+        "offer" => "Offer".into(),
+        "closed" => "Archived".into(),
+        "needs-review" => "Needs review".into(),
+        other => other.to_owned(),
+    }
+}
+
+fn popover_shell(bottom: bool, width: f32, right_offset: f32) -> gpui::Div {
     let base = div()
         .absolute()
-        .right_4()
+        .right(px(right_offset))
         .w(px(width))
         .p_3()
         .rounded(px(12.0))
