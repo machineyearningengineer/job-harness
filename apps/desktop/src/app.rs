@@ -12,13 +12,13 @@ use crate::{
 use gpui::{
     Animation, AnimationExt, AnyElement, App, AppContext, ClipboardItem, Context, FocusHandle,
     Focusable, InteractiveElement, IntoElement, KeyDownEvent, MouseButton, ParentElement, Render,
-    ScrollHandle, SharedString, StatefulInteractiveElement, Styled, Window, div, ease_out_quint,
-    prelude::FluentBuilder, px, svg,
+    ScrollHandle, ScrollWheelEvent, SharedString, StatefulInteractiveElement, Styled, TouchPhase,
+    Window, div, ease_out_quint, point, prelude::FluentBuilder, px, svg,
 };
 use notify::RecommendedWatcher;
 use serde_json::json;
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     path::PathBuf,
     sync::{
         Arc,
@@ -55,6 +55,12 @@ impl Render for DragGhost {
             .text_color(theme::text_primary())
             .child(self.company.clone())
     }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ScrollAxis {
+    Horizontal,
+    Vertical,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -143,6 +149,9 @@ pub struct JobHarnessApp {
     // Layout & rails
     chat_open: bool,
     chat_scroll: ScrollHandle,
+    board_scroll_x: ScrollHandle,
+    col_scrolls: HashMap<&'static str, ScrollHandle>,
+    scroll_axis_lock: Option<ScrollAxis>,
     right_drawer: RightDrawer,
     drawer_tab: DrawerTab,
     active_popover: ActivePopover,
@@ -155,6 +164,7 @@ pub struct JobHarnessApp {
     command_index: usize,
     show_archive: bool,
     only_attention: bool,
+    attention_toggled: bool,
     interviews_expanded: bool,
     dismissed_tidy: HashSet<String>,
 
@@ -164,6 +174,7 @@ pub struct JobHarnessApp {
     cmd_anim_epoch: u64,
     move_anim_epoch: u64,
     interviews_anim_epoch: u64,
+    attention_anim_epoch: u64,
     last_moved_record: Option<(String, u64)>,
 
     // Selected role & citation drilldown
@@ -215,6 +226,21 @@ impl JobHarnessApp {
             focus_handle: cx.focus_handle(),
             chat_open: false,
             chat_scroll: ScrollHandle::new(),
+            board_scroll_x: ScrollHandle::new(),
+            col_scrolls: [
+                "Saved",
+                "Applied",
+                "Screening",
+                "Interviews",
+                "Technical",
+                "Final",
+                "Offer",
+                "Archive",
+            ]
+            .into_iter()
+            .map(|name| (name, ScrollHandle::new()))
+            .collect(),
+            scroll_axis_lock: None,
             right_drawer: RightDrawer::Closed,
             drawer_tab: DrawerTab::Overview,
             active_popover: ActivePopover::None,
@@ -225,6 +251,7 @@ impl JobHarnessApp {
             command_index: 0,
             show_archive: false,
             only_attention: false,
+            attention_toggled: false,
             interviews_expanded: false,
             dismissed_tidy: HashSet::new(),
             chat_anim_epoch: 1,
@@ -232,6 +259,7 @@ impl JobHarnessApp {
             cmd_anim_epoch: 1,
             move_anim_epoch: 1,
             interviews_anim_epoch: 1,
+            attention_anim_epoch: 1,
             last_moved_record: None,
             selected_role: None,
             citation_title: None,
@@ -816,8 +844,7 @@ impl JobHarnessApp {
                 cx.notify();
             }
             CommandAction::ToggleAttention => {
-                self.only_attention = !self.only_attention;
-                cx.notify();
+                self.toggle_attention_only(cx);
             }
             CommandAction::ToggleArchive => {
                 self.show_archive = !self.show_archive;
@@ -1537,6 +1564,70 @@ impl JobHarnessApp {
             )
     }
 
+    fn toggle_attention_only(&mut self, cx: &mut Context<Self>) {
+        self.only_attention = !self.only_attention;
+        self.attention_toggled = true;
+        self.attention_anim_epoch = self.attention_anim_epoch.wrapping_add(1);
+        if self.only_attention {
+            self.board_scroll_x.set_offset(point(px(0.0), px(0.0)));
+        }
+        cx.notify();
+    }
+
+    /// Dominant-axis gesture lock so trackpad vertical list scrolling and horizontal
+    /// Kanban swiping never fight each other.
+    fn handle_board_scroll(
+        &mut self,
+        col_name: Option<&'static str>,
+        event: &ScrollWheelEvent,
+        cx: &mut Context<Self>,
+    ) {
+        if matches!(event.touch_phase, TouchPhase::Started) {
+            self.scroll_axis_lock = None;
+        }
+        let delta = event.delta.pixel_delta(px(24.0));
+        let dx: f32 = delta.x.into();
+        let dy: f32 = delta.y.into();
+
+        if self.scroll_axis_lock.is_none() && (dx.abs() > 0.8 || dy.abs() > 0.8) {
+            self.scroll_axis_lock = if dx.abs() > dy.abs() * 1.15 || col_name.is_none() {
+                Some(ScrollAxis::Horizontal)
+            } else {
+                Some(ScrollAxis::Vertical)
+            };
+        }
+
+        match self.scroll_axis_lock {
+            Some(ScrollAxis::Horizontal) => {
+                let cur = self.board_scroll_x.offset();
+                let max_x: f32 = self.board_scroll_x.max_offset().width.into();
+                let cur_x: f32 = cur.x.into();
+                let next_x = (cur_x + dx).clamp(-max_x.max(0.0), 0.0);
+                self.board_scroll_x.set_offset(point(px(next_x), cur.y));
+                cx.stop_propagation();
+                cx.notify();
+            }
+            Some(ScrollAxis::Vertical) => {
+                if let Some(name) = col_name
+                    && let Some(handle) = self.col_scrolls.get(name)
+                {
+                    let cur = handle.offset();
+                    let max_y: f32 = handle.max_offset().height.into();
+                    let cur_y: f32 = cur.y.into();
+                    let next_y = (cur_y + dy).clamp(-max_y.max(0.0), 0.0);
+                    handle.set_offset(point(cur.x, px(next_y)));
+                    cx.stop_propagation();
+                    cx.notify();
+                }
+            }
+            None => {}
+        }
+
+        if matches!(event.touch_phase, TouchPhase::Ended) {
+            self.scroll_axis_lock = None;
+        }
+    }
+
     fn render_kanban_column(
         &self,
         col_name: &'static str,
@@ -1545,7 +1636,9 @@ impl JobHarnessApp {
         expandable_interviews: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        div()
+        let scroll_handle = self.col_scrolls.get(col_name).cloned();
+        let hidden_by_attention = self.only_attention && col_total == 0;
+        let col_div = div()
             .id(SharedString::from(format!("col-{col_name}")))
             .w(px(268.0))
             .flex_shrink_0()
@@ -1555,7 +1648,6 @@ impl JobHarnessApp {
             .flex_col()
             .rounded(px(10.0))
             .px_1()
-            // Clean soft full-column tint on drag-over (no top border bar)
             .drag_over::<DragCard>(|style, _, _, _| style.bg(theme::drop_highlight()))
             .on_drop(cx.listener(move |this, drag: &DragCard, _, cx| {
                 this.move_card_optimistic(drag, col_name, cx);
@@ -1602,111 +1694,177 @@ impl JobHarnessApp {
                             .child(col_total.to_string()),
                     ),
             )
-            .child(
-                div()
+            .child({
+                let mut scroller = div()
                     .id(SharedString::from(format!("col-scroll-{col_name}")))
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scroll()
+                    .on_scroll_wheel(cx.listener(move |this, ev: &ScrollWheelEvent, _, cx| {
+                        this.handle_board_scroll(Some(col_name), ev, cx);
+                    }))
                     .flex()
-                    .flex_col()
-                    .children(col_cards.into_iter().map(|card| {
-                        let c = card.clone();
-                        let drag_payload = DragCard {
-                            record_path: card.record_path.clone(),
-                            company: card.company.clone(),
-                            from_stage: card.stage.clone(),
-                            next_action: card.next_action.clone(),
-                            has_scheduled_start: card.scheduled_start.is_some(),
-                        };
-                        let is_urgent = card.urgency == "urgent_now";
-                        let is_quiet = card.quiet_days.is_some();
-                        let just_landed = self
-                            .last_moved_record
-                            .as_ref()
-                            .filter(|(p, _)| p == &card.record_path)
-                            .map(|(_, epoch)| *epoch);
+                    .flex_col();
+                if let Some(h) = scroll_handle {
+                    scroller = scroller.track_scroll(&h);
+                }
+                scroller.children(col_cards.into_iter().map(|card| {
+                    let c = card.clone();
+                    let drag_payload = DragCard {
+                        record_path: card.record_path.clone(),
+                        company: card.company.clone(),
+                        from_stage: card.stage.clone(),
+                        next_action: card.next_action.clone(),
+                        has_scheduled_start: card.scheduled_start.is_some(),
+                    };
+                    let is_urgent = card.urgency == "urgent_now";
+                    let is_quiet = card.quiet_days.is_some();
+                    let just_landed = self
+                        .last_moved_record
+                        .as_ref()
+                        .filter(|(p, _)| p == &card.record_path)
+                        .map(|(_, epoch)| *epoch);
 
-                        let mut row = div()
-                            .id(SharedString::from(card.record_path.clone()))
-                            .w_full()
-                            .min_w_0()
-                            .px_2()
-                            .py(px(9.0))
-                            .rounded(px(7.0))
-                            .border_b_1()
-                            .border_color(theme::hairline())
-                            .when(is_urgent, |d| {
-                                d.bg(theme::amber_wash())
-                                    .border_l_2()
-                                    .border_color(theme::amber_accent())
+                    let mut row = div()
+                        .id(SharedString::from(card.record_path.clone()))
+                        .w_full()
+                        .min_w_0()
+                        .px_2()
+                        .py(px(9.0))
+                        .rounded(px(7.0))
+                        .border_b_1()
+                        .border_color(theme::hairline())
+                        .when(is_urgent, |d| d.bg(theme::amber_wash()))
+                        .hover(|s| s.bg(theme::row_hover()))
+                        .cursor_pointer()
+                        .flex()
+                        .gap_2()
+                        .on_drag(drag_payload, |drag, _, _, cx| {
+                            cx.new(|_| DragGhost {
+                                company: drag.company.clone(),
                             })
-                            .hover(|s| s.bg(theme::row_hover()))
-                            .cursor_pointer()
-                            .on_drag(drag_payload, |drag, _, _, cx| {
-                                cx.new(|_| DragGhost {
-                                    company: drag.company.clone(),
-                                })
-                            })
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.open_role_drawer(c.clone(), DrawerTab::Overview, cx);
-                            }))
-                            .child(
+                        })
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.open_role_drawer(c.clone(), DrawerTab::Overview, cx);
+                        }))
+                        .when(is_urgent, |d| {
+                            d.child(
                                 div()
-                                    .flex()
-                                    .items_center()
-                                    .justify_between()
-                                    .gap_2()
-                                    .child(
-                                        div()
-                                            .min_w_0()
-                                            .overflow_hidden()
-                                            .text_xs()
-                                            .text_color(theme::text_primary())
-                                            .child(card.company.clone()),
-                                    )
-                                    .when_some(card.note_line.clone(), |d, note| {
-                                        d.child(
+                                    .w(px(2.0))
+                                    .flex_shrink_0()
+                                    .rounded(px(2.0))
+                                    .bg(theme::amber_accent()),
+                            )
+                        })
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .flex()
+                                .flex_col()
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .justify_between()
+                                        .gap_2()
+                                        .child(
                                             div()
-                                                .flex_shrink_0()
+                                                .min_w_0()
+                                                .overflow_hidden()
                                                 .text_xs()
-                                                .text_color(if is_urgent {
-                                                    theme::amber_text()
-                                                } else if is_quiet {
-                                                    theme::rose_text()
-                                                } else {
-                                                    theme::text_muted()
-                                                })
-                                                .child(note),
+                                                .text_color(theme::text_primary())
+                                                .child(card.company.clone()),
                                         )
-                                    }),
-                            )
-                            .child(
-                                div()
-                                    .mt(px(2.0))
-                                    .min_w_0()
-                                    .overflow_hidden()
-                                    .text_xs()
-                                    .text_color(theme::text_muted())
-                                    .child(card.title.clone()),
-                            );
-                        if just_landed.is_some() {
-                            row = row.bg(theme::lavender_wash());
-                        }
-                        if let Some(epoch) = just_landed {
-                            row.with_animation(
-                                SharedString::from(format!("land-{epoch}")),
-                                Animation::new(Duration::from_millis(200))
-                                    .with_easing(ease_out_quint()),
-                                |el, t| el.opacity(0.6 + 0.4 * t),
-                            )
-                            .into_any_element()
-                        } else {
-                            row.into_any_element()
-                        }
-                    })),
-            )
-            .into_any_element()
+                                        .when_some(card.note_line.clone(), |d, note| {
+                                            d.child(
+                                                div()
+                                                    .flex_shrink_0()
+                                                    .text_xs()
+                                                    .text_color(if is_urgent {
+                                                        theme::amber_text()
+                                                    } else if is_quiet {
+                                                        theme::rose_text()
+                                                    } else {
+                                                        theme::text_muted()
+                                                    })
+                                                    .child(note),
+                                            )
+                                        }),
+                                )
+                                .child(
+                                    div()
+                                        .mt(px(2.0))
+                                        .min_w_0()
+                                        .overflow_hidden()
+                                        .text_xs()
+                                        .text_color(theme::text_muted())
+                                        .child(card.title.clone()),
+                                ),
+                        );
+                    if just_landed.is_some() {
+                        row = row.bg(theme::lavender_wash());
+                    }
+                    if let Some(epoch) = just_landed {
+                        row.with_animation(
+                            SharedString::from(format!("land-{epoch}")),
+                            Animation::new(Duration::from_millis(200))
+                                .with_easing(ease_out_quint()),
+                            |el, t| el.opacity(0.6 + 0.4 * t),
+                        )
+                        .into_any_element()
+                    } else {
+                        row.into_any_element()
+                    }
+                }))
+            });
+
+        // Smoothly collapse empty columns to 0px when Attention-only is active so
+        // active columns glide cleanly into place, and expand back when toggled off.
+        if !self.attention_toggled {
+            return div()
+                .mr_4()
+                .flex_shrink_0()
+                .h_full()
+                .child(col_div)
+                .into_any_element();
+        }
+        let epoch = self.attention_anim_epoch;
+        if hidden_by_attention {
+            div()
+                .h_full()
+                .flex_shrink_0()
+                .overflow_hidden()
+                .child(col_div)
+                .with_animation(
+                    SharedString::from(format!("att-hide-{col_name}-{epoch}")),
+                    Animation::new(Duration::from_millis(220)).with_easing(ease_out_quint()),
+                    |el, t| {
+                        let inv = 1.0 - t;
+                        el.w(px(268.0 * inv)).mr(px(16.0 * inv)).opacity(inv)
+                    },
+                )
+                .into_any_element()
+        } else if !self.only_attention {
+            div()
+                .h_full()
+                .flex_shrink_0()
+                .overflow_hidden()
+                .child(col_div)
+                .with_animation(
+                    SharedString::from(format!("att-show-{col_name}-{epoch}")),
+                    Animation::new(Duration::from_millis(220)).with_easing(ease_out_quint()),
+                    |el, t| el.w(px(268.0 * t)).mr(px(16.0 * t)).opacity(t),
+                )
+                .into_any_element()
+        } else {
+            div()
+                .mr_4()
+                .flex_shrink_0()
+                .h_full()
+                .child(col_div)
+                .into_any_element()
+        }
     }
 
     fn render_board(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1816,8 +1974,7 @@ impl JobHarnessApp {
                                         theme::text_muted()
                                     })
                                     .on_click(cx.listener(|this, _, _, cx| {
-                                        this.only_attention = !this.only_attention;
-                                        cx.notify();
+                                        this.toggle_attention_only(cx);
                                     }))
                                     .child("Attention only"),
                             )
@@ -1844,16 +2001,19 @@ impl JobHarnessApp {
                             ),
                     ),
             )
-            // Horizontally-scrollable Kanban board with expandable Interviews stage group
+            // Horizontally-scrollable Kanban board with axis-locked scroll & expandable Interviews group
             .child(
                 div()
                     .id("kanban-scroll-x")
+                    .track_scroll(&self.board_scroll_x)
+                    .on_scroll_wheel(cx.listener(|this, ev: &ScrollWheelEvent, _, cx| {
+                        this.handle_board_scroll(None, ev, cx);
+                    }))
                     .flex_1()
                     .min_h_0()
                     .min_w_0()
                     .overflow_x_scroll()
                     .flex()
-                    .gap_4()
                     .children(base_columns.into_iter().map(|col_name| {
                         let col_cards: Vec<&RoleCard> = cards
                             .iter()
