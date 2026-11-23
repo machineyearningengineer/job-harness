@@ -180,6 +180,26 @@
           "minimum": 5,
           "maximum": 1440
         },
+        "pre_interview_reminder_minutes": {
+          "type": "integer",
+          "minimum": 5,
+          "maximum": 1440
+        },
+        "post_interview_debrief_delay_minutes": {
+          "type": "integer",
+          "minimum": 5,
+          "maximum": 1440
+        },
+        "transcript_sources": {
+          "type": "array",
+          "description": "Optional connected meeting-notes or transcript sources (e.g. granola, wispr_flow, fireflies, manual_transcript).",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 100
+          },
+          "maxItems": 20
+        },
         "async_question_cutoff_minutes": {
           "type": "integer",
           "minimum": 1,
