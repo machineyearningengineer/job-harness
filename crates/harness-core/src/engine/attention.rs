@@ -124,6 +124,16 @@ impl Engine {
                         "api",
                         "server",
                         "infrastructure",
+                        "software engineer",
+                        "golang",
+                        " go ",
+                        "python",
+                        "rust",
+                        "pub/sub",
+                        "data engineer",
+                        "cloud",
+                        "devops",
+                        "sre",
                     ]
                     .into_iter()
                     .map(str::to_owned),
@@ -137,6 +147,12 @@ impl Engine {
                         "front-end",
                         "web",
                         "ui",
+                        "founding engineer",
+                        "lead engineer",
+                        "staff engineer",
+                        "principal engineer",
+                        "typescript",
+                        "react",
                     ]
                     .into_iter()
                     .map(str::to_owned),

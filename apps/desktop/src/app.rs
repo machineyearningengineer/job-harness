@@ -152,6 +152,7 @@ pub struct JobHarnessApp {
     board_scroll_x: ScrollHandle,
     col_scrolls: HashMap<&'static str, ScrollHandle>,
     scroll_axis_lock: Option<ScrollAxis>,
+    last_scroll_at: Option<Instant>,
     right_drawer: RightDrawer,
     drawer_tab: DrawerTab,
     active_popover: ActivePopover,
@@ -166,6 +167,7 @@ pub struct JobHarnessApp {
     only_attention: bool,
     attention_toggled: bool,
     interviews_expanded: bool,
+    collapsed_cols: HashSet<&'static str>,
     dismissed_tidy: HashSet<String>,
 
     // Scoped animation epochs (only trigger when that exact surface opens)
@@ -175,6 +177,7 @@ pub struct JobHarnessApp {
     move_anim_epoch: u64,
     interviews_anim_epoch: u64,
     attention_anim_epoch: u64,
+    collapse_anim_epoch: u64,
     last_moved_record: Option<(String, u64)>,
 
     // Selected role & citation drilldown
@@ -241,6 +244,7 @@ impl JobHarnessApp {
             .map(|name| (name, ScrollHandle::new()))
             .collect(),
             scroll_axis_lock: None,
+            last_scroll_at: None,
             right_drawer: RightDrawer::Closed,
             drawer_tab: DrawerTab::Overview,
             active_popover: ActivePopover::None,
@@ -253,6 +257,7 @@ impl JobHarnessApp {
             only_attention: false,
             attention_toggled: false,
             interviews_expanded: false,
+            collapsed_cols: HashSet::new(),
             dismissed_tidy: HashSet::new(),
             chat_anim_epoch: 1,
             drawer_anim_epoch: 1,
@@ -260,6 +265,7 @@ impl JobHarnessApp {
             move_anim_epoch: 1,
             interviews_anim_epoch: 1,
             attention_anim_epoch: 1,
+            collapse_anim_epoch: 1,
             last_moved_record: None,
             selected_role: None,
             citation_title: None,
@@ -882,6 +888,29 @@ impl JobHarnessApp {
         }
     }
 
+    fn replace_track_cv_dialog(&mut self, relative_target: String, cx: &mut Context<Self>) {
+        if let Some(picked) = rfd::FileDialog::new()
+            .add_filter("PDF", &["pdf"])
+            .pick_file()
+        {
+            let client = self.client.clone();
+            cx.spawn(async move |this, cx| {
+                let res = cx
+                    .background_executor()
+                    .spawn(async move { client.replace_track_cv(&relative_target, &picked) })
+                    .await;
+                let _ = this.update(cx, |app, cx| match res {
+                    Ok(rel) => {
+                        app.set_toast(format!("Replaced track CV: {rel}"), cx);
+                        app.refresh_snapshot_async(cx);
+                    }
+                    Err(e) => app.set_toast(format!("Replace failed: {e}"), cx),
+                });
+            })
+            .detach();
+        }
+    }
+
     fn submit_prompt(&mut self, prompt: String, from_quick_bar: bool, cx: &mut Context<Self>) {
         let trimmed = prompt.trim().to_owned();
         if trimmed.is_empty() {
@@ -1031,6 +1060,16 @@ impl JobHarnessApp {
             self.active_input = ActiveInput::None;
             cx.notify();
             return;
+        }
+        if self.active_input == ActiveInput::None && !cmd {
+            if key == "left" {
+                self.nudge_board_x(284.0, cx);
+                return;
+            }
+            if key == "right" {
+                self.nudge_board_x(-284.0, cx);
+                return;
+            }
         }
 
         if self.active_input == ActiveInput::CommandBar {
@@ -1574,23 +1613,46 @@ impl JobHarnessApp {
         cx.notify();
     }
 
-    /// Dominant-axis gesture lock so trackpad vertical list scrolling and horizontal
-    /// Kanban swiping never fight each other.
+    fn nudge_board_x(&mut self, delta_px: f32, cx: &mut Context<Self>) {
+        let cur = self.board_scroll_x.offset();
+        let max_x: f32 = self.board_scroll_x.max_offset().width.into();
+        let cur_x: f32 = cur.x.into();
+        let next_x = (cur_x + delta_px).clamp(-max_x.max(0.0), 0.0);
+        self.board_scroll_x.set_offset(point(px(next_x), cur.y));
+        cx.notify();
+    }
+
+    /// Time-decaying dominant-axis gesture lock + Shift+Wheel horizontal scroll.
+    /// Combined with GPUI's `.restrict_scroll_to_axis()` so sideways trackpad swipes
+    /// NEVER hijack vertical column lists (including during macOS inertial momentum).
     fn handle_board_scroll(
         &mut self,
         col_name: Option<&'static str>,
         event: &ScrollWheelEvent,
         cx: &mut Context<Self>,
     ) {
-        if matches!(event.touch_phase, TouchPhase::Started) {
+        let now = Instant::now();
+        let gesture_expired = self
+            .last_scroll_at
+            .is_none_or(|t| now.duration_since(t) > Duration::from_millis(180));
+        if matches!(event.touch_phase, TouchPhase::Started) || gesture_expired {
             self.scroll_axis_lock = None;
         }
-        let delta = event.delta.pixel_delta(px(24.0));
-        let dx: f32 = delta.x.into();
-        let dy: f32 = delta.y.into();
+        self.last_scroll_at = Some(now);
 
-        if self.scroll_axis_lock.is_none() && (dx.abs() > 0.8 || dy.abs() > 0.8) {
-            self.scroll_axis_lock = if dx.abs() > dy.abs() * 1.15 || col_name.is_none() {
+        let delta = event.delta.pixel_delta(px(24.0));
+        let mut dx: f32 = delta.x.into();
+        let mut dy: f32 = delta.y.into();
+
+        // Standard mouse-wheel horizontal scroll: Shift + Wheel
+        if event.modifiers.shift && dx.abs() < 0.1 && dy.abs() > 0.1 {
+            dx = dy;
+            dy = 0.0;
+            self.scroll_axis_lock = Some(ScrollAxis::Horizontal);
+        }
+
+        if self.scroll_axis_lock.is_none() && (dx.abs() > 0.6 || dy.abs() > 0.6) {
+            self.scroll_axis_lock = if dx.abs() > dy.abs() * 1.1 || col_name.is_none() {
                 Some(ScrollAxis::Horizontal)
             } else {
                 Some(ScrollAxis::Vertical)
@@ -1599,13 +1661,8 @@ impl JobHarnessApp {
 
         match self.scroll_axis_lock {
             Some(ScrollAxis::Horizontal) => {
-                let cur = self.board_scroll_x.offset();
-                let max_x: f32 = self.board_scroll_x.max_offset().width.into();
-                let cur_x: f32 = cur.x.into();
-                let next_x = (cur_x + dx).clamp(-max_x.max(0.0), 0.0);
-                self.board_scroll_x.set_offset(point(px(next_x), cur.y));
+                self.nudge_board_x(dx, cx);
                 cx.stop_propagation();
-                cx.notify();
             }
             Some(ScrollAxis::Vertical) => {
                 if let Some(name) = col_name
@@ -1622,10 +1679,6 @@ impl JobHarnessApp {
             }
             None => {}
         }
-
-        if matches!(event.touch_phase, TouchPhase::Ended) {
-            self.scroll_axis_lock = None;
-        }
     }
 
     fn render_kanban_column(
@@ -1638,6 +1691,56 @@ impl JobHarnessApp {
     ) -> AnyElement {
         let scroll_handle = self.col_scrolls.get(col_name).cloned();
         let hidden_by_attention = self.only_attention && col_total == 0;
+        let is_collapsed = self.collapsed_cols.contains(col_name) && !hidden_by_attention;
+
+        if is_collapsed {
+            let short: String = col_name.chars().take(3).collect();
+            let epoch = self.collapse_anim_epoch;
+            return div()
+                .id(SharedString::from(format!("col-collapsed-{col_name}")))
+                .mr_3()
+                .h_full()
+                .flex_shrink_0()
+                .w(px(40.0))
+                .rounded(px(9.0))
+                .bg(theme::surface_subtle())
+                .hover(|s| s.bg(theme::row_hover()))
+                .drag_over::<DragCard>(|style, _, _, _| style.bg(theme::drop_highlight()))
+                .on_drop(cx.listener(move |this, drag: &DragCard, _, cx| {
+                    this.move_card_optimistic(drag, col_name, cx);
+                }))
+                .cursor_pointer()
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.collapsed_cols.remove(col_name);
+                    this.collapse_anim_epoch = this.collapse_anim_epoch.wrapping_add(1);
+                    cx.notify();
+                }))
+                .py_3()
+                .flex()
+                .flex_col()
+                .items_center()
+                .gap_2()
+                .child(div().text_xs().text_color(theme::text_muted()).child("›"))
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(theme::text_secondary())
+                        .child(short),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(theme::text_muted())
+                        .child(col_total.to_string()),
+                )
+                .with_animation(
+                    SharedString::from(format!("col-rail-{col_name}-{epoch}")),
+                    Animation::new(Duration::from_millis(160)).with_easing(ease_out_quint()),
+                    |el, t| el.opacity(0.6 + 0.4 * t),
+                )
+                .into_any_element();
+        }
+
         let col_div = div()
             .id(SharedString::from(format!("col-{col_name}")))
             .w(px(268.0))
@@ -1689,9 +1792,37 @@ impl JobHarnessApp {
                     })
                     .child(
                         div()
-                            .text_xs()
-                            .text_color(theme::text_muted())
-                            .child(col_total.to_string()),
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(theme::text_muted())
+                                    .child(col_total.to_string()),
+                            )
+                            .when(!expandable_interviews, |d| {
+                                d.child(
+                                    div()
+                                        .id(SharedString::from(format!("collapse-col-{col_name}")))
+                                        .px(px(3.0))
+                                        .rounded(px(4.0))
+                                        .cursor_pointer()
+                                        .hover(|s| {
+                                            s.bg(theme::row_hover())
+                                                .text_color(theme::text_primary())
+                                        })
+                                        .text_xs()
+                                        .text_color(theme::text_muted())
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            this.collapsed_cols.insert(col_name);
+                                            this.collapse_anim_epoch =
+                                                this.collapse_anim_epoch.wrapping_add(1);
+                                            cx.notify();
+                                        }))
+                                        .child("‹"),
+                                )
+                            }),
                     ),
             )
             .child({
@@ -1705,6 +1836,7 @@ impl JobHarnessApp {
                     }))
                     .flex()
                     .flex_col();
+                scroller.style().restrict_scroll_to_axis = Some(true);
                 if let Some(h) = scroll_handle {
                     scroller = scroller.track_scroll(&h);
                 }
@@ -1998,12 +2130,62 @@ impl JobHarnessApp {
                                         cx.notify();
                                     }))
                                     .child(format!("Archive ({})", self.snapshot.closed_count)),
+                            )
+                            // Non-intrusive horizontal nudge buttons for mouse-only users (also Shift+Wheel & ←/→)
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(2.0))
+                                    .pl_1()
+                                    .child(
+                                        div()
+                                            .id("board-nudge-left")
+                                            .w(px(22.0))
+                                            .h(px(22.0))
+                                            .rounded(px(5.0))
+                                            .flex()
+                                            .items_center()
+                                            .justify_center()
+                                            .cursor_pointer()
+                                            .hover(|s| {
+                                                s.bg(theme::row_hover())
+                                                    .text_color(theme::text_primary())
+                                            })
+                                            .text_xs()
+                                            .text_color(theme::text_muted())
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                this.nudge_board_x(284.0, cx);
+                                            }))
+                                            .child("‹"),
+                                    )
+                                    .child(
+                                        div()
+                                            .id("board-nudge-right")
+                                            .w(px(22.0))
+                                            .h(px(22.0))
+                                            .rounded(px(5.0))
+                                            .flex()
+                                            .items_center()
+                                            .justify_center()
+                                            .cursor_pointer()
+                                            .hover(|s| {
+                                                s.bg(theme::row_hover())
+                                                    .text_color(theme::text_primary())
+                                            })
+                                            .text_xs()
+                                            .text_color(theme::text_muted())
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                this.nudge_board_x(-284.0, cx);
+                                            }))
+                                            .child("›"),
+                                    ),
                             ),
                     ),
             )
             // Horizontally-scrollable Kanban board with axis-locked scroll & expandable Interviews group
-            .child(
-                div()
+            .child({
+                let mut board_scroller = div()
                     .id("kanban-scroll-x")
                     .track_scroll(&self.board_scroll_x)
                     .on_scroll_wheel(cx.listener(|this, ev: &ScrollWheelEvent, _, cx| {
@@ -2013,7 +2195,9 @@ impl JobHarnessApp {
                     .min_h_0()
                     .min_w_0()
                     .overflow_x_scroll()
-                    .flex()
+                    .flex();
+                board_scroller.style().restrict_scroll_to_axis = Some(true);
+                board_scroller
                     .children(base_columns.into_iter().map(|col_name| {
                         let col_cards: Vec<&RoleCard> = cards
                             .iter()
@@ -2107,8 +2291,8 @@ impl JobHarnessApp {
                             false,
                             cx,
                         ))
-                    }),
-            )
+                    })
+            })
             // Quick-Ask upward reply popover
             .when(self.quick_popover_open, |d| {
                 d.child(
@@ -2622,14 +2806,15 @@ impl JobHarnessApp {
                             .as_ref()
                             .map(|p| p.display().to_string())
                             .unwrap_or_else(|| node.relative_path.clone());
-                        let prefix = if node.is_master { "" } else { "└ " };
-                        let sub = match node.matched_roles {
-                            Some(n) => format!("{} · {} recent roles", node.relative_path, n),
-                            None => node.relative_path.clone(),
-                        };
+                        let rel_for_replace = node.relative_path.clone();
+                        let is_master = node.is_master;
+                        let prefix = if is_master { "" } else { "└ " };
+                        let roles_note = node
+                            .matched_roles
+                            .map(|n| format!("{n} recent roles"));
 
                         div()
-                            .pl(if node.is_master { px(0.0) } else { px(14.0) })
+                            .pl(if is_master { px(0.0) } else { px(14.0) })
                             .py_2()
                             .border_b_1()
                             .border_color(theme::hairline())
@@ -2643,22 +2828,55 @@ impl JobHarnessApp {
                                     .justify_between()
                                     .child(
                                         div()
-                                            .text_xs()
-                                            .text_color(theme::text_primary())
-                                            .child(format!("{prefix}{}", node.name)),
+                                            .flex()
+                                            .items_center()
+                                            .gap_2()
+                                            .child(
+                                                div()
+                                                    .text_xs()
+                                                    .text_color(theme::text_primary())
+                                                    .child(format!("{prefix}{}", node.name)),
+                                            )
+                                            .when_some(roles_note, |d, note| {
+                                                d.child(
+                                                    div()
+                                                        .text_xs()
+                                                        .text_color(theme::text_muted())
+                                                        .child(note),
+                                                )
+                                            }),
                                     )
+                                    // Subtle 7px green/amber status dot instead of repeated "Ready" text
                                     .child(
                                         div()
-                                            .text_xs()
-                                            .text_color(if node.exists {
+                                            .w(px(7.0))
+                                            .h(px(7.0))
+                                            .rounded(px(99.0))
+                                            .bg(if node.exists {
                                                 theme::emerald()
                                             } else {
-                                                theme::amber_text()
-                                            })
-                                            .child(if node.exists { "Ready" } else { "Missing" }),
+                                                theme::amber_accent()
+                                            }),
                                     ),
                             )
-                            .child(div().text_xs().text_color(theme::text_muted()).child(sub))
+                            // Clickable underlined path reveals the PDF in Finder
+                            .child(
+                                div()
+                                    .id(SharedString::from(format!("cv-path-{i}")))
+                                    .text_xs()
+                                    .text_color(theme::text_muted())
+                                    .underline()
+                                    .hover(|s| s.text_color(theme::text_primary()))
+                                    .cursor_pointer()
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        if let Some(p) = &full_reveal {
+                                            reveal_in_file_manager(p);
+                                        } else {
+                                            this.set_toast("Reveal requires local workspace", cx);
+                                        }
+                                    }))
+                                    .child(node.relative_path.clone()),
+                            )
                             .child(
                                 div()
                                     .flex()
@@ -2681,24 +2899,6 @@ impl JobHarnessApp {
                                     )
                                     .child(
                                         div()
-                                            .id(SharedString::from(format!("cv-reveal-{i}")))
-                                            .text_xs()
-                                            .text_color(theme::text_secondary())
-                                            .cursor_pointer()
-                                            .on_click(cx.listener(move |this, _, _, cx| {
-                                                if let Some(p) = &full_reveal {
-                                                    reveal_in_file_manager(p);
-                                                } else {
-                                                    this.set_toast(
-                                                        "Reveal requires local workspace",
-                                                        cx,
-                                                    );
-                                                }
-                                            }))
-                                            .child("Reveal"),
-                                    )
-                                    .child(
-                                        div()
                                             .id(SharedString::from(format!("cv-copy-{i}")))
                                             .text_xs()
                                             .text_color(theme::text_secondary())
@@ -2710,19 +2910,82 @@ impl JobHarnessApp {
                                                 this.set_toast("Copied CV path", cx);
                                             }))
                                             .child("Copy path"),
-                                    ),
+                                    )
+                                    .when(!is_master, |d| {
+                                        d.child(
+                                            div()
+                                                .id(SharedString::from(format!("cv-replace-{i}")))
+                                                .text_xs()
+                                                .text_color(theme::text_secondary())
+                                                .hover(|s| s.text_color(theme::text_primary()))
+                                                .cursor_pointer()
+                                                .on_click(cx.listener(move |this, _, _, cx| {
+                                                    this.replace_track_cv_dialog(
+                                                        rel_for_replace.clone(),
+                                                        cx,
+                                                    );
+                                                }))
+                                                .child("Replace"),
+                                        )
+                                    }),
                             )
                     }))
                     .when(self.snapshot.suggest_new_track, |d| {
-                        let sample = self.snapshot.unmatched_track_titles.join(", ");
+                        let samples: Vec<String> = self
+                            .snapshot
+                            .unmatched_track_titles
+                            .iter()
+                            .take(3)
+                            .cloned()
+                            .collect();
                         d.child(
                             div()
-                                .py_2()
-                                .text_xs()
-                                .text_color(theme::amber_text())
-                                .child(format!(
-                                    "Recent roles sit outside current tracks ({sample}). Ask Chat to draft a new track."
-                                )),
+                                .pt_3()
+                                .flex()
+                                .flex_col()
+                                .gap_1()
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap_2()
+                                        .child(
+                                            div()
+                                                .w(px(6.0))
+                                                .h(px(6.0))
+                                                .rounded(px(99.0))
+                                                .bg(theme::amber_accent()),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .text_color(theme::text_primary())
+                                                .child("Roles outside current tracks"),
+                                        ),
+                                )
+                                .children(samples.into_iter().map(|title| {
+                                    div()
+                                        .pl_3()
+                                        .text_xs()
+                                        .text_color(theme::text_muted())
+                                        .child(format!("· {title}"))
+                                }))
+                                .child(
+                                    div()
+                                        .id("cv-draft-track")
+                                        .pt_1()
+                                        .text_xs()
+                                        .text_color(theme::lavender())
+                                        .cursor_pointer()
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.submit_prompt(
+                                                "Review roles outside my current CV tracks and suggest whether a new child track makes sense.".into(),
+                                                false,
+                                                cx,
+                                            );
+                                        }))
+                                        .child("Review in Chat →"),
+                                ),
                         )
                     })
                     .child(

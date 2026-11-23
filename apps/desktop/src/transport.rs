@@ -596,6 +596,36 @@ impl WorkspaceClient {
         })?;
         Ok(imported_path)
     }
+
+    /// Safely replaces a child CV track PDF atomically (backing up any existing copy
+    /// under `output/tracks/<track>/.backups/`). The agent automatically hashes and
+    /// freezes the updated bytes on the next `prepare_application`.
+    pub fn replace_track_cv(&self, relative_target: &str, source_pdf: &Path) -> Result<String> {
+        let Some(root) = self.target.local_root() else {
+            bail!("Replacing a track CV requires a local workspace.");
+        };
+        let bytes = fs::read(source_pdf).context("Could not read selected PDF")?;
+        if !bytes.starts_with(b"%PDF-") {
+            bail!("Selected file is not a valid PDF.");
+        }
+        let _guard = storage::WorkspaceLock::acquire(root, true)?;
+        let dest = root.join(relative_target);
+        if let Some(parent) = dest.parent() {
+            fs::create_dir_all(parent)?;
+            if dest.is_file() {
+                let backup_dir = parent.join(".backups");
+                fs::create_dir_all(&backup_dir)?;
+                let stamp = chrono::Utc::now().format("%Y%m%dT%H%M%SZ");
+                let stem = dest
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("cv.pdf");
+                let _ = fs::copy(&dest, backup_dir.join(format!("{stamp}-{stem}")));
+            }
+        }
+        storage::atomic_write(&dest, &bytes)?;
+        Ok(relative_target.to_owned())
+    }
 }
 
 pub fn spawn_change_listener(
