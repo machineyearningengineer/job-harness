@@ -3098,6 +3098,14 @@
           "minLength": 1,
           "maxLength": 20000
         },
+        "channel": {
+          "type": "string",
+          "enum": [
+            "portal",
+            "direct_email",
+            "recruiter_outreach"
+          ]
+        },
         "idempotency_key": {
           "type": "string",
           "minLength": 1,
@@ -5407,6 +5415,14 @@
           "type": "string",
           "minLength": 1,
           "maxLength": 20000
+        },
+        "channel": {
+          "type": "string",
+          "enum": [
+            "portal",
+            "direct_email",
+            "recruiter_outreach"
+          ]
         },
         "idempotency_key": {
           "type": "string",

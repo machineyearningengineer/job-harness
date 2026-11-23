@@ -12,6 +12,165 @@
       "minLength": 1,
       "maxLength": 20000
     },
+    "max_daily_submissions": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Optional workspace-wide limit on attempts begun per calendar day in the configured timezone (default UTC). Omit for no daily limit; zero blocks all new begins."
+    },
+    "daily_channel_limits": {
+      "type": "object",
+      "description": "Optional per-channel daily begin caps enforced atomically alongside max_daily_submissions.",
+      "properties": {
+        "portal": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "direct_email": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "recruiter_outreach": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    },
+    "permissions": {
+      "type": "object",
+      "description": "Explicit fail-closed automation permissions. All default to false unless explicitly enabled by the candidate.",
+      "properties": {
+        "auto_apply_portal": {
+          "type": "boolean"
+        },
+        "auto_send_first_contact_email": {
+          "type": "boolean"
+        },
+        "auto_reply_threads": {
+          "type": "boolean"
+        },
+        "auto_book_calendar": {
+          "type": "boolean"
+        },
+        "auto_archive_mail": {
+          "type": "boolean"
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    },
+    "discovery": {
+      "type": "object",
+      "description": "Configurable discovery sources, ATS exclusions, and role filters for job scouting.",
+      "properties": {
+        "sources": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 20000
+          },
+          "minItems": 1,
+          "maxItems": 50
+        },
+        "exclude_ats": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 20000
+          },
+          "maxItems": 30
+        },
+        "max_posting_age_hours": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 8760
+        },
+        "location_preferences": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 20000
+          },
+          "maxItems": 20
+        },
+        "min_base_salary": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "target_base_salary": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "currency": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 16
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    },
+    "communication": {
+      "type": "object",
+      "description": "Candidate voice, locale, sender identity, and explicit anti-patterns for drafted/sent messages.",
+      "properties": {
+        "locale": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 32
+        },
+        "tone": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2000
+        },
+        "anti_patterns": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1000
+          },
+          "maxItems": 50
+        },
+        "sender_email": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 320
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "mirror_sent_style": {
+          "type": "boolean"
+        },
+        "sign_off": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    },
+    "contact_categories": {
+      "type": "array",
+      "description": "Taxonomy for grouping hiring contacts and outreach leads.",
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 100
+      },
+      "maxItems": 20
+    },
     "primary_cv": {
       "anyOf": [
         {

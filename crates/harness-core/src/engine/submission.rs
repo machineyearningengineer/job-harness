@@ -1,6 +1,84 @@
 //! Freeze, reserve, begin once and resolve evidence. Unknown attempts never expire.
 use super::*;
 
+fn check_daily_submission_budget(
+    state: &Value,
+    limit: u64,
+    channel_limit: Option<(&str, u64)>,
+    zone: chrono_tz::Tz,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<()> {
+    let today = now.with_timezone(&zone).date_naive();
+    let invalid = || {
+        Error::new(
+            "invalid_state",
+            "Cannot verify the workspace daily submission cap: malformed begin history. Preserve the coordinator and reconcile it before submitting.",
+        )
+    };
+    let attempts = state["attempts"].as_object().expect("validated attempts");
+    // A journaled begin must still have its attempt and timestamp. In particular,
+    // a negatively resolved attempt must not look like an unstarted cancellation.
+    for event in state["events"].as_array().expect("validated events") {
+        if event["tool"] == "begin_submission" {
+            let id = event["result"]["attempt_id"].as_str().ok_or_else(invalid)?;
+            if attempts.get(id).and_then(|a| a.get("began_at")).is_none() {
+                return Err(invalid());
+            }
+        }
+    }
+    let mut used = 0;
+    let mut channel_used = 0;
+    for attempt in attempts.values() {
+        let status = SubmissionState::parse(&attempt["status"])?;
+        let stamp = match (status, attempt.get("began_at")) {
+            (SubmissionState::Reserved, None) => continue,
+            (SubmissionState::Cancelled, None)
+                if attempt.get("evidence").is_none() && attempt.get("receipt").is_none() =>
+            {
+                continue;
+            }
+            (SubmissionState::Reserved, Some(_)) | (_, None) => return Err(invalid()),
+            (_, Some(stamp)) => stamp.as_str().ok_or_else(invalid)?,
+        };
+        let began = chrono::DateTime::parse_from_rfc3339(stamp).map_err(|_| invalid())?;
+        let began_on = began.with_timezone(&zone).date_naive();
+        if began_on > today {
+            return Err(invalid());
+        }
+        if began_on == today {
+            used += 1;
+            if let Some((target_channel, _)) = channel_limit {
+                let attempt_channel = attempt
+                    .get("channel")
+                    .and_then(Value::as_str)
+                    .unwrap_or("portal");
+                if attempt_channel == target_channel {
+                    channel_used += 1;
+                }
+            }
+        }
+    }
+    if used >= limit {
+        return Err(Error::new(
+            "daily_submission_cap_reached",
+            format!(
+                "Workspace daily submission cap reached ({used}/{limit}) for {today} in {zone}"
+            ),
+        ));
+    }
+    if let Some((target_channel, ch_limit)) = channel_limit
+        && channel_used >= ch_limit
+    {
+        return Err(Error::new(
+            "daily_channel_cap_reached",
+            format!(
+                "Workspace daily {target_channel} cap reached ({channel_used}/{ch_limit}) for {today} in {zone}"
+            ),
+        ));
+    }
+    Ok(())
+}
+
 impl Engine {
     pub(super) fn copy_artifact(&self, source: &str, folder: &str) -> Result<Value> {
         let path = self.artifact_path(source, &["pdf", "md", "txt", "json", "jpg", "png"])?;
@@ -104,7 +182,10 @@ impl Engine {
                 json!(domain::digest(&fs::read(self.text_path(source)?)?)),
             );
         }
-        let packet = json!({"record":record,"company":company,"vacancy_url":domain::normal_url(vacancy_url)?,"source":args["source"],"posting_id":args.get("posting_id").cloned().unwrap_or(Value::Null),"cv":self.copy_artifact(s(args,"cv_path")?,"packets")?,"answers":self.copy_artifact(s(args,"answers_path")?,"packets")?,"source_record":self.copy_artifact(record,"packets")?,"answer_source_sha256":source_hashes,"ledger_revision":self.revision(),"ledger_dirty":self.dirty()});
+        let mut packet = json!({"record":record,"company":company,"vacancy_url":domain::normal_url(vacancy_url)?,"source":args["source"],"posting_id":args.get("posting_id").cloned().unwrap_or(Value::Null),"cv":self.copy_artifact(s(args,"cv_path")?,"packets")?,"answers":self.copy_artifact(s(args,"answers_path")?,"packets")?,"source_record":self.copy_artifact(record,"packets")?,"answer_source_sha256":source_hashes,"ledger_revision":self.revision(),"ledger_dirty":self.dirty()});
+        if let Some(ch) = args.get("channel").and_then(Value::as_str) {
+            packet["channel"] = json!(ch);
+        }
         let id = domain::digest(&domain::encoded(&packet)?);
         storage::atomic_write(
             &self
@@ -179,7 +260,14 @@ impl Engine {
         Ok(packet)
     }
     pub(super) fn validate_answer_sources(&self, packet: &Value, code: &str) -> Result<()> {
-        let settings = self.settings()?;
+        self.validate_answer_sources_with_settings(packet, code, &self.settings()?)
+    }
+    fn validate_answer_sources_with_settings(
+        &self,
+        packet: &Value,
+        code: &str,
+        settings: &Value,
+    ) -> Result<()> {
         let sources = settings["answer_sources"].as_array().unwrap();
         let hashes = packet["answer_source_sha256"]
             .as_object()
@@ -287,7 +375,8 @@ impl Engine {
         }
         self.active_run(state, s(&attempt, "run_id")?)?;
         let packet = self.packet(s(&attempt, "packet_id")?)?;
-        self.validate_answer_sources(&packet, "answers_changed")?;
+        let settings = self.settings()?;
+        self.validate_answer_sources_with_settings(&packet, "answers_changed", &settings)?;
         if self.duplicate(
             state,
             s(&packet, "company")?,
@@ -302,8 +391,32 @@ impl Engine {
                 "A later ledger update now blocks submission",
             ));
         }
+        // Engine::call holds the exclusive workspace lock through the check and commit.
+        let began = chrono::Utc::now();
+        let channel = packet
+            .get("channel")
+            .and_then(Value::as_str)
+            .unwrap_or("portal");
+        let total_limit = settings["max_daily_submissions"].as_u64();
+        let channel_limit = settings
+            .get("daily_channel_limits")
+            .and_then(|m| m.get(channel))
+            .and_then(Value::as_u64);
+        if total_limit.is_some() || channel_limit.is_some() {
+            let zone = s(&settings, "timezone")?
+                .parse::<chrono_tz::Tz>()
+                .map_err(|_| Error::new("invalid_arguments", "Configure an IANA timezone"))?;
+            check_daily_submission_budget(
+                state,
+                total_limit.unwrap_or(u64::MAX),
+                channel_limit.map(|cl| (channel, cl)),
+                zone,
+                began,
+            )?;
+        }
         state["attempts"][id]["status"] = json!(SubmissionState::Submitting);
-        state["attempts"][id]["began_at"] = json!(domain::now());
+        state["attempts"][id]["began_at"] =
+            json!(began.to_rfc3339_opts(chrono::SecondsFormat::Micros, false));
         Ok(
             json!({"run_id":attempt["run_id"],"attempt_id":id,"status":"submitting","ready_for_single_submit":true,"packet":packet}),
         )
@@ -463,5 +576,81 @@ impl Engine {
             json!({"tool":"get_run","arguments":{"run_id":args["run_id"]},"reason":"This existing attempt has progressed; inspect it without repeating Submit."})
         };
         Ok((data, vec![next]))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn instant(stamp: &str) -> chrono::DateTime<chrono::Utc> {
+        chrono::DateTime::parse_from_rfc3339(stamp)
+            .unwrap()
+            .to_utc()
+    }
+
+    #[test]
+    fn daily_submission_budget_rolls_over_at_local_midnight_on_a_dst_day() {
+        // New York's spring-forward Sunday spans only 23 hours. These two
+        // checks share a UTC date but fall on opposite sides of local midnight.
+        let state = json!({"attempts":{"a":{"status":"submitted","began_at":"2026-03-08T00:00:00-05:00"}},"events":[]});
+        let zone = chrono_tz::America::New_York;
+        assert_eq!(
+            check_daily_submission_budget(&state, 1, None, zone, instant("2026-03-09T03:59:59Z"))
+                .unwrap_err()
+                .code,
+            "daily_submission_cap_reached"
+        );
+        check_daily_submission_budget(&state, 1, None, zone, instant("2026-03-09T04:00:00Z"))
+            .unwrap();
+    }
+
+    #[test]
+    fn daily_submission_budget_counts_begins_not_reservations_or_outcomes() {
+        let state = json!({"attempts":{
+            "reserved":{"status":"reserved"},
+            "unstarted_cancellation":{"status":"cancelled"},
+            "negative_resolution":{"status":"cancelled","began_at":"2026-03-08T11:00:00Z","evidence":["fixture"]},
+            "submitting":{"status":"submitting","began_at":"2026-03-08T12:00:00Z"},
+            "unknown":{"status":"outcome_unknown","began_at":"2026-03-08T13:00:00Z"},
+            "submitted":{"status":"submitted","began_at":"2026-03-08T14:00:00Z"}
+        }, "events":[]});
+        let now = instant("2026-03-08T15:00:00Z");
+        assert_eq!(
+            check_daily_submission_budget(&state, 4, None, chrono_tz::UTC, now)
+                .unwrap_err()
+                .code,
+            "daily_submission_cap_reached"
+        );
+        check_daily_submission_budget(&state, 5, None, chrono_tz::UTC, now).unwrap();
+        assert_eq!(
+            check_daily_submission_budget(
+                &json!({"attempts":{},"events":[]}),
+                0,
+                None,
+                chrono_tz::UTC,
+                now
+            )
+            .unwrap_err()
+            .code,
+            "daily_submission_cap_reached"
+        );
+    }
+
+    #[test]
+    fn daily_channel_budget_enforces_portal_and_direct_email_separately() {
+        let state = json!({"attempts":{
+            "p1":{"status":"submitted","began_at":"2026-03-08T10:00:00Z"},
+            "e1":{"status":"submitted","channel":"direct_email","began_at":"2026-03-08T11:00:00Z"}
+        }, "events":[]});
+        let now = instant("2026-03-08T15:00:00Z");
+        assert_eq!(
+            check_daily_submission_budget(&state, 10, Some(("direct_email", 1)), chrono_tz::UTC, now)
+                .unwrap_err()
+                .code,
+            "daily_channel_cap_reached"
+        );
+        check_daily_submission_budget(&state, 10, Some(("portal", 2)), chrono_tz::UTC, now)
+            .unwrap();
     }
 }

@@ -297,6 +297,12 @@ pub fn validate_settings(value: &Value) -> Result<()> {
         ![
             "schema_version",
             "timezone",
+            "max_daily_submissions",
+            "daily_channel_limits",
+            "permissions",
+            "discovery",
+            "communication",
+            "contact_categories",
             "primary_cv",
             "preferred_browser",
             "answer_sources",
@@ -308,6 +314,7 @@ pub fn validate_settings(value: &Value) -> Result<()> {
             "Unsupported workspace configuration",
         ));
     }
+    crate::contracts::validate(&crate::contracts::ledger_schema(), value)?;
     if let Some(zone) = object.get("timezone") {
         let s = zone
             .as_str()
@@ -316,6 +323,13 @@ pub fn validate_settings(value: &Value) -> Result<()> {
         if s.parse::<chrono_tz::Tz>().is_err() {
             return Err(HarnessError::validation("Configure a valid IANA timezone"));
         }
+    }
+    if let Some(max) = object.get("max_daily_submissions")
+        && max.as_u64().is_none()
+    {
+        return Err(HarnessError::validation(
+            "max_daily_submissions must be a nonnegative integer",
+        ));
     }
     for key in ["primary_cv", "preferred_browser"] {
         if let Some(v) = object.get(key)
@@ -501,7 +515,15 @@ pub(crate) fn populate(root: &Path) -> Result<()> {
         ),
         (
             "applications/briefs/template.md",
-            "# Company brief\n\nBusiness, exact vacancy, sourced personal stories, questions and unresolved facts.\n",
+            "# Company Brief (Layer 1 — once per company, updated after each debrief)\n\n- **Product & business model:** Who pays, what problem it solves, how they make money.\n- **Stage & archetype:** Pre-seed / Seed / Series A / Series B / Consultancy — what they buy vs. what they fear.\n- **What this role owns:** Concrete scope from the exact vacancy.\n- **Past work mapped in product speak:** 2–3 sourced projects tilted to their stage.\n- **AI stance:** How they expect candidates to use AI (bounded delegation + verification + ownership).\n- **Open questions & unresolved terms:** Comp, office cadence, reporting line, risks.\n\n## Round Brief (Layer 2 — per round)\n\n- **Round & audience ratio:** Recruiter (80% product / 20% stack) · HM/CTO (50/50) · Technical (10/90) · Design (30/70).\n- **60-second opener:** Point → 2 proof points with numbers → 1 specific link to them.\n- **CARL story cards selected:** 2–3 cards from `context/profile/story-bank.md`.\n- **Questions to ask (2 high-signal):** Tailored to this interviewer.\n\n## Post-Interview Debrief\n\n- **Date & interviewer:**\n- **What landed:**\n- **What missed / follow-up needed:**\n- **New facts or constraints learned (feed back into Layer 1):**\n",
+        ),
+        (
+            "context/profile/story-bank.md",
+            "# Master Story Bank (Point-first CARL Cards)\n\nKeep 5–6 verified stories ready: (1) 0-to-1 build, (2) outage/debugging rescue, (3) legacy modernisation, (4) AI with human-in-the-loop/verification, (5) hard trade-off/pushback, (6) mistake + prevention.\n\nFormat per card: **Headline (1 sentence)** → **Context** → **Action (I, not we)** → **Result (+ real number)** → **Learning / Limit** → **Source evidence**.\n",
+        ),
+        (
+            "context/profile/communication-style.md",
+            "# Communication Style & Anti-Patterns\n\nDefault voice: direct, plain-language, concise, first-person, evidence-backed. Mirror the candidate's own recent Sent emails when available.\n\n## Anti-patterns (avoid in every draft and submission)\n- Empty enthusiasm or filler (\"I'd be thrilled\", \"passionate about\", \"synergy\", \"delighted to apply\").\n- Generic cover-letter fluff not tied to a concrete product/role fact.\n- Em-dash overload, robotic bullet-list clichés, or invented metrics/ownership.\n- Shrinking other disciplines or blaming past teams/tools.\n",
         ),
         (
             ".gitignore",
@@ -523,9 +545,55 @@ pub(crate) fn populate(root: &Path) -> Result<()> {
     )?;
     fs::write(
         root.join("config/career-ledger.json"),
-        serde_json::to_vec_pretty(
-            &json!({"schema_version":1,"timezone":"UTC","primary_cv":null,"preferred_browser":null,"answer_sources":DEFAULT_ANSWERS}),
-        )?,
+        serde_json::to_vec_pretty(&json!({
+            "schema_version": 1,
+            "timezone": "UTC",
+            "max_daily_submissions": 3,
+            "daily_channel_limits": {
+                "portal": 3,
+                "direct_email": 0,
+                "recruiter_outreach": 0
+            },
+            "permissions": {
+                "auto_apply_portal": false,
+                "auto_send_first_contact_email": false,
+                "auto_reply_threads": false,
+                "auto_book_calendar": false,
+                "auto_archive_mail": false
+            },
+            "discovery": {
+                "sources": [
+                    "official_employer_ats_boards",
+                    "founder_and_engineering_posts",
+                    "hn_who_is_hiring"
+                ],
+                "exclude_ats": ["workday"],
+                "max_posting_age_hours": 48
+            },
+            "communication": {
+                "locale": "en-GB",
+                "tone": "direct, concise, plain-language, evidence-backed",
+                "anti_patterns": [
+                    "filler enthusiasm (thrilled, delighted, passionate)",
+                    "generic cover-letter fluff",
+                    "invented metrics or ownership",
+                    "excessive em-dashes or robotic AI phrasing"
+                ],
+                "sender_email": null,
+                "mirror_sent_style": true,
+                "sign_off": "Best,"
+            },
+            "contact_categories": [
+                "direct_employer",
+                "founder_cto_ceo",
+                "hiring_manager",
+                "internal_recruiter",
+                "agency_recruiter"
+            ],
+            "primary_cv": null,
+            "preferred_browser": null,
+            "answer_sources": DEFAULT_ANSWERS
+        }))?,
     )?;
     Ok(())
 }
