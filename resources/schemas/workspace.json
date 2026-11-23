@@ -171,6 +171,71 @@
       },
       "maxItems": 20
     },
+    "time_and_reminders": {
+      "type": "object",
+      "description": "Deadline, async-question cutoff, stage follow-up, and anti-spam reminder limits.",
+      "properties": {
+        "brief_lead_time_minutes": {
+          "type": "integer",
+          "minimum": 5,
+          "maximum": 1440
+        },
+        "async_question_cutoff_minutes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 120
+        },
+        "reminder_cooldown_hours": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 720
+        },
+        "max_reminders_per_item": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 20
+        },
+        "applied_ghost_days": {
+          "type": "integer",
+          "minimum": 7,
+          "maximum": 180
+        },
+        "stage_followup_days": {
+          "type": "object",
+          "properties": {
+            "applied": { "type": "integer", "minimum": 1, "maximum": 90 },
+            "introduction": { "type": "integer", "minimum": 1, "maximum": 60 },
+            "screening": { "type": "integer", "minimum": 1, "maximum": 60 },
+            "technical": { "type": "integer", "minimum": 1, "maximum": 60 },
+            "final": { "type": "integer", "minimum": 1, "maximum": 60 },
+            "offer": { "type": "integer", "minimum": 1, "maximum": 30 }
+          },
+          "required": [],
+          "additionalProperties": false
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    },
+    "browser_policy": {
+      "type": "object",
+      "description": "Browser concurrency, session batching, and tab retirement policy.",
+      "properties": {
+        "max_concurrent_applications": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 10
+        },
+        "retire_session_on_finish": {
+          "type": "boolean"
+        },
+        "batch_form_actions": {
+          "type": "boolean"
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    },
     "primary_cv": {
       "anyOf": [
         {

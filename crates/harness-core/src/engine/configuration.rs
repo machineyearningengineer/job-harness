@@ -7,17 +7,8 @@ impl Engine {
         let path = self.text_path("config/career-ledger.json")?;
         if path.exists() {
             let supplied: Value = serde_json::from_slice(&fs::read(path)?)?;
-            let object = supplied.as_object().ok_or_else(|| {
-                Error::new("invalid_arguments", "Invalid career-ledger configuration")
-            })?;
-            if supplied["schema_version"] != 1 || object.keys().any(|k| settings.get(k).is_none()) {
-                return Err(Error::new(
-                    "invalid_arguments",
-                    "Invalid career-ledger configuration",
-                ));
-            }
             contracts::validate(&contracts::ledger_schema(), &supplied)?;
-            for (k, v) in object {
+            for (k, v) in supplied.as_object().expect("validated object") {
                 settings[k] = v.clone();
             }
         }
@@ -190,8 +181,20 @@ impl Engine {
             p
         });
         let binary = std::env::current_exe().ok();
+        let tz_name = s(&settings, "timezone")?;
+        let tz = tz_name
+            .parse::<chrono_tz::Tz>()
+            .map_err(|_| Error::new("invalid_arguments", "Configure an IANA timezone"))?;
+        let now_utc = chrono::Utc::now();
+        let now_local = now_utc.with_timezone(&tz);
+        let clock = json!({
+            "utc": now_utc.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            "local": now_local.to_rfc3339_opts(chrono::SecondsFormat::Secs, false),
+            "today_local": now_local.date_naive().to_string(),
+            "timezone": tz_name
+        });
         Ok(
-            json!({"contract_version":"2.0","ledger":self.root,"settings":settings,"plan":route,"health":health,"available_capabilities":supplied,"missing_capabilities":missing,"configuration_issues":issues,"cli_fallback":binary.map(|p|json!({"command":p,"args":["--root",self.root.to_string_lossy(),"call"],"cwd":self.root})),"paths":{"toolkit":"embedded","contract":"docs/job-harness-contract.md","onboarding":"docs/job-harness-onboarding.md"}}),
+            json!({"contract_version":"2.0","clock":clock,"ledger":self.root,"settings":settings,"plan":route,"health":health,"available_capabilities":supplied,"missing_capabilities":missing,"configuration_issues":issues,"cli_fallback":binary.map(|p|json!({"command":p,"args":["--root",self.root.to_string_lossy(),"call"],"cwd":self.root})),"paths":{"toolkit":"embedded","contract":"docs/job-harness-contract.md","onboarding":"docs/job-harness-onboarding.md"}}),
         )
     }
     pub(super) fn bootstrap_next(&self, args: &Value, data: &Value) -> Result<Vec<Value>> {

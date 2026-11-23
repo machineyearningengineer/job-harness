@@ -4633,6 +4633,30 @@
                 "contract_version": {
                   "type": "string"
                 },
+                "clock": {
+                  "type": "object",
+                  "properties": {
+                    "utc": {
+                      "type": "string"
+                    },
+                    "local": {
+                      "type": "string"
+                    },
+                    "today_local": {
+                      "type": "string"
+                    },
+                    "timezone": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "utc",
+                    "local",
+                    "today_local",
+                    "timezone"
+                  ],
+                  "additionalProperties": false
+                },
                 "ledger": {
                   "type": "string"
                 },

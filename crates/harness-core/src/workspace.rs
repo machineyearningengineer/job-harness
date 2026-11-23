@@ -303,6 +303,8 @@ pub fn validate_settings(value: &Value) -> Result<()> {
             "discovery",
             "communication",
             "contact_categories",
+            "time_and_reminders",
+            "browser_policy",
             "primary_cv",
             "preferred_browser",
             "answer_sources",
@@ -491,7 +493,7 @@ pub(crate) fn populate(root: &Path) -> Result<()> {
         ),
         (
             "applications/approved-answers.md",
-            "# Approved answers\n\nRecord direct answers with date, attribution, allowed scope and unresolved limits. No personal answer is assumed.\n",
+            "# Approved answers\n\nRecord direct answers with date, attribution, allowed scope and unresolved limits. No personal answer is assumed.\n\n## Onboarding bare-minimum defaults (fill once to unlock autofill)\n- **Full name & preferred name:**\n- **Primary email & phone:**\n- **Location / city & right to work / sponsorship:**\n- **Notice period / earliest start date:**\n- **Compensation floor & target (base + currency):**\n- **Work pattern (remote / hybrid max office days / travel limits):**\n- **Links (LinkedIn, GitHub, portfolio):**\n- **Voluntary demographics / EEO policy:** (e.g. decline / prefer not to say unless explicitly answered)\n",
         ),
         (
             "context/profile/application-decisions.md",
@@ -590,6 +592,26 @@ pub(crate) fn populate(root: &Path) -> Result<()> {
                 "internal_recruiter",
                 "agency_recruiter"
             ],
+            "time_and_reminders": {
+                "brief_lead_time_minutes": 30,
+                "async_question_cutoff_minutes": 15,
+                "reminder_cooldown_hours": 24,
+                "max_reminders_per_item": 3,
+                "applied_ghost_days": 30,
+                "stage_followup_days": {
+                    "applied": 14,
+                    "introduction": 5,
+                    "screening": 5,
+                    "technical": 5,
+                    "final": 4,
+                    "offer": 2
+                }
+            },
+            "browser_policy": {
+                "max_concurrent_applications": 2,
+                "retire_session_on_finish": true,
+                "batch_form_actions": true
+            },
             "primary_cv": null,
             "preferred_browser": null,
             "answer_sources": DEFAULT_ANSWERS

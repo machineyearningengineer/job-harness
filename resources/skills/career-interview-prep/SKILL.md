@@ -5,7 +5,7 @@ description: Prepare a concise company and screening brief for the candidate usi
 
 # Prepare a company conversation
 
-For “Brief me for COMPANY/ROLE”, bootstrap `prepare_interview`, read the private workspace's instructions and resolve the exact canonical vacancy with `find_application`. Distinguish multiple roles at one company. Start a bounded preparation run; this does not book or send anything.
+For “Brief me for COMPANY/ROLE”, bootstrap `prepare_interview`, read `bootstrap.clock` and `settings.time_and_reminders` (`brief_lead_time_minutes`, `async_question_cutoff_minutes`), convert any relative interview time ("in 15 minutes") into an **absolute ISO deadline** upfront, read the private workspace's instructions, and resolve the exact canonical vacancy with `find_application`. Distinguish multiple roles at one company. If clarifying context would materially sharpen the round brief, ask asynchronously while continuing independent company/packet research; if unanswered by the cutoff (`no_answer`), stop researching early enough to deliver the finished brief before `brief_lead_time_minutes` ahead of the interview and flag open assumptions clearly. Start a bounded preparation run; this does not book or send anything.
 
 Batch related reads through `query_batch`: `read_record` for the exact application and linked brief, `get_packet`/`preview_packet` for its frozen submission when available, `context_pack` for relevant project stories and original prior interview notes, and `daily_check` filtered by `company`/`record` for retained recruiting communications. Read linked communications evidence and its coverage; saved history is not a fresh inbox scan. Include useful supplied earlier prep conversations when available, without treating coaching as facts.
 
