@@ -1133,7 +1133,8 @@ mod tests {
             [],
         )
         .unwrap();
-        conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);").unwrap();
+        conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+            .unwrap();
         drop(conn);
         let bad_state = fs::read(&bad_db).unwrap();
         let malformed = out.path().join("bad.jhb");

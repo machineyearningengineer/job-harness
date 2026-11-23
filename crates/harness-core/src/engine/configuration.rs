@@ -7,7 +7,7 @@ impl Engine {
         let path = self.text_path("config/career-ledger.json")?;
         if path.exists() {
             let supplied: Value = serde_json::from_slice(&fs::read(path)?)?;
-            contracts::validate(&contracts::ledger_schema(), &supplied)?;
+            contracts::validate(contracts::ledger_schema(), &supplied)?;
             for (k, v) in supplied.as_object().expect("validated object") {
                 settings[k] = v.clone();
             }
@@ -68,7 +68,7 @@ impl Engine {
                     .or_insert_with(|| defaults["workflows"][name].clone());
             }
         }
-        contracts::validate(&contracts::workflow_schema(), &config)?;
+        contracts::validate(contracts::workflow_schema(), &config)?;
         if config["schema_version"] != 1
             || !config["shared_reads"].is_array()
             || !config["workflows"].is_object()

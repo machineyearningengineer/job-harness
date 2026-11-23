@@ -1135,7 +1135,7 @@ dependencies = [
 
 [[package]]
 name = "job-harness"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -1149,7 +1149,7 @@ dependencies = [
 
 [[package]]
 name = "job-harness-core"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "chrono",
  "chrono-tz",
@@ -1175,7 +1175,7 @@ dependencies = [
 
 [[package]]
 name = "job-harness-dev"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -1198,7 +1198,7 @@ dependencies = [
 
 [[package]]
 name = "job-harness-domain"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "chrono",
  "regex",
@@ -1211,7 +1211,7 @@ dependencies = [
 
 [[package]]
 name = "job-harness-protocol"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "axum",

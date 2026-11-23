@@ -94,11 +94,7 @@ fn daily_check_inline_is_read_only_and_identity_is_canonical() {
     );
     assert!(data["communications"][0].get("record_path").is_none());
     assert_eq!(data["counts"]["archive_candidates"], 1);
-    assert!(
-        !dir.path()
-            .join(crate::state::DB_REL_PATH)
-            .exists()
-    );
+    assert!(!dir.path().join(crate::state::DB_REL_PATH).exists());
     assert!(
         !dir.path()
             .join("applications/evidence/communications")

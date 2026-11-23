@@ -6,14 +6,7 @@ use std::{
     path::Path,
 };
 
-pub const IDS: &[&str] = &[
-    "mcp",
-    "models",
-    "retrieval",
-    "decisions",
-    "cv",
-    "desktop",
-];
+pub const IDS: &[&str] = &["mcp", "models", "retrieval", "decisions", "cv", "desktop"];
 
 pub fn catalog() -> Value {
     json!({

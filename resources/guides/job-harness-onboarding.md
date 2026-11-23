@@ -8,7 +8,7 @@ Job Harness keeps supplied career information and application history in one pri
 |---|---|
 | An existing agent | The [native core release](../../docs/INSTALL.md), then MCP or direct CLI |
 | A preference for a window | The separate desktop app, opening an initialized workspace |
-| The toolkit repo open in an agent | [Build the core and use a separate private folder](../../docs/AGENTS.md#open-the-checkout-in-your-agent) |
+| The toolkit repo open in an agent | [Install and wire a separate private workspace](../../docs/AGENT-SETUP.md) |
 
 No built-in model, questionnaire or CV generator is required. Optional local models, Typst and desktop installation can come later.
 
@@ -55,7 +55,7 @@ Add confirmed answers and preferences to the configured answer records, recordin
 
 ## Give an agent its first task
 
-Connect the command and arguments returned by `connect mcp` to your chosen host, or let a command-running agent use the CLI with an explicit `--root`. [Connection instructions](../../docs/AGENTS.md)
+Connect the command and arguments returned by `connect mcp` to your chosen host, or let a command-running agent use the CLI with an explicit `--root`. [Connection instructions](../../docs/AGENT-SETUP.md)
 
 ```text
 Use Job Harness with /absolute/private/career-workspace. Bootstrap, read the

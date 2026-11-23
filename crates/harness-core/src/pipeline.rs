@@ -2,7 +2,33 @@
 use crate::{HarnessError, Result};
 use regex::Regex;
 use serde_json::{Value, json};
-use std::{collections::BTreeMap, fs, path::Path};
+use std::{collections::BTreeMap, fs, path::Path, sync::LazyLock};
+
+static TRACKING_RX: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(TRACKING_PATTERN).expect("static regex"));
+static TITLE_RX: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?m)^# (.+)$").expect("static regex"));
+static DATE_PREFIX_RX: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^\d{4}-").expect("static regex"));
+static ANSWERS_RX: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"-answers(?:-|\.)").expect("static regex"));
+static CURRENT_RX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?mi)^\s*(?:- )?Current status[^:]*:\s*(.+)$").expect("static regex")
+});
+static STAGE_RX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?mi)^\s*(?:- )?(?:Stage|Status):\s*(.+)$").expect("static regex")
+});
+static APPLIED_RX: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?m)^- ((?:Submitted|Applied) \d.*)$").expect("static regex"));
+static REJECTION_RX: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?m)^- Outcome: rejection\.").expect("static regex"));
+static DECLINED_RX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)conversation shows .*declined the request").expect("static regex")
+});
+static MALFORMED_TRACKING_RX: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)<!--\s*tracking\b([^\r\n]*)").expect("static regex"));
+static EXAMPLE_RX: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)^[ \t-]+example\b").expect("static regex"));
 
 pub const STAGES: &[&str] = &[
     "saved",
@@ -39,40 +65,31 @@ pub struct Pipeline {
     pub records: Vec<Value>,
     pub markdown: String,
 }
-fn rx(pattern: &str) -> Regex {
-    Regex::new(pattern).expect("static regex")
-}
 fn bad(name: &str, message: &str) -> HarnessError {
     HarnessError::validation(format!("{name}: {message}"))
 }
 
 pub fn is_vacancy_filename(name: &str) -> bool {
     !RESERVED.contains(&name)
-        && !rx(r"^\d{4}-").is_match(name)
+        && !DATE_PREFIX_RX.is_match(name)
         && !["email-", "search-", "rejection-review-"]
             .iter()
             .any(|p| name.starts_with(p))
-        && !rx(r"-answers(?:-|\.)").is_match(name)
+        && !ANSWERS_RX.is_match(name)
 }
 
 pub fn classify(text: &str) -> (&'static str, String) {
     let plain = text.replace("**", "");
-    let current = rx(r"(?mi)^\s*(?:- )?Current status[^:]*:\s*(.+)$")
+    let current = CURRENT_RX
         .captures_iter(&plain)
         .last()
         .map(|c| c[1].to_owned());
-    let stage = rx(r"(?mi)^\s*(?:- )?(?:Stage|Status):\s*(.+)$")
+    let stage = STAGE_RX
         .captures(&plain)
         .map(|c| c[1].to_owned())
-        .or_else(|| {
-            rx(r"(?m)^- ((?:Submitted|Applied) \d.*)$")
-                .captures(&plain)
-                .map(|c| c[1].to_owned())
-        });
+        .or_else(|| APPLIED_RX.captures(&plain).map(|c| c[1].to_owned()));
     let value = current.or(stage).unwrap_or_default();
-    if rx(r"(?m)^- Outcome: rejection\.").is_match(text)
-        || rx(r"(?i)conversation shows .*declined the request").is_match(text)
-    {
+    if REJECTION_RX.is_match(text) || DECLINED_RX.is_match(text) {
         return (
             "closed",
             if value.is_empty() {
@@ -182,8 +199,6 @@ pub fn build(root: &Path) -> Result<Pipeline> {
         .collect::<std::io::Result<Vec<_>>>()?;
     paths.sort();
     let mut records = Vec::new();
-    let block = rx(TRACKING_PATTERN);
-    let title_rx = rx(r"(?m)^# (.+)$");
     for path in paths {
         if path.extension().and_then(|e| e.to_str()) != Some("md") {
             continue;
@@ -198,13 +213,13 @@ pub fn build(root: &Path) -> Result<Pipeline> {
             .ok_or_else(|| HarnessError::validation("Non-UTF-8 vacancy filename"))?;
         let path = crate::workspace::safe_path(root, &format!("applications/{name}"))?;
         let text = fs::read_to_string(path)?;
-        let title = title_rx.captures(&text).map(|c| c[1].to_string());
-        let matches = block.captures_iter(&text).collect::<Vec<_>>();
+        let title = TITLE_RX.captures(&text).map(|c| c[1].to_string());
+        let matches = TRACKING_RX.captures_iter(&text).collect::<Vec<_>>();
         if matches.is_empty() {
             // A prose example marker is allowed; every actual tracking marker must use the canonical format.
-            if rx(r"(?i)<!--\s*tracking\b([^\r\n]*)")
+            if MALFORMED_TRACKING_RX
                 .captures_iter(&text)
-                .any(|m| !rx(r"(?i)^[ \t-]+example\b").is_match(&m[1]))
+                .any(|m| !EXAMPLE_RX.is_match(&m[1]))
             {
                 return Err(bad(name, "malformed tracking block"));
             }

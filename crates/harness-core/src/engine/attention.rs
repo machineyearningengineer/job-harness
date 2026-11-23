@@ -11,7 +11,10 @@ fn parse_checked_days_ago(checked: Option<&str>, today: chrono::NaiveDate) -> Op
     Some((today - date).num_days().max(0))
 }
 
-fn parse_minutes_until(scheduled_start: Option<&str>, now_utc: chrono::DateTime<chrono::Utc>) -> Option<i64> {
+fn parse_minutes_until(
+    scheduled_start: Option<&str>,
+    now_utc: chrono::DateTime<chrono::Utc>,
+) -> Option<i64> {
     let raw = scheduled_start?.trim();
     let dt = chrono::DateTime::parse_from_rfc3339(raw).ok()?;
     Some((dt.with_timezone(&chrono::Utc) - now_utc).num_minutes())
@@ -38,7 +41,7 @@ impl Engine {
         let pre_reminder_mins = reminders
             .and_then(|r| r.get("pre_interview_reminder_minutes"))
             .and_then(Value::as_i64)
-            .unwrap_or(30);
+            .unwrap_or(90);
         let applied_ghost_days = reminders
             .and_then(|r| r.get("applied_ghost_days"))
             .and_then(Value::as_i64)
@@ -113,19 +116,43 @@ impl Engine {
             let mut kws = vec![lower.clone()];
             match lower.as_str() {
                 "backend" => kws.extend(
-                    ["back-end", "platform", "systems", "distributed", "api", "server", "infrastructure"]
-                        .into_iter()
-                        .map(str::to_owned),
+                    [
+                        "back-end",
+                        "platform",
+                        "systems",
+                        "distributed",
+                        "api",
+                        "server",
+                        "infrastructure",
+                    ]
+                    .into_iter()
+                    .map(str::to_owned),
                 ),
                 "product" => kws.extend(
-                    ["full-stack", "fullstack", "full stack", "frontend", "front-end", "web", "ui"]
-                        .into_iter()
-                        .map(str::to_owned),
+                    [
+                        "full-stack",
+                        "fullstack",
+                        "full stack",
+                        "frontend",
+                        "front-end",
+                        "web",
+                        "ui",
+                    ]
+                    .into_iter()
+                    .map(str::to_owned),
                 ),
                 "ai" => kws.extend(
-                    ["ml", "llm", "agent", "machine learning", "genai", "applied ai", "artificial intelligence"]
-                        .into_iter()
-                        .map(str::to_owned),
+                    [
+                        "ml",
+                        "llm",
+                        "agent",
+                        "machine learning",
+                        "genai",
+                        "applied ai",
+                        "artificial intelligence",
+                    ]
+                    .into_iter()
+                    .map(str::to_owned),
                 ),
                 _ => {}
             }
@@ -169,23 +196,31 @@ impl Engine {
 
         for row in &built.records {
             let stage = row["stage"].as_str().unwrap_or_default();
-            let days_ago = parse_checked_days_ago(row.get("checked").and_then(Value::as_str), today);
-            if stage == "applied"
-                && days_ago.is_some_and(|d| d >= applied_ghost_days)
-            {
+            let days_ago =
+                parse_checked_days_ago(row.get("checked").and_then(Value::as_str), today);
+            if stage == "applied" && days_ago.is_some_and(|d| d >= applied_ghost_days) {
                 quiet_applied_count += 1;
             }
             if !configured_tracks.is_empty()
                 && matches!(
                     stage,
-                    "saved" | "prepared" | "applied" | "introduction" | "screening" | "technical" | "final" | "offer"
+                    "saved"
+                        | "prepared"
+                        | "applied"
+                        | "introduction"
+                        | "screening"
+                        | "technical"
+                        | "final"
+                        | "offer"
                 )
                 && days_ago.is_some_and(|d| d <= 30)
             {
                 let hay = format!(
                     "{} {}",
                     row.get("title").and_then(Value::as_str).unwrap_or_default(),
-                    row.get("next_action").and_then(Value::as_str).unwrap_or_default()
+                    row.get("next_action")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
                 )
                 .to_ascii_lowercase();
                 let mut matched = false;
@@ -251,7 +286,7 @@ impl Engine {
                     "Proposed interview time awaiting confirmation".to_owned(),
                 )
             } else if let Some(mins) = mins_until {
-                if mins >= -120 && mins <= 24 * 60 {
+                if (-120..=24 * 60).contains(&mins) {
                     let msg = if mins < 0 {
                         "Interview just ended — confirm held and capture debrief".to_owned()
                     } else if mins <= pre_reminder_mins {
@@ -278,7 +313,10 @@ impl Engine {
                     if days_ago.is_some_and(|d| d >= threshold) {
                         (
                             "upcoming".to_owned(),
-                            format!("Past scheduled call with no update for {}d — debrief or follow up", days_ago.unwrap()),
+                            format!(
+                                "Past scheduled call with no update for {}d — debrief or follow up",
+                                days_ago.unwrap()
+                            ),
                         )
                     } else {
                         (
@@ -296,7 +334,9 @@ impl Engine {
                     if d >= threshold {
                         (
                             "upcoming".to_owned(),
-                            format!("Active {stage} stage quiet for {d}d (follow-up threshold {threshold}d)"),
+                            format!(
+                                "Active {stage} stage quiet for {d}d (follow-up threshold {threshold}d)"
+                            ),
                         )
                     } else {
                         (
@@ -460,11 +500,12 @@ impl Engine {
         }
         let needs_attention_now = urgency_counts["urgent_now"].as_u64().unwrap_or(0) > 0;
         items.sort_by(|a, b| {
-            let urgency_rank = |value: &Value| match value["urgency"].as_str().unwrap_or("background") {
-                "urgent_now" => 0,
-                "upcoming" => 1,
-                _ => 2,
-            };
+            let urgency_rank =
+                |value: &Value| match value["urgency"].as_str().unwrap_or("background") {
+                    "urgent_now" => 0,
+                    "upcoming" => 1,
+                    _ => 2,
+                };
             let kind_rank = |value: &Value| match value["kind"].as_str().unwrap_or_default() {
                 "interview" => 0,
                 "supplied_mail" => 1,

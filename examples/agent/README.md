@@ -22,4 +22,4 @@ jh --root "$HOME/Career/workspace" call review_queue --input '{"limit":10}'
 jh --root "$HOME/Career/workspace" call query_batch --input examples/agent/inspect.json
 ```
 
-All CLI calls return compact v2 JSON (`schema_version`, `ok`, `data`, `error`, `next`). See [docs/AGENTS.md](../../docs/AGENTS.md) and [resources/guides/job-harness-contract.md](../../resources/guides/job-harness-contract.md) for the full contract.
+All CLI calls return compact v2 JSON (`schema_version`, `ok`, `data`, `error`, `next`). See [docs/AGENT-SETUP.md](../../docs/AGENT-SETUP.md) and [resources/guides/job-harness-contract.md](../../resources/guides/job-harness-contract.md) for the full contract.

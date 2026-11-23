@@ -109,6 +109,10 @@ pub fn checkpoint(root: &Path) -> Result<()> {
 }
 
 pub fn parse(root: &Path, value: &Value) -> Result<Value> {
+    parse_owned(root, value.clone())
+}
+
+fn parse_owned(root: &Path, mut value: Value) -> Result<Value> {
     let invalid = || {
         Error::new(
             "invalid_state",
@@ -166,12 +170,11 @@ pub fn parse(root: &Path, value: &Value) -> Result<Value> {
             return Err(invalid());
         }
     }
-    crate::engine::validate_daily_events(value)
+    crate::engine::validate_daily_events(&value)
         .map_err(|error| Error::new("invalid_state", error.to_string()))?;
-    let mut normalized = value.clone();
     if let Some(pending) = value.get("pending") {
         if pending.is_null() || pending.as_array().is_some_and(Vec::is_empty) {
-            normalized.as_object_mut().unwrap().remove("pending");
+            value.as_object_mut().unwrap().remove("pending");
         } else {
             let mut seen = BTreeSet::new();
             for change in pending.as_array().ok_or_else(invalid)? {
@@ -196,7 +199,7 @@ pub fn parse(root: &Path, value: &Value) -> Result<Value> {
             }
         }
     }
-    Ok(normalized)
+    Ok(value)
 }
 
 pub fn journal_path(root: &Path, relative: &str) -> Result<PathBuf> {
@@ -222,6 +225,16 @@ pub fn journal_path(root: &Path, relative: &str) -> Result<PathBuf> {
 }
 
 pub fn load(root: &Path) -> Result<Value> {
+    load_inner(root, true)
+}
+
+/// Fast read path using SQLite's `idx_events_tool` index to load only mail-lifecycle
+/// events (skipping thousands of unrelated historical tool events on read-only queries).
+pub fn load_for_read(root: &Path) -> Result<Value> {
+    load_inner(root, false)
+}
+
+fn load_inner(root: &Path, include_all_events: bool) -> Result<Value> {
     let path = db_path(root)?;
     if !path.is_file() {
         if ["packets", "receipts", "conflicts"]
@@ -244,9 +257,13 @@ pub fn load(root: &Path) -> Result<Value> {
     };
 
     let mut obj = Map::new();
-    let mut stmt = conn.prepare("SELECT key, value FROM meta").map_err(sqlite_err)?;
+    let mut stmt = conn
+        .prepare("SELECT key, value FROM meta")
+        .map_err(sqlite_err)?;
     let rows = stmt
-        .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
         .map_err(sqlite_err)?;
     for row in rows {
         let (k, v) = row.map_err(sqlite_err)?;
@@ -262,7 +279,9 @@ pub fn load(root: &Path) -> Result<Value> {
         .prepare("SELECT id, payload FROM runs ORDER BY id")
         .map_err(sqlite_err)?;
     let rows = stmt
-        .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
         .map_err(sqlite_err)?;
     for row in rows {
         let (id, payload) = row.map_err(sqlite_err)?;
@@ -275,7 +294,9 @@ pub fn load(root: &Path) -> Result<Value> {
         .prepare("SELECT id, payload FROM attempts ORDER BY id")
         .map_err(sqlite_err)?;
     let rows = stmt
-        .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
         .map_err(sqlite_err)?;
     for row in rows {
         let (id, payload) = row.map_err(sqlite_err)?;
@@ -284,9 +305,12 @@ pub fn load(root: &Path) -> Result<Value> {
     obj.insert("attempts".into(), Value::Object(attempts));
 
     let mut events = Vec::new();
-    let mut stmt = conn
-        .prepare("SELECT payload FROM events ORDER BY seq ASC")
-        .map_err(sqlite_err)?;
+    let events_sql = if include_all_events {
+        "SELECT payload FROM events ORDER BY seq ASC"
+    } else {
+        "SELECT payload FROM events WHERE tool IN ('daily_update', 'begin_mail_archive', 'record_adapter_result') ORDER BY seq ASC"
+    };
+    let mut stmt = conn.prepare(events_sql).map_err(sqlite_err)?;
     let rows = stmt
         .query_map([], |row| row.get::<_, String>(0))
         .map_err(sqlite_err)?;
@@ -311,7 +335,7 @@ pub fn load(root: &Path) -> Result<Value> {
         obj.insert("pending".into(), Value::Array(pending));
     }
 
-    parse(root, &Value::Object(obj))
+    parse_owned(root, Value::Object(obj))
 }
 
 pub fn save(root: &Path, value: &Value) -> Result<()> {
@@ -356,7 +380,9 @@ pub fn save(root: &Path, value: &Value) -> Result<()> {
     // 2. Runs delta upsert
     let mut existing_runs: BTreeMap<String, String> = BTreeMap::new();
     {
-        let mut stmt = tx.prepare("SELECT id, payload FROM runs").map_err(sqlite_err)?;
+        let mut stmt = tx
+            .prepare("SELECT id, payload FROM runs")
+            .map_err(sqlite_err)?;
         let rows = stmt
             .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
             .map_err(sqlite_err)?;

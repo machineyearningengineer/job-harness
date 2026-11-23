@@ -140,10 +140,7 @@ fn imported_pdf_can_be_explicitly_selected_and_frozen_without_weakening_submit_g
         call(&root, "prepare_packet", arguments.clone())["error"]["code"],
         "artifact_changed"
     );
-    assert_eq!(
-        job_harness_core::state::load(&root).unwrap(),
-        state_before
-    );
+    assert_eq!(job_harness_core::state::load(&root).unwrap(), state_before);
     std::fs::write(root.join(retained), pdf).unwrap();
     let mut combined_arguments = arguments;
     combined_arguments["idempotency_key"] = json!("import-reserve");

@@ -3,7 +3,7 @@
 ## Use the toolkit or develop it
 
 For a job-search request, use the toolkit; do not start by editing its code. Read
-[setup](docs/INSTALL.md) and the [agent guide](docs/AGENTS.md). Prefer the installed
+[setup](docs/INSTALL.md) and the [agent guide](docs/AGENT-SETUP.md). Prefer the installed
 `job-harness`/`jh` executable or this host's Job Harness MCP. If neither is
 available, use the native release or build this checkout with the pinned Rust
 toolchain. Opening this repo in an agent does not install or connect it.

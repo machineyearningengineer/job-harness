@@ -95,7 +95,10 @@ impl Engine {
                 Err(_) => continue,
             };
             let Some(stamp) = attempt.get("began_at").and_then(Value::as_str) else {
-                if matches!(status, SubmissionState::Reserved | SubmissionState::Cancelled) {
+                if matches!(
+                    status,
+                    SubmissionState::Reserved | SubmissionState::Cancelled
+                ) {
                     continue;
                 }
                 continue;
@@ -719,9 +722,15 @@ mod tests {
         }, "events":[]});
         let now = instant("2026-03-08T15:00:00Z");
         assert_eq!(
-            check_daily_submission_budget(&state, 10, Some(("direct_email", 1)), chrono_tz::UTC, now)
-                .unwrap_err()
-                .code,
+            check_daily_submission_budget(
+                &state,
+                10,
+                Some(("direct_email", 1)),
+                chrono_tz::UTC,
+                now
+            )
+            .unwrap_err()
+            .code,
             "daily_channel_cap_reached"
         );
         check_daily_submission_budget(&state, 10, Some(("portal", 2)), chrono_tz::UTC, now)

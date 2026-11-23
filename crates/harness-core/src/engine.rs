@@ -144,7 +144,11 @@ impl Engine {
             )
         })?;
         let _guard = storage::WorkspaceLock::acquire(&self.root, !readonly)?;
-        let mut state = self.load_state()?;
+        let mut state = if readonly && tool != "list_events" {
+            crate::state::load_for_read(&self.root)?
+        } else {
+            self.load_state()?
+        };
         if readonly && tool != "read_record" && state.get("pending").is_some() {
             return Err(Error::new(
                 "pending_recovery",

@@ -393,9 +393,9 @@ async fn execute(cli: Cli) -> anyhow::Result<Option<Value>> {
         }
         Command::ConfigSchema { kind } => {
             return Ok(Some(if kind == "ledger" {
-                contracts::ledger_schema()
+                contracts::ledger_schema().clone()
             } else {
-                contracts::workflow_schema()
+                contracts::workflow_schema().clone()
             }));
         }
         Command::Configure { workspace } => return Ok(Some(success(host::configure(&workspace)?))),

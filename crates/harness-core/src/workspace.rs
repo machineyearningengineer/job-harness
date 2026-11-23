@@ -318,7 +318,7 @@ pub fn validate_settings(value: &Value) -> Result<()> {
             "Unsupported workspace configuration",
         ));
     }
-    crate::contracts::validate(&crate::contracts::ledger_schema(), value)?;
+    crate::contracts::validate(crate::contracts::ledger_schema(), value)?;
     if let Some(zone) = object.get("timezone") {
         let s = zone
             .as_str()
@@ -590,8 +590,8 @@ pub(crate) fn populate(root: &Path) -> Result<()> {
                 "agency_recruiter"
             ],
             "time_and_reminders": {
-                "brief_lead_time_minutes": 30,
-                "pre_interview_reminder_minutes": 30,
+                "brief_lead_time_minutes": 90,
+                "pre_interview_reminder_minutes": 90,
                 "post_interview_debrief_delay_minutes": 30,
                 "transcript_sources": ["manual_transcript"],
                 "async_question_cutoff_minutes": 15,

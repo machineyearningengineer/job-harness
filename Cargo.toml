@@ -4,12 +4,10 @@ default-members = ["crates/harness-cli"]
 resolver = "3"
 
 [workspace.package]
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.88"
 license = "MIT"
-authors = ["Machineyearn"]
-repository = "https://github.com/machineyearningengineer/job-harness"
 publish = false
 
 [workspace.dependencies]

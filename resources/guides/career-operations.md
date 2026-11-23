@@ -4,7 +4,7 @@ Job Harness combines portable skills with typed MCP/CLI functions for one privat
 
 Start with [onboarding](job-harness-onboarding.md). Read the [version 2 contract](job-harness-contract.md) for schemas, batching, output/error shapes and submission recovery. The native Rust core has no model or vendor dependency. Host adapters supply external access.
 
-Every career task reads [shared learning](../context/profile/career-learning.md) and uses [the role-context workflow](career-learning-workflow.md). The local [workflow override](../config/career-workflows.json) makes these required reads visible in MCP bootstrap and delegates application/preparation/review/knowledge work through small local skill adapters to the versioned generic skills. When refreshing toolkit workflow defaults, preserve these private additions and review the copied routing rather than replacing it silently.
+Every career task reads `context/profile/career-learning.md` and uses `docs/career-learning-workflow.md`. The local `config/career-workflows.json` override makes these required reads visible in MCP bootstrap and delegates application/preparation/review/knowledge work through small local skill adapters to the versioned generic skills. When refreshing toolkit workflow defaults, preserve these private additions and review the copied routing rather than replacing it silently.
 
 ## Operations
 

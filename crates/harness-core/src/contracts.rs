@@ -19,13 +19,19 @@ pub fn catalog() -> Vec<Value> {
         })
         .collect()
 }
-pub fn ledger_schema() -> Value {
+pub static LEDGER_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
     serde_json::from_str(include_str!("../../../resources/schemas/workspace.json"))
         .expect("workspace schema")
-}
-pub fn workflow_schema() -> Value {
+});
+pub static WORKFLOW_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
     serde_json::from_str(include_str!("../../../resources/schemas/workflows.json"))
         .expect("workflow schema")
+});
+pub fn ledger_schema() -> &'static Value {
+    &LEDGER_SCHEMA
+}
+pub fn workflow_schema() -> &'static Value {
+    &WORKFLOW_SCHEMA
 }
 
 /// The published subset counts Unicode code points and keeps integers distinct
@@ -250,6 +256,14 @@ pub fn is_read_only(name: &str) -> Option<bool> {
     }
 }
 pub fn validate_catalog() -> Result<()> {
+    static CHECKED: std::sync::OnceLock<std::result::Result<(), (String, String)>> =
+        std::sync::OnceLock::new();
+    match CHECKED.get_or_init(|| validate_catalog_inner().map_err(|e| (e.code, e.message))) {
+        Ok(()) => Ok(()),
+        Err((code, msg)) => Err(HarnessError::new(code.clone(), msg.clone())),
+    }
+}
+fn validate_catalog_inner() -> Result<()> {
     for (name, spec) in specs() {
         let compiled = is_read_only(name).ok_or_else(|| {
             HarnessError::new(
@@ -278,8 +292,8 @@ pub fn validate_catalog() -> Result<()> {
         supported_schema(&spec["inputSchema"])?;
         supported_schema(&spec["outputSchema"])?;
     }
-    supported_schema(&ledger_schema())?;
-    supported_schema(&workflow_schema())?;
+    supported_schema(ledger_schema())?;
+    supported_schema(workflow_schema())?;
     Ok(())
 }
 fn supported_schema(schema: &Value) -> Result<()> {

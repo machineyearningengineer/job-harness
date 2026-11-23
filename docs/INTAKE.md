@@ -55,4 +55,4 @@ Exact search is the default. The derived SQLite index materializes source relati
 
 For an existing audio file, `context transcribe --audio FILE` uses an explicitly chosen compatible transcription endpoint. It returns draft text and audio identity, never live capture or automatic acceptance. This adapter has synthetic HTTP contract tests; no claim is made that a particular transcription model or live meeting capture was verified.
 
-[Playbooks](../resources/guides/workflows.md) · [Selected documents](DOCUMENTS.md) · [Full private transfers](BUNDLES.md)
+[Playbooks](../resources/guides/workflows.md) · [Full private transfers](BUNDLES.md)

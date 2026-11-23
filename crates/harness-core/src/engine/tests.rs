@@ -275,11 +275,7 @@ fn all_contracts_reject_extra_input_without_writes() {
         let value = h.call(name, &json!({"unexpected":true}));
         assert_eq!(value["error"]["code"], "invalid_arguments", "{name}");
     }
-    assert!(
-        !dir.path()
-            .join(crate::state::DB_REL_PATH)
-            .exists()
-    );
+    assert!(!dir.path().join(crate::state::DB_REL_PATH).exists());
 }
 #[test]
 fn batches_chain_values_and_preserve_partial_success() {
@@ -301,11 +297,7 @@ fn batches_reject_submit_boundaries_before_any_write() {
     let h = Engine::open(dir.path()).unwrap();
     let result=h.call("execute_batch",&json!({"steps":[{"id":"start","tool":"start_run","arguments":{"operation":"reconcile","scope":{},"user_request":"fixture","idempotency_key":"r"}},{"id":"begin","tool":"begin_submission","arguments":{}}]}));
     assert_eq!(result["error"]["code"], "batch_boundary");
-    assert!(
-        !dir.path()
-            .join(crate::state::DB_REL_PATH)
-            .exists()
-    );
+    assert!(!dir.path().join(crate::state::DB_REL_PATH).exists());
 }
 #[test]
 fn compound_preparation_replays_and_begin_is_one_shot() {
@@ -727,11 +719,7 @@ fn duplicate_change_paths_are_rejected_before_journal_commit() {
         "invalid_arguments"
     );
     assert_eq!(changes.len(), 1);
-    assert!(
-        !dir.path()
-            .join(crate::state::DB_REL_PATH)
-            .exists()
-    );
+    assert!(!dir.path().join(crate::state::DB_REL_PATH).exists());
 }
 
 #[test]
@@ -1264,11 +1252,7 @@ fn workflow_check_batches_readback_and_coverage_without_actions() {
         json!({"names":["workflow_check"],"include_schemas":true}),
     );
     assert_eq!(discovery["tools"][0]["read_only"], true);
-    assert!(
-        !dir.path()
-            .join(crate::state::DB_REL_PATH)
-            .exists()
-    );
+    assert!(!dir.path().join(crate::state::DB_REL_PATH).exists());
 }
 
 #[test]
@@ -1386,7 +1370,11 @@ fn review_queue_prioritizes_live_interviews_and_mail_over_historical_unknowns() 
         r#"{"items":[{"id":"m1","needs_reply":true,"company":"MailCo","subject":"Interview times"}]}"#,
     )
     .unwrap();
-    let boot = call(&h, "bootstrap", json!({"operation":"daily_check","capabilities":[]}));
+    let boot = call(
+        &h,
+        "bootstrap",
+        json!({"operation":"daily_check","capabilities":[]}),
+    );
     assert_eq!(boot["daily_budget"]["used"], 1);
     let queue = call(
         &h,
@@ -1397,8 +1385,14 @@ fn review_queue_prioritizes_live_interviews_and_mail_over_historical_unknowns() 
     assert_eq!(queue["next_upcoming_interview"]["company"], "LiveCo");
     let items = queue["items"].as_array().unwrap();
     let idx_interview = items.iter().position(|i| i["kind"] == "interview").unwrap();
-    let idx_mail = items.iter().position(|i| i["kind"] == "supplied_mail").unwrap();
-    let idx_unknown = items.iter().position(|i| i["kind"] == "unknown_submission").unwrap();
+    let idx_mail = items
+        .iter()
+        .position(|i| i["kind"] == "supplied_mail")
+        .unwrap();
+    let idx_unknown = items
+        .iter()
+        .position(|i| i["kind"] == "unknown_submission")
+        .unwrap();
     assert_eq!(items[idx_interview]["urgency"], "urgent_now");
     assert_eq!(items[idx_mail]["urgency"], "urgent_now");
     assert_eq!(items[idx_unknown]["urgency"], "background");
@@ -1427,11 +1421,7 @@ fn workflow_child_schemas_are_discoverable_and_validate_before_execution() {
         &json!({"checks":[{"id":"bad","kind":"coverage","observation":{"source":"example"}}]}),
     );
     assert_eq!(bad["error"]["code"], "invalid_arguments");
-    assert!(
-        !dir.path()
-            .join(crate::state::DB_REL_PATH)
-            .exists()
-    );
+    assert!(!dir.path().join(crate::state::DB_REL_PATH).exists());
 }
 
 #[test]
