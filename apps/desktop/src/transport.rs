@@ -71,6 +71,15 @@ pub struct AttentionEntry {
     pub record_path: Option<String>,
 }
 
+#[derive(Clone, Debug)]
+pub struct ActivityDigestEntry {
+    pub at: String,
+    pub age_label: String,
+    pub tool: String,
+    pub summary: String,
+    pub record_path: Option<String>,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct DailyBudget {
     pub limit: u64,
@@ -123,6 +132,8 @@ pub struct WorkspaceSnapshot {
     pub urgent_count: u64,
     pub upcoming_count: u64,
     pub attention_items: Vec<AttentionEntry>,
+    pub recent_activity: Vec<ActivityDigestEntry>,
+    pub latest_activity_at: Option<String>,
     pub daily_budget: DailyBudget,
     pub permissions: PermissionsState,
     pub cv_nodes: Vec<CvNode>,
@@ -168,7 +179,11 @@ pub struct RoleOverviewDetails {
     pub location_mode: Option<String>,
     pub fit_summary: Option<String>,
     pub status_detail: Option<String>,
+    pub source_channel: Option<String>,
+    pub contact: Option<String>,
+    pub submitted_at: Option<String>,
     pub packet_cv: Option<String>,
+    pub packet_answers: Option<String>,
     pub packet_sha: Option<String>,
     pub full_text: String,
 }
@@ -210,7 +225,8 @@ impl WorkspaceClient {
             json!({
                 "steps": [
                     {"id": "boot", "tool": "bootstrap", "arguments": {"operation": "daily_check", "capabilities": []}},
-                    {"id": "queue", "tool": "review_queue", "arguments": {"limit": 50}}
+                    {"id": "queue", "tool": "review_queue", "arguments": {"limit": 50}},
+                    {"id": "events", "tool": "list_events", "arguments": {"limit": 30}}
                 ]
             }),
         )?;
@@ -222,6 +238,7 @@ impl WorkspaceClient {
         }
         let boot = batch_step_data(&batch, "boot").unwrap_or(&Value::Null);
         let queue = batch_step_data(&batch, "queue").unwrap_or(&Value::Null);
+        let events_data = batch_step_data(&batch, "events").unwrap_or(&Value::Null);
 
         let settings = &boot["settings"];
         let health = &boot["health"];
@@ -417,6 +434,44 @@ impl WorkspaceClient {
         let unresolved_attempts = health["unresolved_attempt_count"].as_u64().unwrap_or(0);
         let closed_count = archived_cards.len();
 
+        let mut recent_activity = Vec::new();
+        if let Some(arr) = events_data["events"].as_array() {
+            for ev in arr.iter().rev() {
+                let tool = ev["tool"].as_str().unwrap_or("").to_owned();
+                let summary = ev["summary"].as_str().unwrap_or("").trim().to_owned();
+                if summary.is_empty() && tool == "start_run" {
+                    continue;
+                }
+                let at = ev["at"].as_str().unwrap_or("").to_owned();
+                let record_path = ev["record_path"]
+                    .as_str()
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_owned);
+                let display_summary = if !summary.is_empty() {
+                    summary
+                } else {
+                    match tool.as_str() {
+                        "finish_run" => "Completed bounded run".into(),
+                        "update_application" | "record_event" => "Updated role tracking".into(),
+                        "finish_submission" => "Recorded submission receipt".into(),
+                        "daily_update" => "Processed daily inbox & calendar digest".into(),
+                        _ => format!("Recorded {tool}"),
+                    }
+                };
+                recent_activity.push(ActivityDigestEntry {
+                    age_label: short_time_label(&at),
+                    at,
+                    tool,
+                    summary: display_summary,
+                    record_path,
+                });
+                if recent_activity.len() >= 12 {
+                    break;
+                }
+            }
+        }
+        let latest_activity_at = recent_activity.first().map(|a| a.at.clone());
+
         Ok(WorkspaceSnapshot {
             total_records,
             closed_count,
@@ -425,6 +480,8 @@ impl WorkspaceClient {
             urgent_count: queue["urgency_counts"]["urgent_now"].as_u64().unwrap_or(0),
             upcoming_count: queue["urgency_counts"]["upcoming"].as_u64().unwrap_or(0),
             attention_items,
+            recent_activity,
+            latest_activity_at,
             daily_budget,
             permissions,
             cv_nodes,
@@ -585,6 +642,16 @@ impl WorkspaceClient {
             .as_ref()
             .and_then(|t| t["status_detail"].as_str())
             .map(str::to_owned);
+        let source_channel = tracking
+            .as_ref()
+            .and_then(|t| t["source"].as_str())
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned);
+        let contact = tracking
+            .as_ref()
+            .and_then(|t| t["contact"].as_str())
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned);
         let mut packet_sha = tracking
             .as_ref()
             .and_then(|t| t["record_evidence"].as_str())
@@ -596,6 +663,8 @@ impl WorkspaceClient {
                     .map(str::to_owned)
             });
         let mut packet_cv = None;
+        let mut packet_answers = None;
+        let mut submitted_at = None;
         if let Some(root) = self.target.local_root()
             && let Some(ev_rel) = tracking
                 .as_ref()
@@ -613,6 +682,14 @@ impl WorkspaceClient {
                     .as_str()
                     .or_else(|| pkt["cv"]["path"].as_str())
                     .map(str::to_owned);
+                packet_answers = pkt["answers"]["original_path"]
+                    .as_str()
+                    .or_else(|| pkt["answers"]["path"].as_str())
+                    .map(str::to_owned);
+                submitted_at = pkt["prepared_at"]
+                    .as_str()
+                    .or_else(|| pkt["created_at"].as_str())
+                    .map(str::to_owned);
                 if packet_sha.is_none() {
                     packet_sha = pkt["cv"]["sha256"].as_str().map(str::to_owned);
                 }
@@ -629,7 +706,11 @@ impl WorkspaceClient {
             location_mode,
             fit_summary,
             status_detail,
+            source_channel,
+            contact,
+            submitted_at,
             packet_cv,
+            packet_answers,
             packet_sha,
             full_text,
         })
@@ -968,6 +1049,16 @@ fn extract_location_hint(text: &str) -> Option<String> {
     let lower = text.to_ascii_lowercase();
     let city = if lower.contains("london") {
         Some("London")
+    } else if lower.contains("cambridge") {
+        Some("Cambridge")
+    } else if lower.contains("oxford") {
+        Some("Oxford")
+    } else if lower.contains("manchester") {
+        Some("Manchester")
+    } else if lower.contains("edinburgh") {
+        Some("Edinburgh")
+    } else if lower.contains("bristol") {
+        Some("Bristol")
     } else if lower.contains("uk ") || lower.contains("united kingdom") {
         Some("UK")
     } else if lower.contains("eu ") || lower.contains("europe") {

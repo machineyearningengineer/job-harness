@@ -4,6 +4,7 @@ mod chat_bridge;
 mod icons;
 mod theme;
 mod transport;
+mod ui_state;
 
 use app::JobHarnessApp;
 use gpui::{

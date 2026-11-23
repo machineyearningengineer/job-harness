@@ -30,38 +30,108 @@ pub enum StreamEvent {
     Error(String),
 }
 
+/// Per-turn model controls forwarded to the host agent CLI (never stored in the ledger).
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct AgentOptions {
+    pub model: Option<String>,
+    pub provider: Option<String>,
+    pub reasoning: Option<String>,
+}
+
+/// A selectable model preset discovered from the runtime's own configuration.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ModelPreset {
+    pub label: String,
+    pub model: Option<String>,
+    pub provider: Option<String>,
+}
+
+pub const HERMES_REASONING_LEVELS: [&str; 6] = ["minimal", "low", "medium", "high", "xhigh", "max"];
+
+fn find_hermes() -> Option<PathBuf> {
+    let home = std::env::var("HOME").unwrap_or_default();
+    for bin in [
+        PathBuf::from(&home).join(".local/bin/hermes"),
+        PathBuf::from("/usr/local/bin/hermes"),
+        PathBuf::from("/opt/homebrew/bin/hermes"),
+    ] {
+        if bin.is_file() {
+            return Some(bin);
+        }
+    }
+    which_in_path("hermes")
+}
+
+fn hermes_profile() -> String {
+    std::env::var("JOB_HARNESS_HERMES_PROFILE").unwrap_or_else(|_| "career-chief".into())
+}
+
 impl AgentRuntime {
-    pub fn detect() -> Self {
-        let home = std::env::var("HOME").unwrap_or_default();
-        for bin in [
-            PathBuf::from(&home).join(".local/bin/hermes"),
-            PathBuf::from("/usr/local/bin/hermes"),
-            PathBuf::from("/opt/homebrew/bin/hermes"),
-        ] {
-            if bin.is_file() {
-                let profile = std::env::var("JOB_HARNESS_HERMES_PROFILE")
-                    .unwrap_or_else(|_| "career-chief".into());
-                return Self::Hermes {
-                    binary: bin,
-                    profile,
-                };
-            }
+    /// Every host agent CLI available on this machine, in preference order.
+    pub fn detect_all() -> Vec<Self> {
+        let mut out = Vec::new();
+        if let Some(binary) = find_hermes() {
+            out.push(Self::Hermes {
+                binary,
+                profile: hermes_profile(),
+            });
         }
-        if let Some(bin) = which_in_path("hermes") {
-            let profile = std::env::var("JOB_HARNESS_HERMES_PROFILE")
-                .unwrap_or_else(|_| "career-chief".into());
-            return Self::Hermes {
-                binary: bin,
-                profile,
-            };
+        if let Some(binary) = which_in_path("claude") {
+            out.push(Self::ClaudeCode { binary });
         }
-        if let Some(bin) = which_in_path("claude") {
-            return Self::ClaudeCode { binary: bin };
+        if let Some(binary) = which_in_path("codex") {
+            out.push(Self::Codex { binary });
         }
-        if let Some(bin) = which_in_path("codex") {
-            return Self::Codex { binary: bin };
+        out
+    }
+
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::Hermes { .. } => "hermes",
+            Self::ClaudeCode { .. } => "claude",
+            Self::Codex { .. } => "codex",
+            Self::Unconfigured => "none",
         }
-        Self::Unconfigured
+    }
+
+    pub fn short_name(&self) -> &'static str {
+        match self {
+            Self::Hermes { .. } => "Hermes",
+            Self::ClaudeCode { .. } => "Claude Code",
+            Self::Codex { .. } => "Codex",
+            Self::Unconfigured => "No agent",
+        }
+    }
+
+    pub fn supports_reasoning(&self) -> bool {
+        matches!(self, Self::Hermes { .. })
+    }
+
+    /// Model presets read from the runtime's own config (Hermes profile) or CLI aliases.
+    pub fn model_presets(&self) -> Vec<ModelPreset> {
+        match self {
+            Self::Hermes { profile, .. } => hermes_presets(profile),
+            Self::ClaudeCode { .. } => ["sonnet", "opus", "haiku"]
+                .into_iter()
+                .map(|m| ModelPreset {
+                    label: m.to_owned(),
+                    model: Some(m.to_owned()),
+                    provider: None,
+                })
+                .collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// The model the runtime uses when no override is set (if discoverable).
+    pub fn default_model(&self) -> Option<String> {
+        match self {
+            Self::Hermes { profile, .. } => hermes_presets(profile)
+                .into_iter()
+                .next()
+                .and_then(|p| p.model),
+            _ => None,
+        }
     }
 
     pub fn label(&self) -> String {
@@ -82,12 +152,15 @@ impl AgentRuntime {
         &self,
         workspace: Option<PathBuf>,
         prompt: String,
+        opts: AgentOptions,
         tx: Sender<StreamEvent>,
         cancel: Arc<AtomicBool>,
     ) {
         let runtime = self.clone();
         std::thread::spawn(move || {
-            if let Err(err) = run_streaming(&runtime, workspace.as_deref(), &prompt, &tx, &cancel) {
+            if let Err(err) =
+                run_streaming(&runtime, workspace.as_deref(), &prompt, &opts, &tx, &cancel)
+            {
                 let _ = tx.send(StreamEvent::Error(err.to_string()));
             }
             let _ = tx.send(StreamEvent::Done);
@@ -99,6 +172,7 @@ fn run_streaming(
     runtime: &AgentRuntime,
     workspace: Option<&Path>,
     prompt: &str,
+    opts: &AgentOptions,
     tx: &Sender<StreamEvent>,
     cancel: &Arc<AtomicBool>,
 ) -> Result<()> {
@@ -126,11 +200,23 @@ fn run_streaming(
             if let Some(dir) = workspace {
                 c.arg("--in").arg(dir);
             }
+            if let Some(m) = opts.model.as_deref().filter(|m| !m.is_empty()) {
+                c.args(["-m", m]);
+            }
+            if let Some(p) = opts.provider.as_deref().filter(|p| !p.is_empty()) {
+                c.args(["--provider", p]);
+            }
+            if let Some(r) = opts.reasoning.as_deref().filter(|r| !r.is_empty()) {
+                c.args(["--reasoning", r]);
+            }
             (c, true)
         }
         AgentRuntime::ClaudeCode { binary } => {
             let mut c = Command::new(binary);
             c.args(["-p", "--continue"]);
+            if let Some(m) = opts.model.as_deref().filter(|m| !m.is_empty()) {
+                c.args(["--model", m]);
+            }
             if let Some(dir) = workspace {
                 c.current_dir(dir);
             }
@@ -138,7 +224,11 @@ fn run_streaming(
         }
         AgentRuntime::Codex { binary } => {
             let mut c = Command::new(binary);
-            c.args(["exec", "-"]);
+            c.arg("exec");
+            if let Some(m) = opts.model.as_deref().filter(|m| !m.is_empty()) {
+                c.args(["-m", m]);
+            }
+            c.arg("-");
             if let Some(dir) = workspace {
                 c.current_dir(dir);
             }
@@ -337,5 +427,121 @@ mod tests {
             extract_stream_status(&status).as_deref(),
             Some("Running review_queue…")
         );
+    }
+}
+
+/// Minimal, dependency-free read of a Hermes profile `config.yaml`: the default
+/// `model:` block first, then each `providers:` entry with its configured model.
+fn hermes_presets(profile: &str) -> Vec<ModelPreset> {
+    let home = std::env::var("HOME").unwrap_or_default();
+    let path = PathBuf::from(home)
+        .join(".hermes/profiles")
+        .join(profile)
+        .join("config.yaml");
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    parse_hermes_presets(&text)
+}
+
+fn yaml_value(line: &str, key: &str) -> Option<String> {
+    let rest = line.trim().strip_prefix(key)?.strip_prefix(':')?.trim();
+    let v = rest.trim_matches(|c| c == '"' || c == '\'');
+    (!v.is_empty()).then(|| v.to_owned())
+}
+
+pub(crate) fn parse_hermes_presets(text: &str) -> Vec<ModelPreset> {
+    let mut out = Vec::new();
+    let mut section = "";
+    let mut default_model = None;
+    let mut default_provider = None;
+    let mut current_provider: Option<(String, Option<String>, Option<String>)> = None;
+    let flush = |cur: &mut Option<(String, Option<String>, Option<String>)>,
+                 out: &mut Vec<ModelPreset>| {
+        if let Some((key, name, model)) = cur.take()
+            && let Some(m) = model
+        {
+            out.push(ModelPreset {
+                label: format!("{m} · {}", name.unwrap_or_else(|| key.clone())),
+                model: Some(m),
+                provider: Some(key),
+            });
+        }
+    };
+    for line in text.lines() {
+        if line.trim().is_empty() || line.trim_start().starts_with('#') {
+            continue;
+        }
+        let indent = line.len() - line.trim_start().len();
+        if indent == 0 {
+            if section == "providers" {
+                flush(&mut current_provider, &mut out);
+            }
+            section = match line.trim_end_matches(':').trim() {
+                "model" => "model",
+                "providers" => "providers",
+                _ => "",
+            };
+            continue;
+        }
+        match section {
+            "model" if indent == 2 => {
+                if let Some(v) = yaml_value(line, "default") {
+                    default_model = Some(v);
+                } else if let Some(v) = yaml_value(line, "provider") {
+                    default_provider = Some(v);
+                }
+            }
+            "providers" => {
+                if indent == 2 && line.trim().ends_with(':') {
+                    flush(&mut current_provider, &mut out);
+                    current_provider =
+                        Some((line.trim().trim_end_matches(':').to_owned(), None, None));
+                } else if indent == 4
+                    && let Some(cur) = current_provider.as_mut()
+                {
+                    if let Some(v) = yaml_value(line, "name") {
+                        cur.1 = Some(v);
+                    } else if let Some(v) = yaml_value(line, "model") {
+                        cur.2 = Some(v);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    if section == "providers" {
+        flush(&mut current_provider, &mut out);
+    }
+    if let Some(m) = default_model {
+        let label = match &default_provider {
+            Some(p) => format!("{m} · {p}"),
+            None => m.clone(),
+        };
+        out.insert(
+            0,
+            ModelPreset {
+                label,
+                model: Some(m),
+                provider: default_provider,
+            },
+        );
+    }
+    out
+}
+
+#[cfg(test)]
+mod preset_tests {
+    use super::parse_hermes_presets;
+
+    #[test]
+    fn reads_default_and_provider_models() {
+        let cfg = "model:\n  default: m-main\n  provider: cloud\nproviders:\n  local:\n    name: Local\n    model: m-local\n    models:\n      m-local:\n        context_length: 1\n";
+        let presets = parse_hermes_presets(cfg);
+        assert_eq!(presets.len(), 2);
+        assert_eq!(presets[0].model.as_deref(), Some("m-main"));
+        assert_eq!(presets[0].provider.as_deref(), Some("cloud"));
+        assert_eq!(presets[1].model.as_deref(), Some("m-local"));
+        assert_eq!(presets[1].provider.as_deref(), Some("local"));
     }
 }
