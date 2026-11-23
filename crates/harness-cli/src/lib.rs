@@ -339,9 +339,13 @@ fn error(error: anyhow::Error) -> Value {
 fn input(path: Option<PathBuf>) -> anyhow::Result<Value> {
     let mut raw = Vec::new();
     if let Some(path) = path {
-        fs::File::open(path)?
-            .take(8 * 1024 * 1024 + 1)
-            .read_to_end(&mut raw)?;
+        if let Some(inline) = path.to_str().map(str::trim).filter(|s| s.starts_with('{')) {
+            raw.extend_from_slice(inline.as_bytes());
+        } else {
+            fs::File::open(path)?
+                .take(8 * 1024 * 1024 + 1)
+                .read_to_end(&mut raw)?;
+        }
     } else if !std::io::stdin().is_terminal() {
         std::io::stdin()
             .take(8 * 1024 * 1024 + 1)
