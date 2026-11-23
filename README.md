@@ -19,7 +19,7 @@ Job Harness keeps the evidence behind your job search together: answers, project
 
 | You want to… | Start here |
 |---|---|
-| **Use your existing agent** — recommended | [Download the core toolkit](https://github.com/KingPsychopath/job-harness/releases/tag/v0.2.0), then [connect your agent](docs/AGENTS.md). No compiler or extra model needed. |
+| **Use your existing agent** — recommended | [Download the core toolkit](https://github.com/machineyearningengineer/job-harness/releases/tag/v0.2.0), then [connect your agent](docs/AGENTS.md). No compiler or extra model needed. |
 | **Use a desktop window** | Add the optional desktop package. It opens the same private workspace. [App setup](docs/INSTALL.md). |
 | **Open this repo in an agent project** | Clone it, open the folder in your agent and use the setup prompt below. Building from source needs Rust and a C toolchain. [Source setup](docs/INSTALL.md#build-from-the-toolkit-checkout). |
 
@@ -47,7 +47,7 @@ You choose where your data lives; it stays outside the software repo.
 [Data locations and folder selection](docs/INSTALL.md#where-your-data-lives) ·
 [Develop safely with separate test data](docs/DEVELOPMENT.md#keep-development-separate-from-your-career)
 
-**Private preview.** macOS, Linux and experimental Windows builds are available. Windows packages were cross-built and have not been run on Windows; a known notification stall is tracked in [issue 1](https://github.com/KingPsychopath/job-harness/issues/1). Packages are unsigned. [Platform requirements and checksums](docs/INSTALL.md) · [Validation record](docs/VALIDATION.md)
+**Private preview.** macOS, Linux and experimental Windows builds are available. Windows packages were cross-built and have not been run on Windows; a known notification stall is tracked in [issue 1](https://github.com/machineyearningengineer/job-harness/issues/1). Packages are unsigned. [Platform requirements and checksums](docs/INSTALL.md) · [Validation record](docs/VALIDATION.md)
 
 ## Ask your agent
 
@@ -75,7 +75,7 @@ You choose where your data lives; it stays outside the software repo.
 
 > Find a project story about improving a slow system. Show me the evidence.
 
-Your agent brings its own browser, email and calendar connections. A daily review shows when mail was last checked; saved information is distinct from a fresh inbox scan. Archiving uses your reviewed selection and keeps evidence of the verified result. Checking or updating your day never starts applications. [Everyday workflows](resources/guides/workflows.md) · [Access and permissions](docs/AUTH.md)
+Your agent brings its own browser, search/ingest (Exa, Parallel, Context.dev, employer boards, or any MCP server), email, and calendar connections through clean capability contracts — swap models, browser drivers, or schedulers without changing your ledger. `config/career-ledger.json` declares fail-closed permissions, per-channel daily limits (`portal`, `direct_email`, `recruiter_outreach`), pluggable discovery sources, and communication voice/anti-patterns. The goal is **handing over results, not tasks**: automated scouting, bounded applications, 2-layer company/round interview briefs + debriefs, and ready-to-send reply drafts where you just say "yes". [Everyday workflows](resources/guides/workflows.md) · [Career operations](resources/guides/career-operations.md) · [Access and permissions](docs/AUTH.md)
 
 The first-class daily tools are available in current source builds. The immutable
 v0.2.0 preview predates them; use [source setup](docs/INSTALL.md#build-from-the-toolkit-checkout)

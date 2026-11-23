@@ -1162,6 +1162,14 @@
                       },
                       "resolved_at": {
                         "type": "string"
+                      },
+                      "channel": {
+                        "type": "string",
+                        "enum": [
+                          "portal",
+                          "direct_email",
+                          "recruiter_outreach"
+                        ]
                       }
                     },
                     "required": [
@@ -1618,6 +1626,14 @@
                       },
                       "resolved_at": {
                         "type": "string"
+                      },
+                      "channel": {
+                        "type": "string",
+                        "enum": [
+                          "portal",
+                          "direct_email",
+                          "recruiter_outreach"
+                        ]
                       }
                     },
                     "required": [
@@ -3253,6 +3269,14 @@
                     },
                     "answer_source_sha256": {
                       "type": "object"
+                    },
+                    "channel": {
+                      "type": "string",
+                      "enum": [
+                        "portal",
+                        "direct_email",
+                        "recruiter_outreach"
+                      ]
                     }
                   },
                   "required": [
@@ -3653,6 +3677,14 @@
                     },
                     "answer_source_sha256": {
                       "type": "object"
+                    },
+                    "channel": {
+                      "type": "string",
+                      "enum": [
+                        "portal",
+                        "direct_email",
+                        "recruiter_outreach"
+                      ]
                     }
                   },
                   "required": [
@@ -4212,6 +4244,14 @@
                       },
                       "resolved_at": {
                         "type": "string"
+                      },
+                      "channel": {
+                        "type": "string",
+                        "enum": [
+                          "portal",
+                          "direct_email",
+                          "recruiter_outreach"
+                        ]
                       }
                     },
                     "required": [
@@ -4738,6 +4778,14 @@
                           },
                           "resolved_at": {
                             "type": "string"
+                          },
+                          "channel": {
+                            "type": "string",
+                            "enum": [
+                              "portal",
+                              "direct_email",
+                              "recruiter_outreach"
+                            ]
                           }
                         },
                         "required": [
@@ -5118,6 +5166,14 @@
                     },
                     "answer_source_sha256": {
                       "type": "object"
+                    },
+                    "channel": {
+                      "type": "string",
+                      "enum": [
+                        "portal",
+                        "direct_email",
+                        "recruiter_outreach"
+                      ]
                     }
                   },
                   "required": [
@@ -5571,6 +5627,14 @@
                     },
                     "answer_source_sha256": {
                       "type": "object"
+                    },
+                    "channel": {
+                      "type": "string",
+                      "enum": [
+                        "portal",
+                        "direct_email",
+                        "recruiter_outreach"
+                      ]
                     }
                   },
                   "required": [
@@ -7391,6 +7455,14 @@
                         },
                         "answer_source_sha256": {
                           "type": "object"
+                        },
+                        "channel": {
+                          "type": "string",
+                          "enum": [
+                            "portal",
+                            "direct_email",
+                            "recruiter_outreach"
+                          ]
                         }
                       },
                       "required": [
@@ -7492,6 +7564,14 @@
                       },
                       "resolved_at": {
                         "type": "string"
+                      },
+                      "channel": {
+                        "type": "string",
+                        "enum": [
+                          "portal",
+                          "direct_email",
+                          "recruiter_outreach"
+                        ]
                       }
                     },
                     "required": [
@@ -9234,7 +9314,7 @@
     }
   },
   "workflow_check": {
-    "description": "Check 1–20 typed host observations using the inline child schemas: scan coverage, canonical mail identity and latest requests, scoped dated answers, and form readback/upload evidence. No mail action, submission or canonical changes.",
+    "description": "Check 1\u201320 typed host observations using the inline child schemas: scan coverage, canonical mail identity and latest requests, scoped dated answers, and form readback/upload evidence. No mail action, submission or canonical changes.",
     "inputSchema": {
       "type": "object",
       "properties": {

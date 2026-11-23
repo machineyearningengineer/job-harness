@@ -4,6 +4,8 @@ Job Harness combines portable skills with typed MCP/CLI functions for one privat
 
 Start with [onboarding](job-harness-onboarding.md). Read the [version 2 contract](job-harness-contract.md) for schemas, batching, output/error shapes and submission recovery. The native Rust core has no model or vendor dependency. Host adapters supply external access.
 
+Every career task reads [shared learning](../context/profile/career-learning.md) and uses [the role-context workflow](career-learning-workflow.md). The local [workflow override](../config/career-workflows.json) makes these required reads visible in MCP bootstrap and delegates application/preparation/review/knowledge work through small local skill adapters to the versioned generic skills. When refreshing toolkit workflow defaults, preserve these private additions and review the copied routing rather than replacing it silently.
+
 ## Operations
 
 | Request | Operation / focused skill |
@@ -21,7 +23,7 @@ Call bootstrap with the operation and the host's capabilities. It returns settin
 
 ## Efficient path
 
-1. `bootstrap`: discover routing, configuration and recovery in one read-only call.
+1. `bootstrap`: discover routing, configuration and recovery in one read-only call. Read the returned shared-learning summary and role-context workflow, then the focused skill/adapter; the configured shared reads apply across career tasks.
 2. `query_batch`: fetch relevant records, approved answers and exact/employer duplicate checks together.
 3. `execute_batch`: start a bounded run and chain local record updates using prior-result references. Each mutation keeps its own idempotency key. Earlier commits survive a later failure.
 4. For applications, `prepare_application` freezes/reserves with one call. Use frozen bytes; call `begin_submission` separately immediately before one external Submit, then `finish_submission` with observed evidence.
@@ -34,7 +36,16 @@ The default public responses contain summaries and artifact references. Full sou
 
 Career facts/attribution live under context. Approved CV wording lives under content. Exact vacancy records and dated process outcomes live under applications. Pipeline Markdown/JSON are generated views. Shared runs/attempts/action IDs and unchanged application materials and saved evidence live under applications/operations; they are not another fact store.
 
-Personal configuration lives in each ledger's config/career-ledger.json: timezone, primary PDF, browser preference and answer-source paths. Salary/contact/consent answers stay in attributed records. Generic workflow defaults ship with the toolkit; optional config/career-workflows.json overrides routing for one ledger. No candidate identity is hardcoded into the package or generic skills.
+Personal configuration lives in each ledger's `config/career-ledger.json`: timezone, overall `max_daily_submissions`, per-channel `daily_channel_limits` (`portal`, `direct_email`, `recruiter_outreach`), explicit fail-closed `permissions` (`auto_apply_portal`, `auto_send_first_contact_email`, `auto_reply_threads`, `auto_book_calendar`, `auto_archive_mail`), pluggable `discovery` sources/filters (employer boards, Exa, Parallel, Context.dev, custom MCP tools), `communication` voice/anti-patterns, `contact_categories`, primary PDF, browser preference and answer-source paths. Salary/contact/consent answers stay in attributed records. Generic workflow defaults ship with the toolkit; optional `config/career-workflows.json` overrides routing for one ledger. No candidate identity is hardcoded into the package or generic skills.
+
+## Composable Host Contracts & Human Boundary
+
+Job Harness is a deterministic state, safety, and tool-contract engine — never locked to one model, browser driver, search provider, or scheduler. Any runtime adapter (Hermes `browser_exec`, Playwright MCP, Browserbase, Exa/Parallel/Context.dev MCP, Gmail/Calendar connectors) slots in as long as it fulfills the abstract capability contract (`web.read`, `browser.form`, `browser.upload`, `browser.submit`, `mail.search`, `mail.read`, `mail.send`, `mail.modify`, `calendar.read`, `calendar.book`).
+
+Keep the human-in-the-loop boundary explicit and **hand over results, not tasks**:
+- **Autonomous (when enabled in `permissions`):** scouting via any configured ingest source, deduplicating, preparing immutable packets, bounded portal submissions (and optional first-contact direct emails with zero-prior-Sent verification), email-code verification within an active attempt, inbox signal monitoring, and updating 2-layer company/round interview briefs.
+- **Ready-to-approve ("just say yes"):** drafted recruiter/founder replies in the candidate's own voice (zero AI clichés), proposed calendar slots checked against live availability, and exact-message archive plans.
+- **Human-only:** taking the interview itself, negotiating/accepting offers, supplying missing personal declarations, and resolving escalated CAPTCHAs/logins/MFA.
 
 Legacy prose remains historical and can be stale. A generic employer application confirmation is insufficient to attribute an outcome across several vacancies. Older acknowledgements must not regress a newer interview stage. Booked, proposed, completed and outcome unknown remain distinct.
 
