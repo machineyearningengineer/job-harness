@@ -1372,9 +1372,13 @@ fn review_queue_prioritizes_live_interviews_and_mail_over_historical_unknowns() 
         "finish_submission",
         json!({"attempt_id":prep["attempt_id"],"outcome":"outcome_unknown","summary":"Unknown synthetic outcome","evidence":["applications/acme-engineer-123.md"],"idempotency_key":"rq-prio-unk"}),
     );
+    let upcoming_time = (chrono::Utc::now() + chrono::Duration::hours(4))
+        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
     fs::write(
         dir.path().join("applications/liveco-staff.md"),
-        "# LiveCo — Staff Engineer\n\n<!-- tracking\n{\"company\":\"LiveCo\",\"title\":\"Staff Engineer\",\"stage\":\"technical\",\"checked\":\"2026-11-23\",\"schedule_state\":\"booked\",\"scheduled_start\":\"2026-11-24T10:00:00Z\",\"next_action\":\"Prepare system design\"}\n-->\n",
+        format!(
+            "# LiveCo — Staff Engineer\n\n<!-- tracking\n{{\"company\":\"LiveCo\",\"title\":\"Staff Engineer\",\"stage\":\"technical\",\"checked\":\"2026-11-23\",\"schedule_state\":\"booked\",\"scheduled_start\":\"{upcoming_time}\",\"next_action\":\"Prepare system design\"}}\n-->\n"
+        ),
     )
     .unwrap();
     fs::write(
@@ -1382,20 +1386,22 @@ fn review_queue_prioritizes_live_interviews_and_mail_over_historical_unknowns() 
         r#"{"items":[{"id":"m1","needs_reply":true,"company":"MailCo","subject":"Interview times"}]}"#,
     )
     .unwrap();
+    let boot = call(&h, "bootstrap", json!({"operation":"daily_check","capabilities":[]}));
+    assert_eq!(boot["daily_budget"]["used"], 1);
     let queue = call(
         &h,
         "review_queue",
         json!({"mail_observations_path":"context/mail-prio.json","limit":10}),
     );
-    let kinds: Vec<&str> = queue["items"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter_map(|item| item["kind"].as_str())
-        .collect();
-    let idx_interview = kinds.iter().position(|k| *k == "interview").unwrap();
-    let idx_mail = kinds.iter().position(|k| *k == "supplied_mail").unwrap();
-    let idx_unknown = kinds.iter().position(|k| *k == "unknown_submission").unwrap();
+    assert_eq!(queue["needs_attention_now"], true);
+    assert_eq!(queue["next_upcoming_interview"]["company"], "LiveCo");
+    let items = queue["items"].as_array().unwrap();
+    let idx_interview = items.iter().position(|i| i["kind"] == "interview").unwrap();
+    let idx_mail = items.iter().position(|i| i["kind"] == "supplied_mail").unwrap();
+    let idx_unknown = items.iter().position(|i| i["kind"] == "unknown_submission").unwrap();
+    assert_eq!(items[idx_interview]["urgency"], "urgent_now");
+    assert_eq!(items[idx_mail]["urgency"], "urgent_now");
+    assert_eq!(items[idx_unknown]["urgency"], "background");
     assert!(idx_interview < idx_mail && idx_mail < idx_unknown);
 }
 #[test]

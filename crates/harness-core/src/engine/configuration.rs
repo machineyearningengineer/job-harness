@@ -193,8 +193,9 @@ impl Engine {
             "today_local": now_local.date_naive().to_string(),
             "timezone": tz_name
         });
+        let daily_budget = self.daily_budget_snapshot(state)?;
         Ok(
-            json!({"contract_version":"2.0","clock":clock,"ledger":self.root,"settings":settings,"plan":route,"health":health,"available_capabilities":supplied,"missing_capabilities":missing,"configuration_issues":issues,"cli_fallback":binary.map(|p|json!({"command":p,"args":["--root",self.root.to_string_lossy(),"call"],"cwd":self.root})),"paths":{"toolkit":"embedded","contract":"docs/job-harness-contract.md","onboarding":"docs/job-harness-onboarding.md"}}),
+            json!({"contract_version":"2.0","clock":clock,"daily_budget":daily_budget,"ledger":self.root,"settings":settings,"plan":route,"health":health,"available_capabilities":supplied,"missing_capabilities":missing,"configuration_issues":issues,"cli_fallback":binary.map(|p|json!({"command":p,"args":["--root",self.root.to_string_lossy(),"call"],"cwd":self.root})),"paths":{"toolkit":"embedded","contract":"docs/job-harness-contract.md","onboarding":"docs/job-harness-onboarding.md"}}),
         )
     }
     pub(super) fn bootstrap_next(&self, args: &Value, data: &Value) -> Result<Vec<Value>> {

@@ -4961,6 +4961,53 @@
                 },
                 "paths": {
                   "type": "object"
+                },
+                "daily_budget": {
+                  "type": "object",
+                  "properties": {
+                    "date": {
+                      "type": "string"
+                    },
+                    "timezone": {
+                      "type": "string"
+                    },
+                    "limit": {
+                      "anyOf": [
+                        {
+                          "type": "integer"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "used": {
+                      "type": "integer"
+                    },
+                    "remaining": {
+                      "anyOf": [
+                        {
+                          "type": "integer"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "channels": {
+                      "type": "object",
+                      "additionalProperties": true
+                    }
+                  },
+                  "required": [
+                    "date",
+                    "timezone",
+                    "limit",
+                    "used",
+                    "remaining",
+                    "channels"
+                  ],
+                  "additionalProperties": false
                 }
               },
               "required": [
@@ -7117,6 +7164,23 @@
                         },
                         "minItems": 0,
                         "maxItems": 1000
+                      },
+                      "urgency": {
+                        "type": "string",
+                        "enum": [
+                          "urgent_now",
+                          "upcoming",
+                          "background"
+                        ]
+                      },
+                      "urgency_reason": {
+                        "type": "string"
+                      },
+                      "days_since_checked": {
+                        "type": "integer"
+                      },
+                      "minutes_until_start": {
+                        "type": "integer"
                       }
                     },
                     "required": [
@@ -7251,6 +7315,136 @@
                 },
                 "note_reviews_complete": {
                   "type": "boolean"
+                },
+                "needs_attention_now": {
+                  "type": "boolean"
+                },
+                "urgency_counts": {
+                  "type": "object",
+                  "properties": {
+                    "urgent_now": {
+                      "type": "integer"
+                    },
+                    "upcoming": {
+                      "type": "integer"
+                    },
+                    "background": {
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "urgent_now",
+                    "upcoming",
+                    "background"
+                  ],
+                  "additionalProperties": false
+                },
+                "next_upcoming_interview": {
+                  "anyOf": [
+                    {
+                      "type": "null"
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "company": {
+                          "anyOf": [
+                            {
+                              "type": "string"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "title": {
+                          "anyOf": [
+                            {
+                              "type": "string"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "stage": {
+                          "type": "string"
+                        },
+                        "scheduled_start": {
+                          "anyOf": [
+                            {
+                              "type": "string"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "minutes_until_start": {
+                          "type": "integer"
+                        },
+                        "record_path": {
+                          "anyOf": [
+                            {
+                              "type": "string"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "brief": {
+                          "anyOf": [
+                            {
+                              "type": "string"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        }
+                      },
+                      "additionalProperties": false
+                    }
+                  ]
+                },
+                "quiet_applied_count": {
+                  "type": "integer"
+                },
+                "track_fit": {
+                  "anyOf": [
+                    {
+                      "type": "null"
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "configured_tracks": {
+                          "type": "array",
+                          "items": {
+                            "type": "string"
+                          }
+                        },
+                        "matched_by_track": {
+                          "type": "object",
+                          "additionalProperties": true
+                        },
+                        "unmatched_recent_count": {
+                          "type": "integer"
+                        },
+                        "sample_unmatched_titles": {
+                          "type": "array",
+                          "items": {
+                            "type": "string"
+                          }
+                        },
+                        "suggest_new_track": {
+                          "type": "boolean"
+                        }
+                      },
+                      "additionalProperties": false
+                    }
+                  ]
                 }
               },
               "required": [
@@ -11950,6 +12144,23 @@
                               "upcoming",
                               "unscheduled"
                             ]
+                          },
+                          "urgency": {
+                            "type": "string",
+                            "enum": [
+                              "urgent_now",
+                              "upcoming",
+                              "background"
+                            ]
+                          },
+                          "urgency_reason": {
+                            "type": "string"
+                          },
+                          "days_since_checked": {
+                            "type": "integer"
+                          },
+                          "minutes_until_start": {
+                            "type": "integer"
                           }
                         },
                         "required": [
@@ -12090,6 +12301,136 @@
                     },
                     "note_reviews_complete": {
                       "type": "boolean"
+                    },
+                    "needs_attention_now": {
+                      "type": "boolean"
+                    },
+                    "urgency_counts": {
+                      "type": "object",
+                      "properties": {
+                        "urgent_now": {
+                          "type": "integer"
+                        },
+                        "upcoming": {
+                          "type": "integer"
+                        },
+                        "background": {
+                          "type": "integer"
+                        }
+                      },
+                      "required": [
+                        "urgent_now",
+                        "upcoming",
+                        "background"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "next_upcoming_interview": {
+                      "anyOf": [
+                        {
+                          "type": "null"
+                        },
+                        {
+                          "type": "object",
+                          "properties": {
+                            "company": {
+                              "anyOf": [
+                                {
+                                  "type": "string"
+                                },
+                                {
+                                  "type": "null"
+                                }
+                              ]
+                            },
+                            "title": {
+                              "anyOf": [
+                                {
+                                  "type": "string"
+                                },
+                                {
+                                  "type": "null"
+                                }
+                              ]
+                            },
+                            "stage": {
+                              "type": "string"
+                            },
+                            "scheduled_start": {
+                              "anyOf": [
+                                {
+                                  "type": "string"
+                                },
+                                {
+                                  "type": "null"
+                                }
+                              ]
+                            },
+                            "minutes_until_start": {
+                              "type": "integer"
+                            },
+                            "record_path": {
+                              "anyOf": [
+                                {
+                                  "type": "string"
+                                },
+                                {
+                                  "type": "null"
+                                }
+                              ]
+                            },
+                            "brief": {
+                              "anyOf": [
+                                {
+                                  "type": "string"
+                                },
+                                {
+                                  "type": "null"
+                                }
+                              ]
+                            }
+                          },
+                          "additionalProperties": false
+                        }
+                      ]
+                    },
+                    "quiet_applied_count": {
+                      "type": "integer"
+                    },
+                    "track_fit": {
+                      "anyOf": [
+                        {
+                          "type": "null"
+                        },
+                        {
+                          "type": "object",
+                          "properties": {
+                            "configured_tracks": {
+                              "type": "array",
+                              "items": {
+                                "type": "string"
+                              }
+                            },
+                            "matched_by_track": {
+                              "type": "object",
+                              "additionalProperties": true
+                            },
+                            "unmatched_recent_count": {
+                              "type": "integer"
+                            },
+                            "sample_unmatched_titles": {
+                              "type": "array",
+                              "items": {
+                                "type": "string"
+                              }
+                            },
+                            "suggest_new_track": {
+                              "type": "boolean"
+                            }
+                          },
+                          "additionalProperties": false
+                        }
+                      ]
                     }
                   },
                   "required": [

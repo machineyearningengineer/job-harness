@@ -80,6 +80,80 @@ fn check_daily_submission_budget(
 }
 
 impl Engine {
+    pub(super) fn daily_budget_snapshot(&self, state: &Value) -> Result<Value> {
+        let settings = self.settings()?;
+        let tz_name = s(&settings, "timezone")?;
+        let zone: chrono_tz::Tz = tz_name
+            .parse()
+            .map_err(|_| Error::new("invalid_arguments", "Configure an IANA timezone"))?;
+        let today = chrono::Utc::now().with_timezone(&zone).date_naive();
+        let mut used: u64 = 0;
+        let mut by_channel: BTreeMap<String, u64> = BTreeMap::new();
+        for attempt in state["attempts"].as_object().unwrap().values() {
+            let status = match SubmissionState::parse(&attempt["status"]) {
+                Ok(st) => st,
+                Err(_) => continue,
+            };
+            let Some(stamp) = attempt.get("began_at").and_then(Value::as_str) else {
+                if matches!(status, SubmissionState::Reserved | SubmissionState::Cancelled) {
+                    continue;
+                }
+                continue;
+            };
+            if let Ok(began) = chrono::DateTime::parse_from_rfc3339(stamp)
+                && began.with_timezone(&zone).date_naive() == today
+            {
+                used += 1;
+                let ch = attempt
+                    .get("channel")
+                    .and_then(Value::as_str)
+                    .unwrap_or("portal")
+                    .to_owned();
+                *by_channel.entry(ch).or_insert(0) += 1;
+            }
+        }
+        let limit = settings
+            .get("max_daily_submissions")
+            .and_then(Value::as_u64);
+        let remaining = limit.map(|l| l.saturating_sub(used));
+        let mut channels = serde_json::Map::new();
+        if let Some(ch_limits) = settings
+            .get("daily_channel_limits")
+            .and_then(Value::as_object)
+        {
+            for (ch, val) in ch_limits {
+                if let Some(ch_limit) = val.as_u64() {
+                    let ch_used = *by_channel.get(ch).unwrap_or(&0);
+                    channels.insert(
+                        ch.clone(),
+                        json!({
+                            "limit": ch_limit,
+                            "used": ch_used,
+                            "remaining": ch_limit.saturating_sub(ch_used)
+                        }),
+                    );
+                }
+            }
+        }
+        for (ch, ch_used) in by_channel {
+            channels.entry(ch).or_insert_with(|| {
+                json!({
+                    "limit": Value::Null,
+                    "used": ch_used,
+                    "remaining": Value::Null
+                })
+            });
+        }
+        Ok(json!({
+            "date": today.to_string(),
+            "timezone": tz_name,
+            "limit": limit,
+            "used": used,
+            "remaining": remaining,
+            "channels": channels
+        }))
+    }
+
     pub(super) fn copy_artifact(&self, source: &str, folder: &str) -> Result<Value> {
         let path = self.artifact_path(source, &["pdf", "md", "txt", "json", "jpg", "png"])?;
         let bytes = fs::read(&path)?;
