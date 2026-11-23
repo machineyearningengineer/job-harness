@@ -147,7 +147,7 @@ pub fn allowed_path(name: &str) -> bool {
         "storage_state.json",
     ]
     .contains(&base.as_str())
-        || base.contains(".sqlite")
+        || (base.contains(".sqlite") && name != crate::state::DB_REL_PATH)
         || base.starts_with(".env")
         || base.starts_with("id_")
         || [".key", ".pem", ".p12", ".jhb", ".har", ".kdbx"]
@@ -194,6 +194,7 @@ fn profile_allowed(name: &str, configured: &BTreeSet<String>) -> bool {
 }
 
 fn check_portable_state(root: &Path) -> Result<()> {
+    crate::state::checkpoint(root)?;
     let state = crate::state::load(root)?;
     if state
         .get("pending")
@@ -863,19 +864,18 @@ mod tests {
         let ops = t.path().join("applications/operations");
         fs::create_dir_all(&ops).unwrap();
         unknown_attempt(t.path());
-        let mut state: Value =
-            serde_json::from_slice(&fs::read(ops.join("state.json")).unwrap()).unwrap();
+        let mut state = crate::state::load(t.path()).unwrap();
         state["pending"] = Value::Null;
         state["plugin_extension"] = json!({"fixture":true});
-        fs::write(ops.join("state.json"), serde_json::to_vec(&state).unwrap()).unwrap();
+        crate::state::save(t.path(), &state).unwrap();
         let out = tempfile::tempdir().unwrap();
         let file = out.path().join("data.jhb");
         export_bundle(t.path(), &file, "workspace").unwrap();
         let dest = out.path().join("restored");
         import_bundle(&dest, &file).unwrap();
         assert_eq!(
-            fs::read(ops.join("state.json")).unwrap(),
-            fs::read(dest.join("applications/operations/state.json")).unwrap()
+            crate::state::load(t.path()).unwrap(),
+            crate::state::load(&dest).unwrap()
         );
         assert!(!dest.join(".git").exists());
         let restored = crate::Engine::open(&dest)
@@ -965,8 +965,8 @@ mod tests {
         let restored = output.path().join("restored");
         import_bundle(&restored, &backup).unwrap();
         assert_eq!(
-            fs::read(original.path().join("applications/operations/state.json")).unwrap(),
-            fs::read(restored.join("applications/operations/state.json")).unwrap()
+            crate::state::load(original.path()).unwrap(),
+            crate::state::load(&restored).unwrap()
         );
         let engine = crate::Engine::open(&restored).unwrap();
         let mut begin = json!({"action":"begin_archive","run_id":run,"plan_id":plan["plan_id"],"expected_plan_sha256":plan["plan_sha256"],"selected_action_ids":selected,"mail_observations_path":path,"expected_source_sha256":digest(&bytes),"idempotency_key":"mail:begin"});
@@ -978,7 +978,7 @@ mod tests {
         checked_call(&engine, "daily_update", approve);
         begin["idempotency_key"] = json!("mail:restored-begin");
         begin.as_object_mut().unwrap().remove("action");
-        let before = fs::read(restored.join("applications/operations/state.json")).unwrap();
+        let before = crate::state::load(&restored).unwrap();
         assert_eq!(
             engine.call(
                 "execute_batch",
@@ -986,10 +986,7 @@ mod tests {
             )["error"]["code"],
             "batch_boundary"
         );
-        assert_eq!(
-            before,
-            fs::read(restored.join("applications/operations/state.json")).unwrap()
-        );
+        assert_eq!(before, crate::state::load(&restored).unwrap());
         assert_eq!(
             checked_call(&engine, "begin_mail_archive", begin.clone())["ready_for_single_archive"],
             true
@@ -1126,15 +1123,27 @@ mod tests {
         let out = tempfile::tempdir().unwrap();
         let original = out.path().join("valid.jhb");
         export_bundle(root.path(), &original, "workspace").unwrap();
-        let bad_state=serde_json::to_vec(&json!({"schema_version":1,"runs":{},"attempts":{"broken":{"status":"submitted"}},"events":[]})).unwrap();
+        // Corrupt the SQLite database inside the bundle with a broken attempt row.
+        let bad_dir = tempfile::tempdir().unwrap();
+        let bad_db = bad_dir.path().join("bad.sqlite");
+        fs::copy(root.path().join(crate::state::DB_REL_PATH), &bad_db).unwrap();
+        let conn = rusqlite::Connection::open(&bad_db).unwrap();
+        conn.execute(
+            "INSERT INTO attempts(id, run_id, company, vacancy_url, status, channel, reserved_at, began_at, payload) VALUES('broken','r','c','u','submitted','portal','2026-01-01','2026-01-01','{\"status\":\"submitted\"}')",
+            [],
+        )
+        .unwrap();
+        conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);").unwrap();
+        drop(conn);
+        let bad_state = fs::read(&bad_db).unwrap();
         let malformed = out.path().join("bad.jhb");
         rewrite(&original, &malformed, |name, bytes| {
-            if name == "applications/operations/state.json" {
+            if name == crate::state::DB_REL_PATH {
                 bad_state.clone()
             } else if name == "manifest.json" {
                 let mut manifest: Value = serde_json::from_slice(&bytes).unwrap();
                 for entry in manifest["files"].as_array_mut().unwrap() {
-                    if entry["path"] == "applications/operations/state.json" {
+                    if entry["path"] == crate::state::DB_REL_PATH {
                         entry["sha256"] = json!(digest(&bad_state));
                         entry["size"] = json!(bad_state.len());
                     }
@@ -1152,8 +1161,13 @@ mod tests {
     #[test]
     fn interrupted_local_journal_is_not_transferable() {
         let t = workspace();
-        fs::create_dir_all(t.path().join("applications/operations")).unwrap();
-        fs::write(t.path().join("applications/operations/state.json"),serde_json::to_vec(&json!({"schema_version":1,"runs":{},"attempts":{},"events":[],"pending":{"operations":["unfinished"]}})).unwrap()).unwrap();
+        let conn = rusqlite::Connection::open(t.path().join(crate::state::DB_REL_PATH)).unwrap();
+        conn.execute(
+            "INSERT INTO pending_changes(path, payload) VALUES('applications/pending.md', '{\"path\":\"applications/pending.md\",\"text\":\"# Pending\",\"before_sha256\":null}')",
+            [],
+        )
+        .unwrap();
+        drop(conn);
         let out = tempfile::tempdir().unwrap();
         assert!(export_bundle(t.path(), &out.path().join("bad.jhb"), "workspace").is_err());
     }

@@ -44,6 +44,195 @@ fn prepare(h: &Engine, run: &str, key: &str) -> Value {
         json!({"run_id":run,"record":"applications/acme-engineer-123.md","company":"Acme","vacancy_url":"https://jobs.example.com/acme/123","source":"employer","posting_id":"123","cv_path":"output/cv.pdf","answers_path":"applications/answers.json","idempotency_key":key}),
     )
 }
+fn set_daily_budget(h: &Engine, limit: Value) {
+    fs::write(
+        h.root.join("config/career-ledger.json"),
+        json!({"schema_version":1,"timezone":"UTC","primary_cv":"output/cv.pdf","max_daily_submissions":limit}).to_string(),
+    )
+    .unwrap();
+}
+
+fn prepare_second_run(h: &Engine) -> Value {
+    fs::write(h.root.join("applications/example-engineer-456.md"), "# Example — Engineer\n\n- Stage: saved\n- Source URL: https://jobs.example.com/example/456\n").unwrap();
+    let run = call(
+        h,
+        "start_run",
+        json!({"operation":"apply","scope":{"sources":["employer"],"max_submissions":1,"dry_run":false},"user_request":"Second synthetic worker","idempotency_key":"run2"}),
+    );
+    call(
+        h,
+        "prepare_application",
+        json!({"run_id":run["run_id"],"record":"applications/example-engineer-456.md","company":"Example","vacancy_url":"https://jobs.example.com/example/456","source":"employer","posting_id":"456","cv_path":"output/cv.pdf","answers_path":"applications/answers.json","idempotency_key":"prepare2"}),
+    )
+}
+
+#[test]
+fn daily_submission_budget_fails_closed_on_corrupt_begin_history() {
+    let dir = fixture();
+    let h = Engine::open(dir.path()).unwrap();
+    let run = start(&h, 1);
+    let first = prepare(&h, &run, "prepare");
+    let second = prepare_second_run(&h);
+    call(
+        &h,
+        "begin_submission",
+        json!({"attempt_id":first["attempt_id"],"idempotency_key":"begin-1"}),
+    );
+    let first_id = first["attempt_id"].as_str().unwrap();
+    let original = h.load_state().unwrap();
+    set_daily_budget(&h, json!(3));
+    let request = json!({"attempt_id":second["attempt_id"],"idempotency_key":"begin-2"});
+    for defect in [
+        "bad timestamp",
+        "missing timestamp",
+        "cancelled without timestamp",
+        "missing attempt",
+        "missing event identity",
+    ] {
+        let mut state = original.clone();
+        match defect {
+            "bad timestamp" => state["attempts"][first_id]["began_at"] = json!("not a timestamp"),
+            "missing timestamp" | "cancelled without timestamp" => {
+                let attempt = &mut state["attempts"][first_id];
+                attempt.as_object_mut().unwrap().remove("began_at");
+                if defect == "cancelled without timestamp" {
+                    attempt["status"] = json!("cancelled");
+                }
+            }
+            "missing attempt" => {
+                state["attempts"].as_object_mut().unwrap().remove(first_id);
+            }
+            "missing event identity" => {
+                state["events"].as_array_mut().unwrap().last_mut().unwrap()["result"]["attempt_id"] =
+                    Value::Null;
+            }
+            _ => unreachable!(),
+        }
+        h.commit(&mut state, &[]).unwrap();
+        let before = h.load_state().unwrap();
+        let result = h.call("begin_submission", &request);
+        assert_eq!(
+            result["error"]["code"], "invalid_state",
+            "{defect}: {result}"
+        );
+        assert_eq!(before, h.load_state().unwrap(), "{defect}");
+    }
+}
+
+#[test]
+fn daily_submission_budget_restores_capacity_without_expiring_unknown_attempts() {
+    let dir = fixture();
+    let h = Engine::open(dir.path()).unwrap();
+    set_daily_budget(&h, json!(1));
+    let run = start(&h, 1);
+    let first = prepare(&h, &run, "prepare");
+    let second = prepare_second_run(&h);
+    call(
+        &h,
+        "begin_submission",
+        json!({"attempt_id":first["attempt_id"],"idempotency_key":"begin-1"}),
+    );
+    call(
+        &h,
+        "finish_submission",
+        json!({"attempt_id":first["attempt_id"],"outcome":"outcome_unknown","summary":"Lost response","evidence":[],"idempotency_key":"unknown"}),
+    );
+    let begin_second = json!({"attempt_id":second["attempt_id"],"idempotency_key":"begin-2"});
+    assert_eq!(
+        h.call("begin_submission", &begin_second)["error"]["code"],
+        "daily_submission_cap_reached"
+    );
+
+    // Age this synthetic attempt's begin date, not its outcome or original reservation.
+    let mut state = h.load_state().unwrap();
+    let first_id = first["attempt_id"].as_str().unwrap();
+    state["attempts"][first_id]["began_at"] =
+        json!((chrono::Utc::now() - chrono::Days::new(1)).to_rfc3339());
+    h.commit(&mut state, &[]).unwrap();
+    assert_eq!(
+        call(&h, "begin_submission", begin_second)["ready_for_single_submit"],
+        true
+    );
+    assert_eq!(
+        h.load_state().unwrap()["attempts"][first_id]["status"],
+        "outcome_unknown"
+    );
+}
+
+#[test]
+fn daily_submission_budget_grants_only_one_concurrent_begin_across_runs() {
+    let dir = fixture();
+    let h = Engine::open(dir.path()).unwrap();
+    set_daily_budget(&h, json!(1));
+    let run = start(&h, 1);
+    let first = prepare(&h, &run, "prepare");
+    let second = prepare_second_run(&h);
+    let requests = [first, second].map(|p| {
+        json!({"attempt_id":p["attempt_id"],"idempotency_key":format!("begin:{}", p["attempt_id"])})
+    });
+    let barrier = std::sync::Barrier::new(2);
+    let results = std::thread::scope(|scope| {
+        requests
+            .each_ref()
+            .map(|args| {
+                scope.spawn(|| {
+                    let worker = Engine::open(dir.path()).unwrap();
+                    barrier.wait();
+                    worker.call("begin_submission", args)
+                })
+            })
+            .map(|handle| handle.join().unwrap())
+    });
+    let state = h.load_state().unwrap();
+    let mut permits = 0;
+    for (args, result) in requests.into_iter().zip(results) {
+        let attempt = &state["attempts"][args["attempt_id"].as_str().unwrap()];
+        if result["ok"] == true {
+            permits += 1;
+            assert_eq!(result["data"]["ready_for_single_submit"], true);
+            assert_eq!(attempt["status"], "submitting");
+            assert!(attempt["began_at"].is_string());
+            assert_eq!(
+                call(&h, "begin_submission", args)["ready_for_single_submit"],
+                false
+            );
+        } else {
+            assert_eq!(result["error"]["code"], "daily_submission_cap_reached");
+            assert_eq!(attempt["status"], "reserved");
+            assert!(attempt.get("began_at").is_none());
+        }
+    }
+    assert_eq!(permits, 1);
+    assert_eq!(
+        state["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|e| e["tool"] == "begin_submission")
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn daily_submission_budget_is_optional_and_validated_by_workspace_and_engine() {
+    let dir = fixture();
+    let h = Engine::open(dir.path()).unwrap();
+    assert!(h.settings().unwrap().get("max_daily_submissions").is_none());
+    for limit in [json!(0), json!(20)] {
+        set_daily_budget(&h, limit.clone());
+        assert_eq!(h.settings().unwrap()["max_daily_submissions"], limit);
+        assert_eq!(
+            workspace::settings(&h.root).unwrap()["max_daily_submissions"],
+            limit
+        );
+    }
+    for limit in [json!(-1), json!(1.5), json!("20"), Value::Null] {
+        set_daily_budget(&h, limit);
+        assert!(h.settings().is_err());
+        assert!(workspace::settings(&h.root).is_err());
+    }
+}
 #[test]
 fn native_record_paths_become_valid_portable_journal_paths() {
     let directory = fixture();
@@ -88,7 +277,7 @@ fn all_contracts_reject_extra_input_without_writes() {
     }
     assert!(
         !dir.path()
-            .join("applications/operations/state.json")
+            .join(crate::state::DB_REL_PATH)
             .exists()
     );
 }
@@ -114,7 +303,7 @@ fn batches_reject_submit_boundaries_before_any_write() {
     assert_eq!(result["error"]["code"], "batch_boundary");
     assert!(
         !dir.path()
-            .join("applications/operations/state.json")
+            .join(crate::state::DB_REL_PATH)
             .exists()
     );
 }
@@ -261,11 +450,7 @@ fn journal_conflicts_preserve_manual_edits_and_diagnostic_reads() {
     let before = domain::digest(&fs::read(&path).unwrap());
     let mut state = h.load_state().unwrap();
     state["pending"] = json!([{"path":"applications/acme-engineer-123.md","before_sha256":before,"text":"# Acme\n\n<!-- tracking\n{\"stage\":\"applied\",\"checked\":\"2026-10-12\",\"next_action\":\"Monitor\"}\n-->\n"}]);
-    storage::atomic_write(
-        &dir.path().join("applications/operations/state.json"),
-        &domain::encoded(&state).unwrap(),
-    )
-    .unwrap();
+    crate::state::save(dir.path(), &state).unwrap();
     fs::write(&path, "# Acme — Engineer\n\nHuman update\n").unwrap();
     let result = h.call("reconcile_tracker", &json!({}));
     assert_eq!(result["error"]["code"], "pending_recovery");
@@ -399,11 +584,7 @@ fn interrupted_journal_finishes_exact_local_change() {
     let mut state = h.load_state().unwrap();
     state["pending"] =
         json!([{"path":"applications/acme-engineer-123.md","before_sha256":before,"text":text}]);
-    storage::atomic_write(
-        &dir.path().join("applications/operations/state.json"),
-        &domain::encoded(&state).unwrap(),
-    )
-    .unwrap();
+    crate::state::save(dir.path(), &state).unwrap();
     call(
         &h,
         "rebuild_pipeline",
@@ -505,11 +686,7 @@ fn conflict_resolution_preserves_losing_bytes_and_allows_external_resolution() {
         let current = "# Acme — Engineer\n\n- Stage: technical\n- Source URL: https://jobs.example.com/acme/123\n\nManual interview note\n";
         let mut state = h.load_state().unwrap();
         state["pending"] = json!([{"path":"applications/acme-engineer-123.md","before_sha256":before,"text":wanted}]);
-        storage::atomic_write(
-            &dir.path().join("applications/operations/state.json"),
-            &domain::encoded(&state).unwrap(),
-        )
-        .unwrap();
+        crate::state::save(dir.path(), &state).unwrap();
         fs::write(&path, current).unwrap();
         let pending = h.pending_transaction().unwrap();
         let sha = pending["pending_sha256"].as_str().unwrap();
@@ -552,7 +729,7 @@ fn duplicate_change_paths_are_rejected_before_journal_commit() {
     assert_eq!(changes.len(), 1);
     assert!(
         !dir.path()
-            .join("applications/operations/state.json")
+            .join(crate::state::DB_REL_PATH)
             .exists()
     );
 }
@@ -565,11 +742,7 @@ fn malformed_state_returns_typed_errors_and_preserves_unknown_fields() {
     let mut state = h.load_state().unwrap();
     state["future_extension"] = json!({"origin":"external-tool","number":1.0});
     state["runs"][&run]["future"] = json!(["preserve",{"x":true}]);
-    storage::atomic_write(
-        &dir.path().join("applications/operations/state.json"),
-        &domain::encoded(&state).unwrap(),
-    )
-    .unwrap();
+    crate::state::save(dir.path(), &state).unwrap();
     call(
         &h,
         "record_event",
@@ -581,21 +754,26 @@ fn malformed_state_returns_typed_errors_and_preserves_unknown_fields() {
         changed["runs"][&run]["future"],
         state["runs"][&run]["future"]
     );
-    let mut malformed = changed;
-    malformed["runs"][&run] = json!([]);
-    storage::atomic_write(
-        &dir.path().join("applications/operations/state.json"),
-        &domain::encoded(&malformed).unwrap(),
+    let conn = rusqlite::Connection::open(dir.path().join(crate::state::DB_REL_PATH)).unwrap();
+    conn.execute(
+        "UPDATE runs SET payload = '[]' WHERE id = ?1",
+        rusqlite::params![&run],
     )
     .unwrap();
+    drop(conn);
     assert_eq!(
         h.call("get_run", &json!({"run_id":run}))["error"]["code"],
         "invalid_state"
     );
-    assert_eq!(
-        fs::read(dir.path().join("applications/operations/state.json")).unwrap(),
-        domain::encoded(&malformed).unwrap()
-    );
+    let conn = rusqlite::Connection::open(dir.path().join(crate::state::DB_REL_PATH)).unwrap();
+    let raw_payload: String = conn
+        .query_row(
+            "SELECT payload FROM runs WHERE id = ?1",
+            rusqlite::params![&run],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(raw_payload, "[]");
 }
 
 #[test]
@@ -696,7 +874,7 @@ fn mutation_refuses_internal_record_symlinks_before_committing_a_journal() {
     let target = dir.path().join("context/linked-record.md");
     fs::rename(&path, &target).unwrap();
     std::os::unix::fs::symlink(&target, &path).unwrap();
-    let before = fs::read(dir.path().join("applications/operations/state.json")).unwrap();
+    let before = h.load_state().unwrap();
     assert_eq!(
         h.call(
             "read_record",
@@ -706,10 +884,7 @@ fn mutation_refuses_internal_record_symlinks_before_committing_a_journal() {
     );
     let result=h.call("update_application",&json!({"run_id":run,"record":"applications/acme-engineer-123.md","tracking":{"stage":"prepared","checked":"2026-10-12","next_action":"review"},"summary":"fixture","evidence":["https://example.com/source"],"idempotency_key":"update"}));
     assert_eq!(result["error"]["code"], "path_denied");
-    assert_eq!(
-        fs::read(dir.path().join("applications/operations/state.json")).unwrap(),
-        before
-    );
+    assert_eq!(h.load_state().unwrap(), before);
     assert!(path.is_symlink());
 }
 
@@ -718,13 +893,9 @@ fn mutation_refuses_internal_record_symlinks_before_committing_a_journal() {
 fn coordinator_symlinks_are_refused_without_replacing_them() {
     let dir = fixture();
     fs::create_dir_all(dir.path().join("applications/operations")).unwrap();
-    let target = dir.path().join("context/state.json");
-    fs::write(
-        &target,
-        r#"{"schema_version":1,"runs":{},"attempts":{},"events":[]}"#,
-    )
-    .unwrap();
-    let path = dir.path().join("applications/operations/state.json");
+    let target = dir.path().join("context/harness.sqlite");
+    fs::write(&target, b"not-a-db").unwrap();
+    let path = dir.path().join(crate::state::DB_REL_PATH);
     std::os::unix::fs::symlink(&target, &path).unwrap();
     assert_eq!(
         Engine::open(dir.path()).err().unwrap().code,
@@ -774,7 +945,7 @@ fn packet_preview_reports_hash_diffs_without_changing_an_attempt() {
     let h = Engine::open(dir.path()).unwrap();
     let run = start(&h, 1);
     let p = prepare(&h, &run, "prepare");
-    let before = fs::read(dir.path().join("applications/operations/state.json")).unwrap();
+    let before = h.load_state().unwrap();
     let original = call(&h, "preview_packet", json!({"packet_id":p["packet_id"]}));
     assert_eq!(original["stale"], false);
     fs::write(
@@ -792,10 +963,7 @@ fn packet_preview_reports_hash_diffs_without_changing_an_attempt() {
             .any(|check| check["kind"] == "original_artifact" && check["changed"] == true)
     );
     assert_eq!(changed["attempts"][0]["status"], "reserved");
-    assert_eq!(
-        fs::read(dir.path().join("applications/operations/state.json")).unwrap(),
-        before
-    );
+    assert_eq!(h.load_state().unwrap(), before);
 }
 
 #[test]
@@ -1051,7 +1219,7 @@ fn context_pack_remains_bounded_and_reports_current_source_drift() {
     );
     let target = dir.path().join(note["original_path"].as_str().unwrap());
     fs::write(&target, "Changed source\n".repeat(1000)).unwrap();
-    let before = fs::read(dir.path().join("applications/operations/state.json")).unwrap();
+    let before = h.load_state().unwrap();
     let pack = call(
         &h,
         "context_pack",
@@ -1067,10 +1235,7 @@ fn context_pack_remains_bounded_and_reports_current_source_drift() {
             .count()
             <= 1400
     );
-    assert_eq!(
-        fs::read(dir.path().join("applications/operations/state.json")).unwrap(),
-        before
-    );
+    assert_eq!(h.load_state().unwrap(), before);
     let batch = call(
         &h,
         "query_batch",
@@ -1101,7 +1266,7 @@ fn workflow_check_batches_readback_and_coverage_without_actions() {
     assert_eq!(discovery["tools"][0]["read_only"], true);
     assert!(
         !dir.path()
-            .join("applications/operations/state.json")
+            .join(crate::state::DB_REL_PATH)
             .exists()
     );
 }
@@ -1122,7 +1287,7 @@ fn explicit_project_seeds_context_and_linked_intake_even_when_query_has_no_hits(
         "intake_note",
         json!({"text":"A collaborator discussed import retries.\n","source_kind":"personal_notes","links":[{"kind":"project","path":project}],"idempotency_key":"linked-note"}),
     );
-    let before = fs::read(dir.path().join("applications/operations/state.json")).unwrap();
+    let before = h.load_state().unwrap();
     let args = json!({"task":"Prepare project story","project":project,"query":"harbourdragon-no-match","limit":6});
     let pack = call(&h, "context_pack", args.clone());
     assert!(
@@ -1143,10 +1308,7 @@ fn explicit_project_seeds_context_and_linked_intake_even_when_query_has_no_hits(
         pack["pack_sha256"],
         call(&h, "context_pack", args.clone())["pack_sha256"]
     );
-    assert_eq!(
-        fs::read(dir.path().join("applications/operations/state.json")).unwrap(),
-        before
-    );
+    assert_eq!(h.load_state().unwrap(), before);
     fs::write(
         dir.path().join(project),
         "# Migration\nChanged exact evidence.\n",
@@ -1173,7 +1335,7 @@ fn review_queue_retains_uncertain_mail_and_only_unreviewed_note_proposals() {
     );
     fs::write(dir.path().join("context/mail-observation.json"), r#"{"items":[{"id":"uncertain","needs_reply":null},{"id":"ambiguous","needs_reply":false,"attribution":"ambiguous"},{"id":"resolved","needs_reply":false,"attribution":"proposed_exact_identity","needs_review":false}]}"#).unwrap();
     let args = json!({"mail_observations_path":"context/mail-observation.json","limit":50});
-    let before = fs::read(dir.path().join("applications/operations/state.json")).unwrap();
+    let before = h.load_state().unwrap();
     let queue = call(&h, "review_queue", args.clone());
     assert_eq!(queue["counts"]["supplied_mail"], 2);
     assert_eq!(queue["counts"]["pending_note_reviews"], 1);
@@ -1185,10 +1347,7 @@ fn review_queue_retains_uncertain_mail_and_only_unreviewed_note_proposals() {
             .iter()
             .any(|item| item["proposal_id"] == proposal["proposal_id"])
     );
-    assert_eq!(
-        fs::read(dir.path().join("applications/operations/state.json")).unwrap(),
-        before
-    );
+    assert_eq!(h.load_state().unwrap(), before);
     call(
         &h,
         "accept_note",
@@ -1196,6 +1355,48 @@ fn review_queue_retains_uncertain_mail_and_only_unreviewed_note_proposals() {
     );
     let reviewed = call(&h, "review_queue", args);
     assert_eq!(reviewed["counts"]["pending_note_reviews"], 0);
+}
+#[test]
+fn review_queue_prioritizes_live_interviews_and_mail_over_historical_unknowns() {
+    let dir = fixture();
+    let h = Engine::open(dir.path()).unwrap();
+    let run = start(&h, 5);
+    let prep = prepare(&h, &run, "rq-prio-prep");
+    call(
+        &h,
+        "begin_submission",
+        json!({"attempt_id":prep["attempt_id"],"idempotency_key":"rq-prio-begin"}),
+    );
+    call(
+        &h,
+        "finish_submission",
+        json!({"attempt_id":prep["attempt_id"],"outcome":"outcome_unknown","summary":"Unknown synthetic outcome","evidence":["applications/acme-engineer-123.md"],"idempotency_key":"rq-prio-unk"}),
+    );
+    fs::write(
+        dir.path().join("applications/liveco-staff.md"),
+        "# LiveCo — Staff Engineer\n\n<!-- tracking\n{\"company\":\"LiveCo\",\"title\":\"Staff Engineer\",\"stage\":\"technical\",\"checked\":\"2026-11-23\",\"schedule_state\":\"booked\",\"scheduled_start\":\"2026-11-24T10:00:00Z\",\"next_action\":\"Prepare system design\"}\n-->\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.path().join("context/mail-prio.json"),
+        r#"{"items":[{"id":"m1","needs_reply":true,"company":"MailCo","subject":"Interview times"}]}"#,
+    )
+    .unwrap();
+    let queue = call(
+        &h,
+        "review_queue",
+        json!({"mail_observations_path":"context/mail-prio.json","limit":10}),
+    );
+    let kinds: Vec<&str> = queue["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|item| item["kind"].as_str())
+        .collect();
+    let idx_interview = kinds.iter().position(|k| *k == "interview").unwrap();
+    let idx_mail = kinds.iter().position(|k| *k == "supplied_mail").unwrap();
+    let idx_unknown = kinds.iter().position(|k| *k == "unknown_submission").unwrap();
+    assert!(idx_interview < idx_mail && idx_mail < idx_unknown);
 }
 #[test]
 fn workflow_child_schemas_are_discoverable_and_validate_before_execution() {
@@ -1222,7 +1423,7 @@ fn workflow_child_schemas_are_discoverable_and_validate_before_execution() {
     assert_eq!(bad["error"]["code"], "invalid_arguments");
     assert!(
         !dir.path()
-            .join("applications/operations/state.json")
+            .join(crate::state::DB_REL_PATH)
             .exists()
     );
 }
@@ -1244,16 +1445,12 @@ fn reviewed_tracking_move_refuses_manual_edit_and_keeps_canonical_state() {
     )
     .unwrap();
     let before_record = fs::read(&path).unwrap();
-    let before_state =
-        fs::read(directory.path().join("applications/operations/state.json")).unwrap();
+    let before_state = engine.load_state().unwrap();
     let arguments = json!({"run_id":run,"record":record,"tracking":{"stage":"screening","checked":"2026-10-12","next_action":"Prepare confirmed screening"},"summary":"Explicit synthetic reviewed move","evidence":["https://example.test/reviewed-instruction"],"expected_record_sha256":original["sha256"],"idempotency_key":"reviewed-move"});
     let stale = engine.call("update_application", &arguments);
     assert_eq!(stale["error"]["code"], "stale_record");
     assert_eq!(fs::read(&path).unwrap(), before_record);
-    assert_eq!(
-        fs::read(directory.path().join("applications/operations/state.json")).unwrap(),
-        before_state
-    );
+    assert_eq!(engine.load_state().unwrap(), before_state);
     let fresh = call(&engine, "read_record", json!({"path":record}));
     let mut current = arguments.clone();
     current["expected_record_sha256"] = fresh["sha256"].clone();

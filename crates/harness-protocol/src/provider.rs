@@ -389,11 +389,8 @@ mod tests {
         assert_eq!(result["denied_tool_calls"], 1);
         assert_eq!(result["usage"]["total_tokens"], 15);
         assert_eq!(count.load(Ordering::SeqCst), 2);
-        let state_path = temp.path().join("applications/operations/state.json");
-        if state_path.exists() {
-            let state: Value = serde_json::from_slice(&std::fs::read(state_path).unwrap()).unwrap();
-            assert!(state["runs"].as_object().unwrap().is_empty());
-        }
+        let state = harness_core::state::load(temp.path()).unwrap();
+        assert!(state["runs"].as_object().unwrap().is_empty());
         task.abort();
     }
     #[test]
@@ -477,10 +474,7 @@ mod tests {
         assert_eq!(result["tool_calls"], 0);
         assert_eq!(result["denied_tool_calls"], 1);
         assert_eq!(result["policy"], "local_writes");
-        let snapshot: Value = serde_json::from_slice(
-            &std::fs::read(temp.path().join("applications/operations/state.json")).unwrap(),
-        )
-        .unwrap();
+        let snapshot = harness_core::state::load(temp.path()).unwrap();
         assert!(snapshot["runs"].as_object().unwrap().is_empty());
         assert!(snapshot["attempts"].as_object().unwrap().is_empty());
         task.abort();

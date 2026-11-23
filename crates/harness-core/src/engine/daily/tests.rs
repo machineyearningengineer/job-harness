@@ -96,7 +96,7 @@ fn daily_check_inline_is_read_only_and_identity_is_canonical() {
     assert_eq!(data["counts"]["archive_candidates"], 1);
     assert!(
         !dir.path()
-            .join("applications/operations/state.json")
+            .join(crate::state::DB_REL_PATH)
             .exists()
     );
     assert!(
@@ -387,10 +387,7 @@ fn daily_read_projection_is_bounded_and_old_routes_are_unchanged() {
                 .any(|row| row["message_id"] == action["message_ids"][0])
         );
     }
-    let state: Value = serde_json::from_slice(
-        &fs::read(dir.path().join("applications/operations/state.json")).unwrap(),
-    )
-    .unwrap();
+    let state = crate::state::load(dir.path()).unwrap();
     let mut forged = state.clone();
     for event in forged["events"].as_array_mut().unwrap() {
         if event["tool"] == "daily_update" {

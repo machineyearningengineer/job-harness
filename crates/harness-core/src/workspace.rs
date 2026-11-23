@@ -303,6 +303,8 @@ pub fn validate_settings(value: &Value) -> Result<()> {
             "discovery",
             "communication",
             "contact_categories",
+            "target_roles",
+            "cv_tracks",
             "time_and_reminders",
             "browser_policy",
             "primary_cv",
@@ -529,18 +531,13 @@ pub(crate) fn populate(root: &Path) -> Result<()> {
         ),
         (
             ".gitignore",
-            "applications/operations/.lock\napplications/operations/.career-tmp-*\n.scratch/\n.harness/index.sqlite*\n",
+            "applications/operations/.lock\napplications/operations/.career-tmp-*\napplications/operations/harness.sqlite-wal\napplications/operations/harness.sqlite-shm\n.scratch/\n.harness/index.sqlite*\n",
         ),
     ];
     for (relative, text) in files {
         fs::write(root.join(relative), text)?;
     }
-    fs::write(
-        root.join("applications/operations/state.json"),
-        job_harness_domain::canonical::encoded(
-            &json!({"schema_version":1,"runs":{},"attempts":{},"events":[]}),
-        ),
-    )?;
+    crate::state::init(root)?;
     fs::write(
         root.join("config/career-workflows.json"),
         include_str!("../../../resources/workflows.json"),

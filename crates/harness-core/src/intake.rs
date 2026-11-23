@@ -808,10 +808,16 @@ pub fn list(root: &Path, args: &Value) -> Result<Plan> {
     if directory.exists() {
         for entry in fs::read_dir(directory)? {
             let entry = entry?;
+            if !entry.file_type()?.is_dir() {
+                continue;
+            }
             let id = entry
                 .file_name()
                 .into_string()
                 .map_err(|_| fail("invalid_resource", "Invalid intake filename"))?;
+            if !id.starts_with("note-") {
+                continue;
+            }
             identifier(&id, "note-")?;
             let (meta, sha) = metadata(root, &id)?;
             if !request.include_archived && meta["archived"] == true {

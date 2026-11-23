@@ -61,13 +61,6 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    #[cfg(windows)]
-    #[command(name = "__acp-launch", hide = true)]
-    AcpLaunch {
-        agent: PathBuf,
-        #[arg(last = true)]
-        arguments: Vec<String>,
-    },
     /// A small read-only human workspace view; --json returns its compact versioned envelope.
     Status {
         #[arg(long)]
@@ -123,7 +116,7 @@ enum Command {
     },
     /// Print host launch configuration. Contains paths, never credentials.
     Connect {
-        #[arg(value_parser=["mcp","acp"])]
+        #[arg(value_parser=["mcp"])]
         target: String,
         #[arg(long, value_enum, default_value = "focused")]
         tool_profile: Profile,
@@ -145,20 +138,6 @@ enum Command {
         /// Enable explicit reviewed local changes. External actions stay unavailable.
         #[arg(long)]
         allow_local_writes: bool,
-    },
-    /// Hand off a prompt to your authenticated external ACP agent (stable v1).
-    Acp {
-        #[arg(long)]
-        agent: PathBuf,
-        #[arg(long, allow_hyphen_values = true)]
-        agent_arg: Vec<String>,
-        #[arg(long)]
-        prompt: String,
-        #[arg(long, default_value = "300")]
-        timeout_seconds: u64,
-        /// Explicitly enable submission-boundary tools for an authorized external-capable host.
-        #[arg(long)]
-        allow_external_actions: bool,
     },
     /// Run a bounded local-tool loop with a local or remote compatible model.
     Agent {
@@ -393,11 +372,6 @@ async fn execute(cli: Cli) -> anyhow::Result<Option<Value>> {
             print!("{}", onboarding::text(&data));
             return Ok(None);
         }
-        #[cfg(windows)]
-        Command::AcpLaunch { agent, arguments } => {
-            job_harness_protocol::acp_windows::launch(&agent, &arguments)?;
-            return Ok(None);
-        }
         Command::Document {
             action: presentation::DocumentCommand::Template { kind },
         } => {
@@ -507,21 +481,13 @@ async fn execute(cli: Cli) -> anyhow::Result<Option<Value>> {
             return Ok(None);
         }
         Command::Connect {
-            target,
+            target: _,
             tool_profile,
         } => {
             let root = root.canonicalize()?;
             Engine::open(&root)?;
             let executable = std::env::current_exe()?;
-            let config =
-                job_harness_protocol::mcp_connection(&executable, &root, tool_profile.name());
-            if target == "mcp" {
-                config
-            } else {
-                json!({"protocol":"acp","version":1,"role":"client","workspace":root,"mcp":config,
-                "command":"job-harness --root PATH acp --agent /absolute/path/to/agent --prompt TASK",
-                "permission_policy":"cancel_requests","note":"Authenticate the external ACP agent in its own host. ACP is a client-agent protocol, not a replacement for MCP tools."})
-            }
+            job_harness_protocol::mcp_connection(&executable, &root, tool_profile.name())
         }
         Command::Workspace { action } => match action {
             Workspace::Export {
@@ -555,32 +521,6 @@ async fn execute(cli: Cli) -> anyhow::Result<Option<Value>> {
         } => {
             job_harness_protocol::dashboard::serve(&root, port, allow_local_writes).await?;
             return Ok(None);
-        }
-        Command::Acp {
-            agent,
-            agent_arg,
-            prompt,
-            timeout_seconds,
-            allow_external_actions,
-        } => {
-            Engine::open(&root)?;
-            if !(1..=3600).contains(&timeout_seconds) {
-                return Err(HarnessError::new(
-                    "invalid_arguments",
-                    "ACP timeout must be 1–3600 seconds.",
-                )
-                .into());
-            }
-            job_harness_protocol::acp::run(
-                &root,
-                &std::env::current_exe()?,
-                &agent,
-                agent_arg,
-                prompt,
-                Duration::from_secs(timeout_seconds),
-                allow_external_actions,
-            )
-            .await?
         }
         Command::Agent {
             action:
@@ -701,8 +641,6 @@ async fn execute(cli: Cli) -> anyhow::Result<Option<Value>> {
         Command::Schemas { .. } | Command::ConfigSchema { .. } | Command::Configure { .. } => {
             unreachable!()
         }
-        #[cfg(windows)]
-        Command::AcpLaunch { .. } => unreachable!(),
     };
     Ok(Some(success(data)))
 }
@@ -710,8 +648,6 @@ async fn execute(cli: Cli) -> anyhow::Result<Option<Value>> {
 pub async fn run() {
     let cli = Cli::parse();
     let protocol = matches!(&cli.command, Command::Mcp { .. });
-    #[cfg(windows)]
-    let protocol = protocol || matches!(&cli.command, Command::AcpLaunch { .. });
     let result = match execute(cli).await {
         Ok(None) => return,
         Ok(Some(value)) => value,

@@ -40,6 +40,8 @@ The result's `data.path` is the retained workspace-relative path and `data.sha25
 
 Set `timezone` to your actual IANA timezone, such as `Europe/London` if appropriate. Paths in this configuration are relative to the **private workspace**, not the toolkit repository. Inspect the supported shape with `jh config-schema ledger`; keep credentials and model endpoints in the host instead.
 
+To cap new submission attempts across all runs, add a nonnegative integer such as `"max_daily_submissions": 20` to the same configuration. The count resets at midnight in `timezone` (default `UTC`). It counts attempts begun, not just confirmed submissions. Omit the setting to leave the daily limit disabled, or set it to `0` to prevent all new begins. This setting neither schedules nor authorizes submissions. See the [submission contract](job-harness-contract.md#application-boundary).
+
 Without a CV, start with a supplied note:
 
 ```sh

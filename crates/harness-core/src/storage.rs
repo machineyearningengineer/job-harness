@@ -217,13 +217,7 @@ pub fn load_state(root: &Path) -> Result<Value> {
     crate::state::load(root)
 }
 pub fn commit_state(root: &Path, state: &Value) -> Result<()> {
-    let path = safe_path(
-        root,
-        "applications/operations/state.json",
-        &["applications"],
-        &[".json"],
-    )?;
-    atomic_write(&path, &encoded(state))
+    crate::state::save(root, state)
 }
 pub fn safe_path(
     root: &Path,

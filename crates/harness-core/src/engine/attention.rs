@@ -191,10 +191,10 @@ impl Engine {
         }
         items.sort_by(|a, b| {
             let rank = |value: &Value| match value["kind"].as_str().unwrap_or_default() {
-                "unknown_submission" => 0,
+                "interview" => 0,
                 "supplied_mail" => 1,
-                "interview" => 2,
-                "reserved_attempt" => 3,
+                "reserved_attempt" => 2,
+                "unknown_submission" => 3,
                 "pending_note_review" => 4,
                 _ => 5,
             };

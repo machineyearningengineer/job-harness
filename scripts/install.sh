@@ -13,4 +13,5 @@ command -v cargo >/dev/null 2>&1 || { printf '%s\n' 'Install Rust from https://r
 repo=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 [ -f "$repo/Cargo.lock" ] || { printf '%s\n' 'Run this from a complete Job Harness checkout with Cargo.lock.' >&2; exit 1; }
 cargo install --locked --path "$repo/crates/harness-cli" --root "$prefix"
-printf '%s\n' "Installed: $prefix/bin/job-harness" 'Add its bin directory to PATH, then run job-harness --help.'
+ln -sf "$prefix/bin/job-harness" "$prefix/bin/jh"
+printf '%s\n' "Installed: $prefix/bin/job-harness (aliased as jh)" 'Add its bin directory to PATH, then run jh --help.'

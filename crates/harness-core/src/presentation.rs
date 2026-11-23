@@ -932,12 +932,11 @@ mod tests {
     #[test]
     fn status_is_bounded_read_only_and_terminal_control_safe() {
         let (_temp, root) = fixture();
-        let state_path = root.join("applications/operations/state.json");
-        let before = fs::read(&state_path).unwrap();
+        let before = crate::state::load(&root).unwrap();
         let result = status_snapshot(&root).unwrap();
         assert_eq!(result["ok"], true);
         assert_eq!(result["data"]["health"]["records"], 0);
-        assert_eq!(fs::read(&state_path).unwrap(), before);
+        assert_eq!(crate::state::load(&root).unwrap(), before);
         let text = status_text(&result).unwrap();
         assert!(text.contains("0 of 0 shown"));
         assert!(text.contains("Next tool: review_queue"));

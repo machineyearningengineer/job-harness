@@ -8,7 +8,6 @@ use std::{
 
 pub const IDS: &[&str] = &[
     "mcp",
-    "acp",
     "models",
     "retrieval",
     "decisions",
@@ -22,7 +21,6 @@ pub fn catalog() -> Value {
         "base":{"name":"Career workspace","included":["saved answers with sources","application history and interrupted work recovery","exact search","notes with original sources","private backup and restore","CLI, MCP and local dashboard"],"runtime":"Native executable; no Python, model, network or VM required","download":"Choose your platform's release archive; exact sizes and SHA256 are published with the release"},
         "optional":[
             {"id":"mcp","name":"Use your agent","purpose":"Connect the workspace tools to your existing agent (MCP)","install":"No extra harness download","access":"Your host's browser, mail and calendar sessions","next":"jh connect mcp"},
-            {"id":"acp","name":"Launch an agent","purpose":"Give a task and workspace to your chosen agent (ACP)","install":"Install/authenticate that agent separately","access":"Agent-owned credentials and host policy","next":"jh acp --help"},
             {"id":"models","name":"Bring a model","purpose":"Use a compatible local or remote model service","install":"Choose your existing runtime or provider; no bundled model","access":"Remote HTTPS and an injected named key, or local loopback","next":"jh agent run --help"},
             {"id":"retrieval","name":"Find related context","purpose":"Find related evidence even when the wording differs","install":"Optional native provider plus selected Gemma weights (157 MiB)","access":"Explicitly selected source text only; model/hardware details in context models","next":"jh context models"},
             {"id":"decisions","name":"Review model suggestions","purpose":"Ask specific questions about selected text; uncertain answers stay visible","install":"Optional native provider plus Laya weights (647 MiB); other model profiles have separate requirements","access":"Selected text only; no unattended email archive or submission","next":"jh context models"},
@@ -30,7 +28,7 @@ pub fn catalog() -> Value {
             {"id":"desktop","name":"Use a desktop window","purpose":"Open the same local workspace in an optional native window","install":"Separate desktop package and platform webview dependencies; CLI stays independent","access":"Local loopback only; external connector access remains in your host","next":"See apps/desktop/README.md"}
         ],
         "policy":"Selecting a capability does not download software, contact a provider or grant an external action.",
-        "details":"https://github.com/KingPsychopath/job-harness/blob/main/docs/INSTALL.md"
+        "details":"https://github.com/machineyearningengineer/job-harness/blob/main/docs/INSTALL.md"
     })
 }
 

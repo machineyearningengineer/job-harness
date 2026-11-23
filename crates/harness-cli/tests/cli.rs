@@ -96,7 +96,7 @@ fn imported_pdf_can_be_explicitly_selected_and_frozen_without_weakening_submit_g
     let replay = call(&root, "prepare_packet", arguments.clone());
     assert_eq!(replay["ok"], true, "{replay}");
     assert_eq!(replay["data"]["packet_id"], packet["data"]["packet_id"]);
-    let state_before = std::fs::read(root.join("applications/operations/state.json")).unwrap();
+    let state_before = job_harness_core::state::load(&root).unwrap();
     std::fs::write(root.join("sources/unimported.pdf"), pdf).unwrap();
     for denied in [
         "sources/unimported.pdf".to_owned(),
@@ -141,7 +141,7 @@ fn imported_pdf_can_be_explicitly_selected_and_frozen_without_weakening_submit_g
         "artifact_changed"
     );
     assert_eq!(
-        std::fs::read(root.join("applications/operations/state.json")).unwrap(),
+        job_harness_core::state::load(&root).unwrap(),
         state_before
     );
     std::fs::write(root.join(retained), pdf).unwrap();
@@ -214,8 +214,7 @@ fn daily_check_is_read_only_composable_and_matches_the_engine() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("career");
     assert_eq!(output(run(&root, &["init"]))["ok"], true);
-    let state_path = root.join("applications/operations/state.json");
-    let state_before = std::fs::read(&state_path).unwrap();
+    let state_before = job_harness_core::state::load(&root).unwrap();
     let config_path = root.join("config/career-ledger.json");
     let config_before = std::fs::read(&config_path).unwrap();
     let args = json!({"offset":0,"limit":2});
@@ -239,7 +238,7 @@ fn daily_check_is_read_only_composable_and_matches_the_engine() {
     assert_eq!(checked["ok"], true, "{checked}");
     assert_eq!(checked["schema_version"], 2);
     assert_eq!(checked["data"], expected["data"]);
-    assert_eq!(std::fs::read(&state_path).unwrap(), state_before);
+    assert_eq!(job_harness_core::state::load(&root).unwrap(), state_before);
     assert_eq!(std::fs::read(&config_path).unwrap(), config_before);
     let conflict = run(
         &root,
@@ -254,7 +253,7 @@ fn daily_check_is_read_only_composable_and_matches_the_engine() {
     );
     assert!(!conflict.status.success());
     assert_eq!(output(conflict)["error"]["code"], "invalid_arguments");
-    assert_eq!(std::fs::read(&state_path).unwrap(), state_before);
+    assert_eq!(job_harness_core::state::load(&root).unwrap(), state_before);
 }
 
 #[test]
@@ -262,8 +261,7 @@ fn daily_update_requires_explicit_valid_input_and_preserves_state_on_failure() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("career");
     assert_eq!(output(run(&root, &["init"]))["ok"], true);
-    let state_path = root.join("applications/operations/state.json");
-    let before = std::fs::read(&state_path).unwrap();
+    let before = job_harness_core::state::load(&root).unwrap();
     let empty = run(&root, &["daily", "update"]);
     assert!(!empty.status.success());
     assert_eq!(output(empty)["error"]["code"], "invalid_arguments");
@@ -275,7 +273,7 @@ fn daily_update_requires_explicit_valid_input_and_preserves_state_on_failure() {
     );
     assert!(!malformed.status.success());
     assert_eq!(output(malformed)["error"]["code"], "invalid_arguments");
-    assert_eq!(std::fs::read(&state_path).unwrap(), before);
+    assert_eq!(job_harness_core::state::load(&root).unwrap(), before);
 }
 
 #[test]
@@ -283,8 +281,7 @@ fn daily_check_accepts_inline_host_observations_without_persisting_them() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("career");
     assert_eq!(output(run(&root, &["init"]))["ok"], true);
-    let state_path = root.join("applications/operations/state.json");
-    let before = std::fs::read(&state_path).unwrap();
+    let before = job_harness_core::state::load(&root).unwrap();
     let receipts = root.join("applications/operations/receipts");
     let receipt_count = receipts.read_dir().unwrap().count();
     let snapshot: Value = serde_json::from_str(include_str!(
@@ -322,7 +319,7 @@ fn daily_check_accepts_inline_host_observations_without_persisting_them() {
             .iter()
             .any(|row| row["message_id"] == "recruiter-1")
     );
-    assert_eq!(std::fs::read(&state_path).unwrap(), before);
+    assert_eq!(job_harness_core::state::load(&root).unwrap(), before);
     assert_eq!(receipts.read_dir().unwrap().count(), receipt_count);
     args["mail_observations"]["items"][0]["text"] = json!("Changed supplied text");
     std::fs::write(&file, args.to_string()).unwrap();
@@ -332,7 +329,7 @@ fn daily_check_accepts_inline_host_observations_without_persisting_them() {
     );
     assert!(!corrupted.status.success());
     assert_eq!(output(corrupted)["error"]["code"], "artifact_changed");
-    assert_eq!(std::fs::read(&state_path).unwrap(), before);
+    assert_eq!(job_harness_core::state::load(&root).unwrap(), before);
     assert_eq!(receipts.read_dir().unwrap().count(), receipt_count);
 }
 
@@ -377,8 +374,7 @@ fn source_default_ignores_live_environment_and_saved_settings() {
     let temp = tempfile::tempdir().unwrap();
     let personal = temp.path().join("fictional-personal");
     assert_eq!(output(run(&personal, &["init"]))["ok"], true);
-    let state_path = personal.join("applications/operations/state.json");
-    let before = std::fs::read(&state_path).unwrap();
+    let before = job_harness_core::state::load(&personal).unwrap();
     let settings = temp.path().join("host-settings/job-harness/settings.json");
     std::fs::create_dir_all(settings.parent().unwrap()).unwrap();
     let settings_bytes = json!({"schema_version":1,"workspace":personal}).to_string();
@@ -399,13 +395,13 @@ fn source_default_ignores_live_environment_and_saved_settings() {
             json!(selected.canonicalize().unwrap())
         );
     } else {
-        // A missing development fixture must fail, never fall back to the live one.
+        // A missing or unmigrated development fixture must fail, never fall back to the live one.
         assert!(
-            ["invalid_arguments", "missing_resource"]
+            ["invalid_arguments", "missing_resource", "invalid_state"]
                 .contains(&value["error"]["code"].as_str().unwrap())
         );
     }
-    assert_eq!(std::fs::read(&state_path).unwrap(), before);
+    assert_eq!(job_harness_core::state::load(&personal).unwrap(), before);
     assert_eq!(std::fs::read_to_string(&settings).unwrap(), settings_bytes);
     let installed = temp.path().join(if cfg!(windows) {
         "copied.exe"
@@ -431,11 +427,11 @@ fn source_default_ignores_live_environment_and_saved_settings() {
         assert_ne!(value["data"]["ledger"], json!(personal));
     } else {
         assert!(
-            ["invalid_arguments", "missing_resource"]
+            ["invalid_arguments", "missing_resource", "invalid_state"]
                 .contains(&value["error"]["code"].as_str().unwrap())
         );
     }
-    assert_eq!(std::fs::read(&state_path).unwrap(), before);
+    assert_eq!(job_harness_core::state::load(&personal).unwrap(), before);
     assert_eq!(
         job_harness::host::resolve(Some(personal.clone())).unwrap(),
         personal
@@ -466,12 +462,9 @@ fn notes_cli_preserves_original_and_pipeline_check_has_no_events() {
     let review = output(run(&root, &["notes", "review", id, "--include-original"]));
     assert_eq!(review["data"]["original"]["text"], text);
     assert_eq!(output(run(&root, &["pipeline"]))["ok"], true);
-    let before = std::fs::read(root.join("applications/operations/state.json")).unwrap();
+    let before = job_harness_core::state::load(&root).unwrap();
     assert_eq!(output(run(&root, &["pipeline", "--check"]))["ok"], true);
-    assert_eq!(
-        std::fs::read(root.join("applications/operations/state.json")).unwrap(),
-        before
-    );
+    assert_eq!(job_harness_core::state::load(&root).unwrap(), before);
     let models = Command::new(env!("CARGO_BIN_EXE_job-harness"))
         .args(["context", "models"])
         .env_remove("JOB_HARNESS_WORKSPACE")

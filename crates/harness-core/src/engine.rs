@@ -52,7 +52,7 @@ impl Engine {
         for rel in [
             "applications",
             "applications/operations",
-            "applications/operations/state.json",
+            crate::state::DB_REL_PATH,
             "applications/operations/.lock",
             "applications/operations/packets",
             "applications/operations/receipts",
@@ -243,10 +243,7 @@ impl Engine {
                 storage::atomic_write(&path, text.as_bytes())?;
             }
             state.as_object_mut().unwrap().remove("pending");
-            storage::atomic_write(
-                &self.root.join("applications/operations/state.json"),
-                &domain::encoded(state)?,
-            )?;
+            crate::state::save(&self.root, state)?;
             let _ = self.write_pipeline();
             let _ = storage::rebuild_index(&self.root);
         }
@@ -267,10 +264,7 @@ impl Engine {
                 );
             }
         }
-        storage::atomic_write(
-            &self.root.join("applications/operations/state.json"),
-            &domain::encoded(state)?,
-        )?;
+        crate::state::save(&self.root, state)?;
         if !changes.is_empty() {
             self.recover(state)?;
         }
@@ -733,6 +727,9 @@ fn recovery(code: &str) -> &'static str {
             "Inspect external outcome and resolve the existing attempt; do not submit again."
         }
         "cap_reached" => "Finish this bounded run; do not silently increase its cap.",
+        "daily_submission_cap_reached" => {
+            "Do not submit. The attempt remains reserved. If authorized and the configured limit permits it, recheck the form before trying again on a later workspace-local day."
+        }
         "idempotency_conflict" => {
             "Inspect the saved action. Changed input needs a new key only for a genuinely new action."
         }

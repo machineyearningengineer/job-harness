@@ -171,6 +171,26 @@
       },
       "maxItems": 20
     },
+    "target_roles": {
+      "type": "array",
+      "description": "Role families the candidate is targeting (used during onboarding and child CV track suggestions).",
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 200
+      },
+      "maxItems": 20
+    },
+    "cv_tracks": {
+      "type": "array",
+      "description": "Named child CV tracks derived from the master CV (e.g. backend, product, ai).",
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 64
+      },
+      "maxItems": 20
+    },
     "time_and_reminders": {
       "type": "object",
       "description": "Deadline, async-question cutoff, stage follow-up, and anti-spam reminder limits.",

@@ -1,8 +1,4 @@
 //! Thin transports. Domain rules and workspace authority remain in harness-core.
-pub mod acp;
-#[cfg(windows)]
-#[doc(hidden)]
-pub mod acp_windows;
 pub mod context_host;
 pub mod dashboard;
 pub mod mcp;

@@ -464,7 +464,7 @@ mod tests {
         fs::write(&full, bytes).unwrap();
         fs::create_dir_all(root.path().join("applications/operations")).unwrap();
         fs::write(
-            root.path().join("applications/operations/state.json"),
+            root.path().join("applications/operations/internal.json"),
             b"{\"internal\":\"coordinatorsecretfixture\"}",
         )
         .unwrap();

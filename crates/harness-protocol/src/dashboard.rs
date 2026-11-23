@@ -473,7 +473,7 @@ async fn company(
 }
 async fn connections(State(state): State<DashboardState>) -> Json<Value> {
     Json(
-        json!({"schema_version":2,"ok":true,"data":{"mode":if state.review_enabled(){"local_writes"}else{"read_only"},"native_model_actions":state.native_controls&&state.review_enabled(),"version":env!("CARGO_PKG_VERSION"),"mcp":{"transport":"stdio","focused_tools":crate::FOCUSED_TOOLS.len(),"full_tools":harness_core::contracts::specs().len()},"acp":{"role":"client","external_actions_default":false},"models":crate::context_host::model_metadata(),"workspace":state.engine.root(),"capabilities":["local_records","notes_review","search","packet_preview"],"external_connectors":"Configured and authenticated in the agent host"},"error":null,"next":[]}),
+        json!({"schema_version":2,"ok":true,"data":{"mode":if state.review_enabled(){"local_writes"}else{"read_only"},"native_model_actions":state.native_controls&&state.review_enabled(),"version":env!("CARGO_PKG_VERSION"),"mcp":{"transport":"stdio","focused_tools":crate::FOCUSED_TOOLS.len(),"full_tools":harness_core::contracts::specs().len()},"models":crate::context_host::model_metadata(),"workspace":state.engine.root(),"capabilities":["local_records","notes_review","search","packet_preview"],"external_connectors":"Configured and authenticated in the agent host"},"error":null,"next":[]}),
     )
 }
 fn host_result(result: harness_core::Result<Value>) -> Json<Value> {
