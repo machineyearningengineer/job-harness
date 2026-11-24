@@ -68,6 +68,8 @@ const ARCHIVE: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="16" heig
 
 const UPLOAD: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" x2="12" y1="3" y2="15"/></svg>"#;
 
+const FOLDER: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></svg>"#;
+
 impl AssetSource for EmbeddedIcons {
     fn load(&self, path: &str) -> Result<Option<Cow<'static, [u8]>>> {
         let bytes = match path {
@@ -103,6 +105,7 @@ impl AssetSource for EmbeddedIcons {
             "icons/filter.svg" => Some(FILTER.as_bytes()),
             "icons/archive.svg" => Some(ARCHIVE.as_bytes()),
             "icons/upload.svg" => Some(UPLOAD.as_bytes()),
+            "icons/folder.svg" => Some(FOLDER.as_bytes()),
             _ => None,
         };
         Ok(bytes.map(Cow::Borrowed))
@@ -142,6 +145,7 @@ impl AssetSource for EmbeddedIcons {
             "icons/filter.svg".into(),
             "icons/archive.svg".into(),
             "icons/upload.svg".into(),
+            "icons/folder.svg".into(),
         ])
     }
 }

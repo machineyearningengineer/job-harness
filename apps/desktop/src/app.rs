@@ -54,7 +54,7 @@ impl Render for DragGhost {
         div()
             .px_3()
             .py(px(7.0))
-            .rounded(px(8.0))
+            .rounded(theme::r_sm())
             .bg(theme::popover_glass())
             .border_1()
             .border_color(theme::lavender_border())
@@ -82,6 +82,7 @@ enum ScrollAxis {
 enum ActiveInput {
     None,
     Search,
+    SankeyFilter,
     QuickAsk,
     Chat,
     CommandBar,
@@ -263,6 +264,7 @@ pub struct JobHarnessApp {
     sankey_expand_all: bool,
     sankey_scale: f32,
     sankey_bucket: Option<SankeyBucket>,
+    sankey_filter: String,
     sankey_hover: Option<SankeyBucket>,
     reduce_motion: bool,
     expanded_reader: Option<(String, String)>,
@@ -431,6 +433,7 @@ impl JobHarnessApp {
             sankey_expand_all: false,
             sankey_scale: 1.0,
             sankey_bucket: None,
+            sankey_filter: String::new(),
             sankey_hover: None,
             reduce_motion: saved.reduce_motion,
             expanded_reader: None,
@@ -2282,6 +2285,7 @@ impl JobHarnessApp {
             let cut = match self.active_input {
                 ActiveInput::CommandBar => std::mem::take(&mut self.command_query),
                 ActiveInput::Search => std::mem::take(&mut self.search_query),
+                ActiveInput::SankeyFilter => std::mem::take(&mut self.sankey_filter),
                 ActiveInput::QuickAsk => std::mem::take(&mut self.quick_input),
                 ActiveInput::Chat => std::mem::take(&mut self.chat_input),
                 ActiveInput::ModelField => std::mem::take(&mut self.model_draft),
@@ -2318,6 +2322,12 @@ impl JobHarnessApp {
                             self.search_query.clear();
                         }
                         self.search_query.push_str(clean.trim());
+                    }
+                    ActiveInput::SankeyFilter => {
+                        if replace_all {
+                            self.sankey_filter.clear();
+                        }
+                        self.sankey_filter.push_str(clean.trim());
                     }
                     ActiveInput::QuickAsk => {
                         if replace_all {
@@ -2384,6 +2394,9 @@ impl JobHarnessApp {
                 ActiveInput::Search if !self.search_query.is_empty() => {
                     Some(self.search_query.clone())
                 }
+                ActiveInput::SankeyFilter if !self.sankey_filter.is_empty() => {
+                    Some(self.sankey_filter.clone())
+                }
                 ActiveInput::ModelField if !self.model_draft.is_empty() => {
                     Some(self.model_draft.clone())
                 }
@@ -2416,6 +2429,15 @@ impl JobHarnessApp {
             if self.active_popover != ActivePopover::None || self.quick_popover_open {
                 self.close_overlays();
                 self.active_input = ActiveInput::None;
+                cx.notify();
+                return;
+            }
+            if self.sankey_bucket.is_some() {
+                self.sankey_bucket = None;
+                self.sankey_filter.clear();
+                if self.active_input == ActiveInput::SankeyFilter {
+                    self.active_input = ActiveInput::None;
+                }
                 cx.notify();
                 return;
             }
@@ -2548,6 +2570,7 @@ impl JobHarnessApp {
         let active_in = self.active_input;
         let target_buf = match active_in {
             ActiveInput::Search => Some(&mut self.search_query),
+            ActiveInput::SankeyFilter => Some(&mut self.sankey_filter),
             ActiveInput::QuickAsk => Some(&mut self.quick_input),
             ActiveInput::Chat => Some(&mut self.chat_input),
             ActiveInput::ModelField => Some(&mut self.model_draft),
@@ -2741,7 +2764,7 @@ impl JobHarnessApp {
                             .id("toggle-chat-rail")
                             .w(px(28.0))
                             .h(px(28.0))
-                            .rounded(px(7.0))
+                            .rounded(theme::r_sm())
                             .flex()
                             .items_center()
                             .justify_center()
@@ -2765,12 +2788,11 @@ impl JobHarnessApp {
                     .child({
                         let local_root = self.client.target.local_root().map(PathBuf::from);
                         let has_dir = local_root.is_some();
-                        let ws_monogram = self.client.target.monogram();
                         div()
                             .id("topbar-open-ws")
                             .px(px(6.0))
                             .py(px(3.0))
-                            .rounded(px(6.0))
+                            .rounded(theme::r_sm())
                             .flex()
                             .items_center()
                             .gap(px(7.0))
@@ -2784,16 +2806,19 @@ impl JobHarnessApp {
                             })
                             .child(
                                 div()
-                                    .px(px(5.0))
-                                    .py(px(1.5))
-                                    .rounded(px(5.0))
-                                    .bg(theme::surface_subtle())
-                                    .border_1()
-                                    .border_color(theme::hairline())
-                                    .text_size(px(10.0))
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(theme::text_secondary())
-                                    .child(ws_monogram),
+                                    .w(px(19.0))
+                                    .h(px(19.0))
+                                    .rounded(theme::r_xs())
+                                    .bg(gpui::rgba(0x38bdf81c))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .child(
+                                        svg()
+                                            .path("icons/folder.svg")
+                                            .size(px(12.0))
+                                            .text_color(gpui::rgba(0x38bdf8dd)),
+                                    ),
                             )
                             .child(
                                 div()
@@ -2803,7 +2828,7 @@ impl JobHarnessApp {
                             )
                     }),
             )
-            // Centered compact Filter Roles input right in the top bar (frees vertical board & Sankey space!)
+            // Centered Filter Roles input: blends seamlessly (borderless until focused!)
             .when(!self.chat_fullscreen, |bar| {
                 let search_active = self.active_input == ActiveInput::Search;
                 bar.child(
@@ -2812,13 +2837,24 @@ impl JobHarnessApp {
                         .w(px(340.0))
                         .px_3()
                         .py(px(5.0))
-                        .rounded(px(7.0))
-                        .bg(theme::surface_subtle())
+                        .rounded(theme::r_md())
+                        .bg(if search_active {
+                            theme::surface_subtle()
+                        } else {
+                            gpui::rgba(0xffffff08)
+                        })
                         .border_1()
                         .border_color(if search_active {
                             theme::hairline_strong()
                         } else {
-                            theme::hairline()
+                            gpui::rgba(0x00000000)
+                        })
+                        .hover(|s| {
+                            if search_active {
+                                s
+                            } else {
+                                s.bg(gpui::rgba(0xffffff0e))
+                            }
                         })
                         .flex()
                         .items_center()
@@ -2828,12 +2864,13 @@ impl JobHarnessApp {
                             this.active_input = ActiveInput::Search;
                             cx.notify();
                         }))
-                        .child(
-                            svg()
-                                .path("icons/search.svg")
-                                .size(px(12.5))
-                                .text_color(theme::text_muted()),
-                        )
+                        .child(svg().path("icons/search.svg").size(px(12.5)).text_color(
+                            if search_active {
+                                theme::text_secondary()
+                            } else {
+                                theme::text_muted()
+                            },
+                        ))
                         .child(input_line(
                             &self.search_query,
                             "Filter roles…",
@@ -2854,7 +2891,7 @@ impl JobHarnessApp {
                             .id("btn-cmd-k")
                             .px_2()
                             .py_1()
-                            .rounded(px(6.0))
+                            .rounded(theme::r_sm())
                             .cursor_pointer()
                             .hover(|s| s.bg(theme::row_hover()))
                             .text_xs()
@@ -2870,7 +2907,7 @@ impl JobHarnessApp {
                             .id("btn-tidy")
                             .px_2()
                             .py_1()
-                            .rounded(px(6.0))
+                            .rounded(theme::r_sm())
                             .flex()
                             .items_center()
                             .gap_1()
@@ -2905,29 +2942,32 @@ impl JobHarnessApp {
                     .child(
                         div()
                             .id("btn-cvs")
-                            .px_2()
-                            .py_1()
-                            .rounded(px(6.0))
+                            .w(px(28.0))
+                            .h(px(28.0))
+                            .rounded(theme::r_sm())
+                            .flex()
+                            .items_center()
+                            .justify_center()
                             .cursor_pointer()
                             .when(cvs_open, |d| d.bg(theme::surface_active()))
                             .hover(|s| s.bg(theme::row_hover()))
-                            .text_xs()
-                            .text_color(if cvs_open {
-                                theme::text_primary()
-                            } else {
-                                theme::text_secondary()
-                            })
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.open_right_drawer(RightDrawer::Cvs, cx);
                             }))
-                            .child("CVs"),
+                            .child(svg().path("icons/file-text.svg").size(px(15.0)).text_color(
+                                if cvs_open {
+                                    theme::text_primary()
+                                } else {
+                                    theme::text_secondary()
+                                },
+                            )),
                     )
                     .child(
                         div()
                             .id("btn-profile")
                             .w(px(28.0))
                             .h(px(28.0))
-                            .rounded(px(7.0))
+                            .rounded(theme::r_sm())
                             .flex()
                             .items_center()
                             .justify_center()
@@ -2951,7 +2991,7 @@ impl JobHarnessApp {
                             .relative()
                             .w(px(28.0))
                             .h(px(28.0))
-                            .rounded(px(7.0))
+                            .rounded(theme::r_sm())
                             .flex()
                             .items_center()
                             .justify_center()
@@ -2987,7 +3027,7 @@ impl JobHarnessApp {
                             .id("btn-settings")
                             .w(px(28.0))
                             .h(px(28.0))
-                            .rounded(px(7.0))
+                            .rounded(theme::r_sm())
                             .flex()
                             .items_center()
                             .justify_center()
@@ -3327,7 +3367,7 @@ impl JobHarnessApp {
                                     .px_2()
                                     .py_1()
                                     .mx(px(-6.0))
-                                    .rounded(px(7.0))
+                                    .rounded(theme::r_sm())
                                     .when(agent_pop_open, |d| d.bg(theme::surface_active()))
                                     .hover(|s| s.bg(theme::row_hover()))
                                     .cursor_pointer()
@@ -3388,7 +3428,7 @@ impl JobHarnessApp {
                                         .ml_1()
                                         .px(px(6.0))
                                         .py(px(3.0))
-                                        .rounded(px(6.0))
+                                        .rounded(theme::r_sm())
                                         .flex_shrink_0()
                                         .bg(if fast_on {
                                             theme::amber_wash()
@@ -3461,7 +3501,7 @@ impl JobHarnessApp {
                                         .id("chat-sessions-btn")
                                         .w(px(26.0))
                                         .h(px(26.0))
-                                        .rounded(px(6.0))
+                                        .rounded(theme::r_sm())
                                         .when(sess_open || resuming, |b| {
                                             b.bg(theme::surface_active())
                                         })
@@ -3515,7 +3555,7 @@ impl JobHarnessApp {
                                         .id("chat-clear")
                                         .w(px(26.0))
                                         .h(px(26.0))
-                                        .rounded(px(6.0))
+                                        .rounded(theme::r_sm())
                                         .flex()
                                         .items_center()
                                         .justify_center()
@@ -3550,7 +3590,7 @@ impl JobHarnessApp {
                                     .id("chat-expand-fullscreen")
                                     .w(px(26.0))
                                     .h(px(26.0))
-                                    .rounded(px(6.0))
+                                    .rounded(theme::r_sm())
                                     .when(is_full, |d| d.bg(theme::surface_active()))
                                     .hover(|s| s.bg(theme::row_hover()))
                                     .flex()
@@ -3587,7 +3627,7 @@ impl JobHarnessApp {
                         .mb_1()
                         .px(px(8.0))
                         .py(px(4.0))
-                        .rounded(px(6.0))
+                        .rounded(theme::r_sm())
                         .bg(theme::surface_subtle())
                         .border_1()
                         .border_color(theme::hairline())
@@ -3609,7 +3649,7 @@ impl JobHarnessApp {
                                 .flex_shrink_0()
                                 .px(px(5.0))
                                 .py(px(1.5))
-                                .rounded(px(4.0))
+                                .rounded(theme::r_xs())
                                 .hover(|s| s.bg(theme::row_hover()))
                                 .cursor_pointer()
                                 .text_size(px(10.5))
@@ -3699,7 +3739,7 @@ impl JobHarnessApp {
                                                         .px_2()
                                                         .py(px(6.0))
                                                         .mx(px(-6.0))
-                                                        .rounded(px(7.0))
+                                                        .rounded(theme::r_sm())
                                                         .hover(|s| s.bg(theme::row_hover()))
                                                         .cursor_pointer()
                                                         .flex()
@@ -3826,7 +3866,7 @@ impl JobHarnessApp {
                                                             div()
                                                                 .px(px(5.0))
                                                                 .py(px(1.0))
-                                                                .rounded(px(4.0))
+                                                                .rounded(theme::r_xs())
                                                                 .bg(theme::amber_wash())
                                                                 .border_1()
                                                                 .border_color(gpui::rgba(
@@ -3976,7 +4016,7 @@ impl JobHarnessApp {
                                                         .px_1()
                                                         .mx(px(-4.0))
                                                         .py(px(3.0))
-                                                        .rounded(px(5.0))
+                                                        .rounded(theme::r_xs())
                                                         .when(can_expand, |d| {
                                                             d.hover(|s| s.bg(theme::row_hover()))
                                                                 .cursor_pointer()
@@ -4103,7 +4143,7 @@ impl JobHarnessApp {
                                                             .min_w_0()
                                                             .overflow_hidden()
                                                             .p_2()
-                                                            .rounded(px(6.0))
+                                                            .rounded(theme::r_sm())
                                                             .bg(theme::window_glass())
                                                             .border_1()
                                                             .border_color(theme::hairline())
@@ -4164,7 +4204,7 @@ impl JobHarnessApp {
                                         .overflow_hidden()
                                         .px_3()
                                         .py_2()
-                                        .rounded(px(12.0))
+                                        .rounded(theme::r_lg())
                                         .bg(theme::surface_subtle())
                                         .border_1()
                                         .border_color(theme::hairline())
@@ -4178,7 +4218,7 @@ impl JobHarnessApp {
                                                     if is_image_path(p) {
                                                         img(p.clone())
                                                             .size(px(44.0))
-                                                            .rounded(px(6.0))
+                                                            .rounded(theme::r_sm())
                                                             .into_any_element()
                                                     } else {
                                                         let name = p
@@ -4188,7 +4228,7 @@ impl JobHarnessApp {
                                                         div()
                                                             .px_2()
                                                             .py(px(2.0))
-                                                            .rounded(px(5.0))
+                                                            .rounded(theme::r_xs())
                                                             .bg(theme::surface_active())
                                                             .text_xs()
                                                             .text_color(theme::text_secondary())
@@ -4224,7 +4264,7 @@ impl JobHarnessApp {
                                             div()
                                                 .id(SharedString::from(format!("umsg-copy-{idx}")))
                                                 .p(px(3.0))
-                                                .rounded(px(4.0))
+                                                .rounded(theme::r_xs())
                                                 .cursor_pointer()
                                                 .hover(|s| s.bg(theme::row_hover()))
                                                 .on_click(cx.listener(move |this, _, _, cx| {
@@ -4244,7 +4284,7 @@ impl JobHarnessApp {
                                             div()
                                                 .id(SharedString::from(format!("umsg-reply-{idx}")))
                                                 .p(px(3.0))
-                                                .rounded(px(4.0))
+                                                .rounded(theme::r_xs())
                                                 .cursor_pointer()
                                                 .hover(|s| s.bg(theme::row_hover()))
                                                 .on_click(cx.listener(move |this, _, _, cx| {
@@ -4307,7 +4347,7 @@ impl JobHarnessApp {
                                                     )))
                                                     .px_2()
                                                     .py(px(2.0))
-                                                    .rounded(px(6.0))
+                                                    .rounded(theme::r_sm())
                                                     .bg(theme::surface_subtle())
                                                     .hover(|s| s.bg(theme::row_hover()))
                                                     .text_xs()
@@ -4332,7 +4372,7 @@ impl JobHarnessApp {
                                             div()
                                                 .id(SharedString::from(format!("msg-copy-{idx}")))
                                                 .p(px(4.0))
-                                                .rounded(px(5.0))
+                                                .rounded(theme::r_xs())
                                                 .cursor_pointer()
                                                 .hover(|s| s.bg(theme::row_hover()))
                                                 .on_click(cx.listener(move |this, _, _, cx| {
@@ -4354,7 +4394,7 @@ impl JobHarnessApp {
                                             div()
                                                 .id(SharedString::from(format!("msg-reply-{idx}")))
                                                 .p(px(4.0))
-                                                .rounded(px(5.0))
+                                                .rounded(theme::r_xs())
                                                 .cursor_pointer()
                                                 .hover(|s| s.bg(theme::row_hover()))
                                                 .on_click(cx.listener(move |this, _, _, cx| {
@@ -4374,7 +4414,7 @@ impl JobHarnessApp {
                                             div()
                                                 .id(SharedString::from(format!("msg-expand-{idx}")))
                                                 .p(px(4.0))
-                                                .rounded(px(5.0))
+                                                .rounded(theme::r_xs())
                                                 .cursor_pointer()
                                                 .hover(|s| s.bg(theme::row_hover()))
                                                 .on_click(cx.listener(move |this, _, _, cx| {
@@ -4470,7 +4510,7 @@ impl JobHarnessApp {
                                                             .px_2()
                                                             .py(px(4.0))
                                                             .mx(px(-6.0))
-                                                            .rounded(px(7.0))
+                                                            .rounded(theme::r_sm())
                                                             .hover(|s| s.bg(theme::row_hover()))
                                                             .cursor_pointer()
                                                             .text_xs()
@@ -4597,7 +4637,7 @@ impl JobHarnessApp {
                                                 .top(px(-26.0))
                                                 .w(px(preview_w))
                                                 .p_3()
-                                                .rounded(px(10.0))
+                                                .rounded(theme::r_md())
                                                 .bg(theme::popover_glass())
                                                 .border_1()
                                                 .border_color(theme::hairline_strong())
@@ -4700,7 +4740,7 @@ impl JobHarnessApp {
                     div().w_full().px_3().mb_1().flex().justify_center().child(
                         div()
                             .w(px(inner_composer_w))
-                            .rounded(px(10.0))
+                            .rounded(theme::r_md())
                             .bg(theme::window_glass())
                             .border_1()
                             .border_color(theme::hairline())
@@ -4762,7 +4802,7 @@ impl JobHarnessApp {
                                                     .id(SharedString::from(format!("steer-q-{qi}")))
                                                     .px(px(5.0))
                                                     .py(px(1.0))
-                                                    .rounded(px(4.0))
+                                                    .rounded(theme::r_xs())
                                                     .hover(|s| s.bg(theme::row_hover()))
                                                     .cursor_pointer()
                                                     .text_size(px(11.0))
@@ -4834,7 +4874,7 @@ impl JobHarnessApp {
                             div()
                                 .w(px(inner_composer_w))
                                 .p_1()
-                                .rounded(px(10.0))
+                                .rounded(theme::r_md())
                                 .bg(theme::popover_glass())
                                 .border_1()
                                 .border_color(theme::hairline_strong())
@@ -4855,7 +4895,7 @@ impl JobHarnessApp {
                                         .w_full()
                                         .px_2()
                                         .py(px(6.0))
-                                        .rounded(px(7.0))
+                                        .rounded(theme::r_sm())
                                         .when(active, |r| r.bg(theme::surface_active()))
                                         .hover(|s| s.bg(theme::row_hover()))
                                         .flex()
@@ -4922,7 +4962,7 @@ impl JobHarnessApp {
                             .id("chat-input-box")
                             .w(px(inner_composer_w))
                             .p(px(8.0))
-                            .rounded(px(12.0))
+                            .rounded(theme::r_lg())
                             .bg(if input_active {
                                 theme::surface_active()
                             } else {
@@ -4948,7 +4988,7 @@ impl JobHarnessApp {
                                     div()
                                         .px_2()
                                         .py(px(3.0))
-                                        .rounded(px(6.0))
+                                        .rounded(theme::r_sm())
                                         .bg(theme::window_glass())
                                         .flex()
                                         .items_center()
@@ -4987,7 +5027,7 @@ impl JobHarnessApp {
                                     div()
                                         .px_2()
                                         .py(px(3.0))
-                                        .rounded(px(6.0))
+                                        .rounded(theme::r_sm())
                                         .bg(theme::lavender_wash())
                                         .flex()
                                         .items_center()
@@ -5025,7 +5065,9 @@ impl JobHarnessApp {
                                             div()
                                                 .relative()
                                                 .child(
-                                                    img(p.clone()).size(px(46.0)).rounded(px(7.0)),
+                                                    img(p.clone())
+                                                        .size(px(46.0))
+                                                        .rounded(theme::r_sm()),
                                                 )
                                                 .child(
                                                     div()
@@ -5066,7 +5108,7 @@ impl JobHarnessApp {
                                             div()
                                                 .px_2()
                                                 .py(px(3.0))
-                                                .rounded(px(6.0))
+                                                .rounded(theme::r_sm())
                                                 .bg(theme::window_glass())
                                                 .flex()
                                                 .items_center()
@@ -5114,7 +5156,7 @@ impl JobHarnessApp {
                                         div()
                                             .px_2()
                                             .py(px(3.0))
-                                            .rounded(px(6.0))
+                                            .rounded(theme::r_sm())
                                             .bg(theme::window_glass())
                                             .border_1()
                                             .border_color(theme::hairline())
@@ -5199,7 +5241,7 @@ impl JobHarnessApp {
                                                     .w(px(24.0))
                                                     .h(px(24.0))
                                                     .flex_shrink_0()
-                                                    .rounded(px(6.0))
+                                                    .rounded(theme::r_sm())
                                                     .hover(|s| s.bg(theme::row_hover()))
                                                     .flex()
                                                     .items_center()
@@ -5237,7 +5279,7 @@ impl JobHarnessApp {
                                                                         div()
                                                                             .px(px(4.0))
                                                                             .py(px(1.0))
-                                                                            .rounded(px(4.0))
+                                                                            .rounded(theme::r_xs())
                                                                             .bg(
                                                                                 theme::window_glass(
                                                                                 ),
@@ -5259,7 +5301,7 @@ impl JobHarnessApp {
                                                                         div()
                                                                             .px(px(4.0))
                                                                             .py(px(1.0))
-                                                                            .rounded(px(4.0))
+                                                                            .rounded(theme::r_xs())
                                                                             .bg(
                                                                                 theme::window_glass(
                                                                                 ),
@@ -5288,7 +5330,7 @@ impl JobHarnessApp {
                                                         .id("chat-queue-btn")
                                                         .px_2()
                                                         .py(px(3.0))
-                                                        .rounded(px(6.0))
+                                                        .rounded(theme::r_sm())
                                                         .bg(theme::window_glass())
                                                         .border_1()
                                                         .border_color(theme::hairline())
@@ -5310,7 +5352,7 @@ impl JobHarnessApp {
                                                         .id("chat-steer-btn")
                                                         .px_2()
                                                         .py(px(3.0))
-                                                        .rounded(px(6.0))
+                                                        .rounded(theme::r_sm())
                                                         .bg(theme::white_solid())
                                                         .hover(|s| s.opacity(0.9))
                                                         .cursor_pointer()
@@ -5429,7 +5471,7 @@ impl JobHarnessApp {
                         div()
                             .w_full()
                             .p(px(2.0))
-                            .rounded(px(8.0))
+                            .rounded(theme::r_sm())
                             .bg(theme::surface_subtle())
                             .flex()
                             .items_center()
@@ -5441,7 +5483,7 @@ impl JobHarnessApp {
                                     .id(SharedString::from(format!("{scope}-rt-{i}")))
                                     .flex_1()
                                     .py(px(4.0))
-                                    .rounded(px(6.0))
+                                    .rounded(theme::r_sm())
                                     .bg(if on {
                                         theme::surface_active()
                                     } else {
@@ -5506,7 +5548,7 @@ impl JobHarnessApp {
                                     .id(SharedString::from(format!("{scope}-preset-{i}")))
                                     .px_2()
                                     .py(px(6.0))
-                                    .rounded(px(7.0))
+                                    .rounded(theme::r_sm())
                                     .bg(if is_selected {
                                         theme::surface_active()
                                     } else {
@@ -5583,7 +5625,7 @@ impl JobHarnessApp {
                             div()
                                 .w_full()
                                 .p(px(2.0))
-                                .rounded(px(8.0))
+                                .rounded(theme::r_sm())
                                 .bg(theme::surface_subtle())
                                 .flex()
                                 .items_center()
@@ -5594,7 +5636,7 @@ impl JobHarnessApp {
                                         .id(SharedString::from(format!("{scope}-reas-{label}")))
                                         .flex_1()
                                         .py(px(4.0))
-                                        .rounded(px(6.0))
+                                        .rounded(theme::r_sm())
                                         .bg(if on {
                                             theme::surface_active()
                                         } else {
@@ -5643,7 +5685,7 @@ impl JobHarnessApp {
                             div()
                                 .w_full()
                                 .p(px(2.0))
-                                .rounded(px(8.0))
+                                .rounded(theme::r_sm())
                                 .bg(theme::surface_subtle())
                                 .flex()
                                 .items_center()
@@ -5653,7 +5695,7 @@ impl JobHarnessApp {
                                         .id(SharedString::from(format!("{scope}-speed-std")))
                                         .flex_1()
                                         .py(px(4.0))
-                                        .rounded(px(6.0))
+                                        .rounded(theme::r_sm())
                                         .bg(if !fast_on {
                                             theme::surface_active()
                                         } else {
@@ -5693,7 +5735,7 @@ impl JobHarnessApp {
                                         .id(SharedString::from(format!("{scope}-speed-fast")))
                                         .flex_1()
                                         .py(px(4.0))
-                                        .rounded(px(6.0))
+                                        .rounded(theme::r_sm())
                                         .bg(if fast_on {
                                             theme::amber_wash()
                                         } else {
@@ -5782,7 +5824,7 @@ impl JobHarnessApp {
                                 .id(SharedString::from(format!("{scope}-model-input")))
                                 .px_2()
                                 .py(px(6.0))
-                                .rounded(px(7.0))
+                                .rounded(theme::r_sm())
                                 .bg(if model_input_active {
                                     theme::surface_active()
                                 } else {
@@ -5821,7 +5863,7 @@ impl JobHarnessApp {
                                         .id(SharedString::from(format!("{scope}-model-apply")))
                                         .px(px(6.0))
                                         .py(px(1.0))
-                                        .rounded(px(4.0))
+                                        .rounded(theme::r_xs())
                                         .hover(|s| s.bg(theme::row_hover()))
                                         .cursor_pointer()
                                         .text_xs()
@@ -5964,7 +6006,7 @@ impl JobHarnessApp {
             .min_h_0()
             .flex()
             .flex_col()
-            .rounded(px(10.0))
+            .rounded(theme::r_md())
             .pt_2()
             .px_1()
             .drag_over::<DragCard>(|style, _, _, _| style.bg(theme::drop_highlight()))
@@ -6048,7 +6090,7 @@ impl JobHarnessApp {
                                                 "collapse-col-{col_name}"
                                             )))
                                             .px(px(3.0))
-                                            .rounded(px(4.0))
+                                            .rounded(theme::r_xs())
                                             .cursor_pointer()
                                             .hover(|s| {
                                                 s.bg(theme::row_hover())
@@ -6107,7 +6149,7 @@ impl JobHarnessApp {
                         .min_w_0()
                         .px_2()
                         .py(px(9.0))
-                        .rounded(px(7.0))
+                        .rounded(theme::r_sm())
                         .border_b_1()
                         .border_color(theme::hairline())
                         .when(is_urgent, |d| d.bg(theme::amber_wash()))
@@ -6247,21 +6289,129 @@ impl JobHarnessApp {
             .pt_2()
             .pb(px(56.0))
             .gap_2()
-            // Whisper-thin view bar (Filter roles now lives cleanly in the centered titlebar!)
+            // Single unified Board / Flow toolbar (fixed 28px height — zero wasted vertical space or layout jump!)
             .child(
                 div()
                     .w_full()
+                    .h(px(28.0))
                     .flex_shrink_0()
                     .flex()
                     .items_center()
-                    .justify_end()
+                    .justify_between()
                     .gap_3()
-                    .child(
+                    // Left side: Sankey breadcrumbs / Overview|Expand-all (in Flow) OR restored-column pills (in Board)
+                    .child(if self.flow_view {
+                        if let Some(zr) = self.sankey_zoom {
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(6.0))
+                                .text_xs()
+                                .child(
+                                    div()
+                                        .id("sk-crumb-root")
+                                        .px(px(6.0))
+                                        .py(px(3.0))
+                                        .rounded(theme::r_sm())
+                                        .hover(|s| {
+                                            s.bg(theme::row_hover())
+                                                .text_color(theme::text_primary())
+                                        })
+                                        .cursor_pointer()
+                                        .text_color(theme::text_muted())
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.sankey_zoom = None;
+                                            this.sankey_bucket = None;
+                                            this.sankey_filter.clear();
+                                            this.sankey_hover = None;
+                                            this.flow_anim_epoch =
+                                                this.flow_anim_epoch.wrapping_add(1);
+                                            cx.notify();
+                                        }))
+                                        .child("← All roles"),
+                                )
+                                .child(div().text_color(theme::text_muted()).child("›"))
+                                .child(
+                                    div()
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .text_color(zr.color())
+                                        .child(zr.label()),
+                                )
+                                .into_any_element()
+                        } else {
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_1()
+                                .child(
+                                    div()
+                                        .id("sk-mode-overview")
+                                        .px_2()
+                                        .py(px(3.0))
+                                        .rounded(theme::r_sm())
+                                        .when(!self.sankey_expand_all, |d| {
+                                            d.bg(theme::surface_subtle())
+                                        })
+                                        .hover(|s| s.bg(theme::row_hover()))
+                                        .cursor_pointer()
+                                        .text_xs()
+                                        .text_color(if !self.sankey_expand_all {
+                                            theme::text_primary()
+                                        } else {
+                                            theme::text_muted()
+                                        })
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            if this.sankey_expand_all {
+                                                this.sankey_expand_all = false;
+                                                this.sankey_zoom = None;
+                                                this.sankey_bucket = None;
+                                                this.sankey_filter.clear();
+                                                this.sankey_hover = None;
+                                                this.flow_anim_epoch =
+                                                    this.flow_anim_epoch.wrapping_add(1);
+                                                cx.notify();
+                                            }
+                                        }))
+                                        .child("Overview"),
+                                )
+                                .child(
+                                    div()
+                                        .id("sk-mode-expand")
+                                        .px_2()
+                                        .py(px(3.0))
+                                        .rounded(theme::r_sm())
+                                        .when(self.sankey_expand_all, |d| {
+                                            d.bg(theme::surface_subtle())
+                                        })
+                                        .hover(|s| s.bg(theme::row_hover()))
+                                        .cursor_pointer()
+                                        .text_xs()
+                                        .text_color(if self.sankey_expand_all {
+                                            theme::text_primary()
+                                        } else {
+                                            theme::text_muted()
+                                        })
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            if !this.sankey_expand_all {
+                                                this.sankey_expand_all = true;
+                                                this.sankey_zoom = None;
+                                                this.sankey_bucket = None;
+                                                this.sankey_filter.clear();
+                                                this.sankey_hover = None;
+                                                this.flow_anim_epoch =
+                                                    this.flow_anim_epoch.wrapping_add(1);
+                                                cx.notify();
+                                            }
+                                        }))
+                                        .child("Expand all"),
+                                )
+                                .into_any_element()
+                        }
+                    } else {
                         div()
                             .flex()
                             .items_center()
                             .gap_2()
-                            // Clean Linear-style restore links for any hidden columns (zero squashed vertical rails)
                             .children(["Saved", "Applied", "Screening"].into_iter().filter_map(
                                 |name| {
                                     if !self.collapsed_cols.contains(name) {
@@ -6273,7 +6423,7 @@ impl JobHarnessApp {
                                             .id(SharedString::from(format!("restore-col-{name}")))
                                             .px_2()
                                             .py_1()
-                                            .rounded(px(6.0))
+                                            .rounded(theme::r_sm())
                                             .bg(theme::surface_subtle())
                                             .hover(|s| s.bg(theme::row_hover()))
                                             .cursor_pointer()
@@ -6290,8 +6440,91 @@ impl JobHarnessApp {
                                     )
                                 },
                             ))
+                            .into_any_element()
+                    })
+                    // Right side: inline Zoom (in Flow) + Board|Flow toggle + Board filters
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .when(self.flow_view, |bar| {
+                                let scale_pct =
+                                    (self.sankey_scale.clamp(0.75, 1.45) * 100.0).round() as i32;
+                                bar.child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap(px(2.0))
+                                        .pr_2()
+                                        .border_r_1()
+                                        .border_color(theme::hairline())
+                                        .text_xs()
+                                        .text_color(theme::text_muted())
+                                        .child(
+                                            div()
+                                                .id("sk-zoom-out")
+                                                .w(px(22.0))
+                                                .h(px(22.0))
+                                                .rounded(theme::r_xs())
+                                                .hover(|s| {
+                                                    s.bg(theme::row_hover())
+                                                        .text_color(theme::text_primary())
+                                                })
+                                                .flex()
+                                                .items_center()
+                                                .justify_center()
+                                                .cursor_pointer()
+                                                .on_click(cx.listener(|this, _, _, cx| {
+                                                    this.sankey_scale =
+                                                        (this.sankey_scale - 0.15).max(0.75);
+                                                    cx.notify();
+                                                }))
+                                                .child("−"),
+                                        )
+                                        .child(
+                                            div()
+                                                .id("sk-zoom-reset")
+                                                .px(px(5.0))
+                                                .py(px(2.0))
+                                                .rounded(theme::r_xs())
+                                                .hover(|s| {
+                                                    s.bg(theme::row_hover())
+                                                        .text_color(theme::text_primary())
+                                                })
+                                                .cursor_pointer()
+                                                .text_size(px(11.0))
+                                                .on_click(cx.listener(|this, _, _, cx| {
+                                                    this.sankey_scale = 1.0;
+                                                    cx.notify();
+                                                }))
+                                                .child(format!("{scale_pct}%")),
+                                        )
+                                        .child(
+                                            div()
+                                                .id("sk-zoom-in")
+                                                .w(px(22.0))
+                                                .h(px(22.0))
+                                                .rounded(theme::r_xs())
+                                                .hover(|s| {
+                                                    s.bg(theme::row_hover())
+                                                        .text_color(theme::text_primary())
+                                                })
+                                                .flex()
+                                                .items_center()
+                                                .justify_center()
+                                                .cursor_pointer()
+                                                .on_click(cx.listener(|this, _, _, cx| {
+                                                    this.sankey_scale =
+                                                        (this.sankey_scale + 0.15).min(1.45);
+                                                    cx.notify();
+                                                }))
+                                                .child("+"),
+                                        ),
+                                )
+                            })
                             .child(
-                                // Sleek Linear/Zed borderless icon-pair view switcher (Board | Sankey Flow)
+                                // Sleek borderless icon-pair view switcher (Board | Sankey Flow)
                                 div()
                                     .flex()
                                     .items_center()
@@ -6301,7 +6534,7 @@ impl JobHarnessApp {
                                             .id("view-mode-board")
                                             .w(px(26.0))
                                             .h(px(26.0))
-                                            .rounded(px(6.0))
+                                            .rounded(theme::r_sm())
                                             .when(!self.flow_view, |d| {
                                                 d.bg(theme::surface_subtle())
                                             })
@@ -6313,6 +6546,11 @@ impl JobHarnessApp {
                                             .on_click(cx.listener(|this, _, _, cx| {
                                                 if this.flow_view {
                                                     this.flow_view = false;
+                                                    if this.active_input
+                                                        == ActiveInput::SankeyFilter
+                                                    {
+                                                        this.active_input = ActiveInput::None;
+                                                    }
                                                     this.flow_anim_epoch =
                                                         this.flow_anim_epoch.wrapping_add(1);
                                                     cx.notify();
@@ -6334,7 +6572,7 @@ impl JobHarnessApp {
                                             .id("view-mode-flow")
                                             .w(px(26.0))
                                             .h(px(26.0))
-                                            .rounded(px(6.0))
+                                            .rounded(theme::r_sm())
                                             .when(self.flow_view, |d| d.bg(theme::surface_subtle()))
                                             .hover(|s| s.bg(theme::row_hover()))
                                             .cursor_pointer()
@@ -6368,7 +6606,7 @@ impl JobHarnessApp {
                                         .id("toggle-attention-only")
                                         .px_2()
                                         .py_1()
-                                        .rounded(px(6.0))
+                                        .rounded(theme::r_sm())
                                         .cursor_pointer()
                                         .when(self.only_attention, |d| {
                                             d.bg(theme::surface_active())
@@ -6390,7 +6628,7 @@ impl JobHarnessApp {
                                         .id("toggle-archive-col")
                                         .px_2()
                                         .py_1()
-                                        .rounded(px(6.0))
+                                        .rounded(theme::r_sm())
                                         .cursor_pointer()
                                         .when(self.show_archive, |d| d.bg(theme::surface_active()))
                                         .hover(|s| s.bg(theme::row_hover()))
@@ -6423,7 +6661,7 @@ impl JobHarnessApp {
                                                 .id("board-nudge-left")
                                                 .w(px(22.0))
                                                 .h(px(22.0))
-                                                .rounded(px(5.0))
+                                                .rounded(theme::r_xs())
                                                 .flex()
                                                 .items_center()
                                                 .justify_center()
@@ -6444,7 +6682,7 @@ impl JobHarnessApp {
                                                 .id("board-nudge-right")
                                                 .w(px(22.0))
                                                 .h(px(22.0))
-                                                .rounded(px(5.0))
+                                                .rounded(theme::r_xs())
                                                 .flex()
                                                 .items_center()
                                                 .justify_center()
@@ -6482,6 +6720,8 @@ impl JobHarnessApp {
                     self.sankey_scale,
                     self.sankey_bucket,
                     self.sankey_hover,
+                    &self.sankey_filter,
+                    self.active_input == ActiveInput::SankeyFilter,
                     self.flow_anim_epoch,
                     self.reduce_motion,
                     |hov, this: &mut Self, _, cx| {
@@ -6493,24 +6733,26 @@ impl JobHarnessApp {
                     |zm, this: &mut Self, _, cx| {
                         this.sankey_zoom = zm;
                         this.sankey_bucket = None;
+                        this.sankey_filter.clear();
+                        if this.active_input == ActiveInput::SankeyFilter {
+                            this.active_input = ActiveInput::None;
+                        }
                         this.sankey_hover = None;
                         this.flow_anim_epoch = this.flow_anim_epoch.wrapping_add(1);
-                        cx.notify();
-                    },
-                    |expand, this: &mut Self, _, cx| {
-                        this.sankey_expand_all = expand;
-                        this.sankey_zoom = None;
-                        this.sankey_bucket = None;
-                        this.sankey_hover = None;
-                        this.flow_anim_epoch = this.flow_anim_epoch.wrapping_add(1);
-                        cx.notify();
-                    },
-                    |scale, this: &mut Self, _, cx| {
-                        this.sankey_scale = scale.clamp(0.75, 1.45);
                         cx.notify();
                     },
                     |bucket, this: &mut Self, _, cx| {
                         this.sankey_bucket = bucket;
+                        this.sankey_filter.clear();
+                        if bucket.is_some() {
+                            this.active_input = ActiveInput::SankeyFilter;
+                        } else if this.active_input == ActiveInput::SankeyFilter {
+                            this.active_input = ActiveInput::None;
+                        }
+                        cx.notify();
+                    },
+                    |this: &mut Self, _, cx| {
+                        this.active_input = ActiveInput::SankeyFilter;
                         cx.notify();
                     },
                     |card, this: &mut Self, _, cx| {
@@ -6531,7 +6773,7 @@ impl JobHarnessApp {
                     .overflow_x_scroll()
                     .flex();
                 board_scroller.style().restrict_scroll_to_axis = Some(true);
-                board_scroller
+                let board_el = board_scroller
                     .children(base_columns.into_iter().map(|col_name| {
                         let col_cards: Vec<&RoleCard> = cards
                             .iter()
@@ -6628,8 +6870,20 @@ impl JobHarnessApp {
                             self.archive_toggled && !self.reduce_motion,
                             self.archive_anim_epoch,
                         )
-                    })
-                    .into_any_element()
+                    });
+                if !self.reduce_motion && self.flow_anim_epoch > 0 {
+                    let fe = self.flow_anim_epoch;
+                    board_el
+                        .with_animation(
+                            SharedString::from(format!("board-enter-{fe}")),
+                            Animation::new(Duration::from_millis(180))
+                                .with_easing(ease_out_quint()),
+                            |el, t| el.opacity(0.25 + 0.75 * t).mt(px(4.0 * (1.0 - t))),
+                        )
+                        .into_any_element()
+                } else {
+                    board_el.into_any_element()
+                }
             })
             // Quick-Ask upward reply popover
             .when(self.quick_popover_open, |d| {
@@ -6640,7 +6894,7 @@ impl JobHarnessApp {
                         .bottom(px(54.0))
                         .w(px(400.0))
                         .p_3()
-                        .rounded(px(12.0))
+                        .rounded(theme::r_lg())
                         .bg(theme::popover_glass())
                         .border_1()
                         .border_color(theme::hairline_strong())
@@ -6732,7 +6986,7 @@ impl JobHarnessApp {
                             .w(px(300.0))
                             .px_3()
                             .py(px(7.0))
-                            .rounded(px(10.0))
+                            .rounded(theme::r_md())
                             .bg(theme::dock_glass())
                             .border_1()
                             .border_color(if quick_active {
@@ -6770,7 +7024,7 @@ impl JobHarnessApp {
                                 div()
                                     .id("quick-send-btn")
                                     .px(px(4.0))
-                                    .rounded(px(4.0))
+                                    .rounded(theme::r_xs())
                                     .cursor_pointer()
                                     .hover(|s| s.bg(theme::row_hover()))
                                     .text_xs()
@@ -6837,7 +7091,7 @@ impl JobHarnessApp {
                                     div()
                                         .px_2()
                                         .py_1()
-                                        .rounded(px(6.0))
+                                        .rounded(theme::r_sm())
                                         .bg(theme::dock_glass())
                                         .flex()
                                         .items_center()
@@ -6957,7 +7211,7 @@ impl JobHarnessApp {
                                     .id("btn-budget")
                                     .px_2()
                                     .py_1()
-                                    .rounded(px(6.0))
+                                    .rounded(theme::r_sm())
                                     .hover(|s| s.bg(theme::row_hover()))
                                     .cursor_pointer()
                                     .text_xs()
@@ -6986,7 +7240,7 @@ impl JobHarnessApp {
                                     .id("btn-health-dot")
                                     .w(px(22.0))
                                     .h(px(22.0))
-                                    .rounded(px(6.0))
+                                    .rounded(theme::r_sm())
                                     .hover(|s| s.bg(theme::row_hover()))
                                     .flex()
                                     .items_center()
@@ -7076,7 +7330,7 @@ impl JobHarnessApp {
                                         .id("close-drawer")
                                         .flex_shrink_0()
                                         .p_1()
-                                        .rounded(px(5.0))
+                                        .rounded(theme::r_xs())
                                         .hover(|s| s.bg(theme::row_hover()))
                                         .cursor_pointer()
                                         .text_xs()
@@ -7482,7 +7736,7 @@ impl JobHarnessApp {
                                         .id("md-tap-expand")
                                         .p_2()
                                         .mx(px(-8.0))
-                                        .rounded(px(8.0))
+                                        .rounded(theme::r_sm())
                                         .hover(|s| s.bg(theme::row_hover()))
                                         .cursor_pointer()
                                         .on_click(cx.listener(move |this, _, _, cx| {
@@ -7557,7 +7811,7 @@ impl JobHarnessApp {
                                                             div()
                                                                 .id("md-open-file")
                                                                 .p(px(5.0))
-                                                                .rounded(px(6.0))
+                                                                .rounded(theme::r_sm())
                                                                 .hover(|s| {
                                                                     s.bg(theme::row_hover())
                                                                 })
@@ -7590,7 +7844,7 @@ impl JobHarnessApp {
                                                             div()
                                                                 .id("md-expand-reader")
                                                                 .p(px(5.0))
-                                                                .rounded(px(6.0))
+                                                                .rounded(theme::r_sm())
                                                                 .hover(|s| {
                                                                     s.bg(theme::row_hover())
                                                                 })
@@ -7637,7 +7891,7 @@ impl JobHarnessApp {
                                                                     .id("bsec-all")
                                                                     .px_2()
                                                                     .py(px(2.0))
-                                                                    .rounded(px(6.0))
+                                                                    .rounded(theme::r_sm())
                                                                     .bg(if active_sec.is_none() {
                                                                         theme::surface_active()
                                                                     } else {
@@ -7677,7 +7931,7 @@ impl JobHarnessApp {
                                                                             ))
                                                                             .px_2()
                                                                             .py(px(2.0))
-                                                                            .rounded(px(6.0))
+                                                                            .rounded(theme::r_sm())
                                                                             .bg(if on {
                                                                                 theme::surface_active()
                                                                             } else {
@@ -7747,7 +8001,7 @@ impl JobHarnessApp {
                                 .flex_shrink_0()
                                 .py(px(9.0))
                                 .px_3()
-                                .rounded(px(9.0))
+                                .rounded(theme::r_md())
                                 .bg(theme::lavender_wash())
                                 .border_1()
                                 .border_color(theme::lavender_border())
@@ -7957,7 +8211,7 @@ impl JobHarnessApp {
                                                         .px_2()
                                                         .py(px(6.0))
                                                         .mx(px(-8.0))
-                                                        .rounded(px(7.0))
+                                                        .rounded(theme::r_sm())
                                                         .hover(|s| s.bg(theme::row_hover()))
                                                         .flex()
                                                         .items_center()
@@ -8008,7 +8262,7 @@ impl JobHarnessApp {
                                                                         "prof-edit-{grp}-{idx}"
                                                                     )))
                                                                     .p(px(5.0))
-                                                                    .rounded(px(6.0))
+                                                                    .rounded(theme::r_sm())
                                                                     .hover(|s| {
                                                                         s.bg(theme::surface_active())
                                                                     })
@@ -8101,7 +8355,7 @@ impl JobHarnessApp {
                                                             div()
                                                                 .id("profile-copy-ws")
                                                                 .p(px(3.0))
-                                                                .rounded(px(4.0))
+                                                                .rounded(theme::r_xs())
                                                                 .hover(|s| {
                                                                     s.bg(theme::row_hover())
                                                                 })
@@ -8150,7 +8404,7 @@ impl JobHarnessApp {
                                 .flex_shrink_0()
                                 .py(px(9.0))
                                 .px_3()
-                                .rounded(px(9.0))
+                                .rounded(theme::r_md())
                                 .bg(theme::lavender_wash())
                                 .border_1()
                                 .border_color(theme::lavender_border())
@@ -8292,7 +8546,7 @@ impl JobHarnessApp {
                                         div()
                                             .id(SharedString::from(format!("cv-copy-{i}")))
                                             .p(px(4.0))
-                                            .rounded(px(5.0))
+                                            .rounded(theme::r_xs())
                                             .hover(|s| s.bg(theme::row_hover()))
                                             .cursor_pointer()
                                             .on_click(cx.listener(move |this, _, _, cx| {
@@ -8411,7 +8665,7 @@ impl JobHarnessApp {
                             .id("import-primary-cv")
                             .mt_auto()
                             .py_2()
-                            .rounded(px(8.0))
+                            .rounded(theme::r_sm())
                             .bg(theme::white_solid())
                             .text_xs()
                             .text_color(theme::ink_dark())
@@ -8520,67 +8774,81 @@ impl JobHarnessApp {
                                                 .next()
                                                 .unwrap_or(&item.company);
                                             let path_opt = item.record_path.clone();
-                                            div()
+                                            let long_detail = item.detail.len() > 26;
+                                            let detail_col = if is_long_quiet {
+                                                theme::rose_text()
+                                            } else {
+                                                theme::text_muted()
+                                            };
+                                            let row = div()
                                                 .id(SharedString::from(format!("att-{idx}")))
+                                                .flex_shrink_0()
                                                 .px_2()
                                                 .py_2()
                                                 .mx(px(-8.0))
-                                                .rounded(px(7.0))
+                                                .rounded(theme::r_sm())
                                                 .when(idx > 0, |d| {
                                                     d.border_t_1().border_color(theme::hairline())
                                                 })
                                                 .hover(|s| s.bg(theme::row_hover()))
-                                                .flex()
-                                                .items_center()
-                                                .justify_between()
-                                                .gap_3()
                                                 .cursor_pointer()
                                                 .on_click(cx.listener(move |this, _, _, cx| {
                                                     if let Some(p) = &path_opt {
                                                         this.open_citation(p, cx);
                                                     }
-                                                }))
+                                                }));
+                                            let header_left = div()
+                                                .flex()
+                                                .items_center()
+                                                .gap_2()
+                                                .min_w_0()
                                                 .child(
                                                     div()
-                                                        .flex()
-                                                        .items_center()
-                                                        .gap_2()
-                                                        .min_w_0()
-                                                        .child(
-                                                            div()
-                                                                .w(px(6.0))
-                                                                .h(px(6.0))
-                                                                .flex_shrink_0()
-                                                                .rounded(px(99.0))
-                                                                .bg(dot_color),
-                                                        )
-                                                        .child(
-                                                            div()
-                                                                .min_w_0()
-                                                                .overflow_hidden()
-                                                                .text_xs()
-                                                                .text_color(if is_urg {
-                                                                    theme::amber_text()
-                                                                } else {
-                                                                    theme::text_primary()
-                                                                })
-                                                                .child(truncate_end(
-                                                                    company_only,
-                                                                    22,
-                                                                )),
-                                                        ),
-                                                )
-                                                .child(
-                                                    div()
+                                                        .w(px(6.0))
+                                                        .h(px(6.0))
                                                         .flex_shrink_0()
-                                                        .text_xs()
-                                                        .text_color(if is_long_quiet {
-                                                            theme::rose_text()
-                                                        } else {
-                                                            theme::text_muted()
-                                                        })
-                                                        .child(item.detail.clone()),
+                                                        .rounded(px(99.0))
+                                                        .bg(dot_color),
                                                 )
+                                                .child(
+                                                    div()
+                                                        .whitespace_nowrap()
+                                                        .overflow_hidden()
+                                                        .text_xs()
+                                                        .text_color(if is_urg {
+                                                            theme::amber_text()
+                                                        } else {
+                                                            theme::text_primary()
+                                                        })
+                                                        .child(truncate_end(company_only, 24)),
+                                                );
+                                            if long_detail {
+                                                row.flex()
+                                                    .flex_col()
+                                                    .gap(px(3.0))
+                                                    .child(header_left)
+                                                    .child(
+                                                        div()
+                                                            .pl(px(14.0))
+                                                            .text_size(px(11.0))
+                                                            .text_color(detail_col)
+                                                            .child(item.detail.clone()),
+                                                    )
+                                            } else {
+                                                row.flex()
+                                                    .items_center()
+                                                    .justify_between()
+                                                    .gap_3()
+                                                    .child(header_left)
+                                                    .child(
+                                                        div()
+                                                            .flex_shrink_0()
+                                                            .whitespace_nowrap()
+                                                            .text_xs()
+                                                            .text_color(detail_col)
+                                                            .child(item.detail.clone()),
+                                                    )
+                                            }
                                         }),
                                 ),
                         )
@@ -8645,7 +8913,7 @@ impl JobHarnessApp {
                                                 .px_2()
                                                 .py_2()
                                                 .mx(px(-8.0))
-                                                .rounded(px(7.0))
+                                                .rounded(theme::r_sm())
                                                 .when(i > 0, |d| {
                                                     d.border_t_1().border_color(theme::hairline())
                                                 })
@@ -8776,7 +9044,7 @@ impl JobHarnessApp {
                                                 .id("set-toggle-connect-help")
                                                 .px_2()
                                                 .py(px(5.0))
-                                                .rounded(px(7.0))
+                                                .rounded(theme::r_sm())
                                                 .bg(theme::surface_subtle())
                                                 .border_1()
                                                 .border_color(theme::hairline())
@@ -8807,7 +9075,7 @@ impl JobHarnessApp {
                                             box_d.child(
                                                 div()
                                                     .p_2()
-                                                    .rounded(px(8.0))
+                                                    .rounded(theme::r_sm())
                                                     .bg(theme::window_glass())
                                                     .border_1()
                                                     .border_color(theme::hairline())
@@ -8825,7 +9093,7 @@ impl JobHarnessApp {
                                                             .id(SharedString::from(format!("set-conn-{ci}")))
                                                             .px_2()
                                                             .py(px(5.0))
-                                                            .rounded(px(6.0))
+                                                            .rounded(theme::r_sm())
                                                             .bg(theme::surface_subtle())
                                                             .hover(|s| s.bg(theme::row_hover()))
                                                             .cursor_pointer()
@@ -8961,7 +9229,7 @@ impl JobHarnessApp {
                                             div()
                                                 .px_2()
                                                 .py(px(6.0))
-                                                .rounded(px(7.0))
+                                                .rounded(theme::r_sm())
                                                 .bg(theme::window_glass())
                                                 .border_1()
                                                 .border_color(theme::hairline())
@@ -8999,7 +9267,7 @@ impl JobHarnessApp {
                                                         .id("set-copy-mcp-cmd")
                                                         .px(px(6.0))
                                                         .py(px(2.0))
-                                                        .rounded(px(5.0))
+                                                        .rounded(theme::r_xs())
                                                         .bg(theme::surface_subtle())
                                                         .hover(|s| s.bg(theme::row_hover()))
                                                         .cursor_pointer()
@@ -9047,7 +9315,7 @@ impl JobHarnessApp {
                                             div()
                                                 .px_2()
                                                 .py(px(5.5))
-                                                .rounded(px(7.0))
+                                                .rounded(theme::r_sm())
                                                 .bg(theme::window_glass())
                                                 .border_1()
                                                 .border_color(theme::hairline())
@@ -9107,7 +9375,7 @@ impl JobHarnessApp {
                                                     div()
                                                         .px_2()
                                                         .py(px(3.0))
-                                                        .rounded(px(6.0))
+                                                        .rounded(theme::r_sm())
                                                         .bg(theme::surface_subtle())
                                                         .border_1()
                                                         .border_color(theme::hairline())
@@ -9153,7 +9421,7 @@ impl JobHarnessApp {
                                                     div()
                                                         .px_2()
                                                         .py(px(3.0))
-                                                        .rounded(px(6.0))
+                                                        .rounded(theme::r_sm())
                                                         .bg(theme::window_glass())
                                                         .border_1()
                                                         .border_color(theme::hairline())
@@ -9275,7 +9543,7 @@ impl JobHarnessApp {
                                                     div()
                                                         .id("info-reduce_motion")
                                                         .px(px(4.0))
-                                                        .rounded(px(4.0))
+                                                        .rounded(theme::r_xs())
                                                         .cursor_pointer()
                                                         .hover(|s| {
                                                             s.text_color(theme::text_primary())
@@ -9388,7 +9656,7 @@ impl JobHarnessApp {
                                 div()
                                     .px_3()
                                     .py_2()
-                                    .rounded(px(8.0))
+                                    .rounded(theme::r_sm())
                                     .bg(theme::amber_wash())
                                     .flex()
                                     .items_center()
@@ -9604,7 +9872,7 @@ impl JobHarnessApp {
                                 })
                                 .w(px(680.0))
                                 .max_h(px(540.0))
-                                .rounded(px(16.0))
+                                .rounded(theme::r_lg())
                                 .bg(theme::popover_glass())
                                 .border_1()
                                 .border_color(theme::hairline_strong())
@@ -9716,7 +9984,7 @@ impl JobHarnessApp {
                                                         .flex_shrink_0()
                                                         .px_3()
                                                         .py(px(11.0))
-                                                        .rounded(px(9.0))
+                                                        .rounded(theme::r_md())
                                                         .overflow_hidden()
                                                         .when(active, |d| {
                                                             d.bg(theme::surface_subtle())
@@ -9845,7 +10113,7 @@ impl JobHarnessApp {
                     .top(px(84.0))
                     .w(px(280.0))
                     .p_3()
-                    .rounded(px(12.0))
+                    .rounded(theme::r_lg())
                     .bg(theme::popover_glass())
                     .border_1()
                     .border_color(theme::hairline_strong())
@@ -9896,7 +10164,7 @@ impl JobHarnessApp {
                     .top(px(84.0))
                     .w(px(300.0))
                     .p_3()
-                    .rounded(px(12.0))
+                    .rounded(theme::r_lg())
                     .bg(theme::popover_glass())
                     .border_1()
                     .border_color(theme::hairline_strong())
@@ -9929,7 +10197,7 @@ impl JobHarnessApp {
                             .id("session-start-fresh")
                             .px_2()
                             .py(px(6.0))
-                            .rounded(px(7.0))
+                            .rounded(theme::r_sm())
                             .bg(if is_fresh {
                                 theme::surface_active()
                             } else {
@@ -9997,7 +10265,7 @@ impl JobHarnessApp {
                                     .flex_shrink_0()
                                     .px_2()
                                     .py(px(6.0))
-                                    .rounded(px(7.0))
+                                    .rounded(theme::r_sm())
                                     .when(is_cur, |d| d.bg(theme::surface_active()))
                                     .hover(|d| d.bg(theme::row_hover()))
                                     .cursor_pointer()
@@ -10489,7 +10757,7 @@ impl Render for JobHarnessApp {
                     .w(px(760.0))
                     .h(px(620.0))
                     .p_6()
-                    .rounded(px(14.0))
+                    .rounded(theme::r_lg())
                     .bg(theme::popover_glass())
                     .border_1()
                     .border_color(theme::hairline_strong())
@@ -10536,7 +10804,7 @@ impl Render for JobHarnessApp {
                                         div()
                                             .id("reader-copy-all")
                                             .p(px(4.0))
-                                            .rounded(px(5.0))
+                                            .rounded(theme::r_xs())
                                             .hover(|s| s.bg(theme::row_hover()))
                                             .cursor_pointer()
                                             .on_click(cx.listener(move |this, _, _, cx| {
@@ -10564,7 +10832,7 @@ impl Render for JobHarnessApp {
                                         r.child(
                                             div()
                                                 .p(px(2.0))
-                                                .rounded(px(7.0))
+                                                .rounded(theme::r_sm())
                                                 .bg(theme::window_glass())
                                                 .border_1()
                                                 .border_color(theme::hairline())
@@ -10576,7 +10844,7 @@ impl Render for JobHarnessApp {
                                                         .id("reader-json-fmt")
                                                         .px_2()
                                                         .py(px(2.0))
-                                                        .rounded(px(5.0))
+                                                        .rounded(theme::r_xs())
                                                         .when(!raw_on, |d| {
                                                             d.bg(theme::surface_active())
                                                         })
@@ -10598,7 +10866,7 @@ impl Render for JobHarnessApp {
                                                         .id("reader-json-raw")
                                                         .px_2()
                                                         .py(px(2.0))
-                                                        .rounded(px(5.0))
+                                                        .rounded(theme::r_xs())
                                                         .when(raw_on, |d| {
                                                             d.bg(theme::surface_active())
                                                         })
@@ -10635,7 +10903,7 @@ impl Render for JobHarnessApp {
                                             .id("reader-close")
                                             .px(px(6.0))
                                             .py(px(2.0))
-                                            .rounded(px(5.0))
+                                            .rounded(theme::r_xs())
                                             .hover(|s| s.bg(theme::row_hover()))
                                             .text_xs()
                                             .text_color(theme::text_muted())
@@ -10670,7 +10938,7 @@ impl Render for JobHarnessApp {
                                                 .id("rsec-all")
                                                 .px_2()
                                                 .py(px(3.0))
-                                                .rounded(px(6.0))
+                                                .rounded(theme::r_sm())
                                                 .bg(if active_sec.is_none() {
                                                     theme::surface_active()
                                                 } else {
@@ -10697,7 +10965,7 @@ impl Render for JobHarnessApp {
                                                 .id(SharedString::from(format!("rsec-{idx}")))
                                                 .px_2()
                                                 .py(px(3.0))
-                                                .rounded(px(6.0))
+                                                .rounded(theme::r_sm())
                                                 .bg(if on {
                                                     theme::surface_active()
                                                 } else {
@@ -10733,7 +11001,7 @@ impl Render for JobHarnessApp {
                                                 .id("rsec-prev")
                                                 .px_2()
                                                 .py(px(2.0))
-                                                .rounded(px(5.0))
+                                                .rounded(theme::r_xs())
                                                 .hover(|s| s.bg(theme::row_hover()))
                                                 .cursor_pointer()
                                                 .on_click(cx.listener(move |this, _, _, cx| {
@@ -10754,7 +11022,7 @@ impl Render for JobHarnessApp {
                                                 .id("rsec-next")
                                                 .px_2()
                                                 .py(px(2.0))
-                                                .rounded(px(5.0))
+                                                .rounded(theme::r_xs())
                                                 .hover(|s| s.bg(theme::row_hover()))
                                                 .cursor_pointer()
                                                 .on_click(cx.listener(move |this, _, _, cx| {
@@ -11132,7 +11400,7 @@ fn popover_shell(bottom: bool, width: f32, right_offset: f32) -> gpui::Div {
         .right(px(right_offset))
         .w(px(width))
         .p_3()
-        .rounded(px(12.0))
+        .rounded(theme::r_lg())
         .bg(theme::popover_glass())
         .border_1()
         .border_color(theme::hairline_strong())
@@ -11210,7 +11478,7 @@ fn perm_row(
                             div()
                                 .id(SharedString::from(format!("info-{key}")))
                                 .px(px(4.0))
-                                .rounded(px(4.0))
+                                .rounded(theme::r_xs())
                                 .cursor_pointer()
                                 .hover(|s| s.text_color(theme::text_primary()))
                                 .text_xs()
@@ -11279,7 +11547,7 @@ fn stepper_row(
                         .id(SharedString::from(format!("dec-{channel}")))
                         .w(px(20.0))
                         .h(px(20.0))
-                        .rounded(px(5.0))
+                        .rounded(theme::r_xs())
                         .bg(theme::surface_subtle())
                         .hover(|s| s.bg(theme::row_hover()))
                         .flex()
@@ -11301,7 +11569,7 @@ fn stepper_row(
                         .id(SharedString::from(format!("inc-{channel}")))
                         .w(px(20.0))
                         .h(px(20.0))
-                        .rounded(px(5.0))
+                        .rounded(theme::r_xs())
                         .bg(theme::surface_subtle())
                         .hover(|s| s.bg(theme::row_hover()))
                         .flex()
@@ -11400,7 +11668,9 @@ fn inline_editable_text(
         .child(
             div()
                 .when(all_selected, |d| {
-                    d.px(px(2.0)).rounded(px(3.0)).bg(theme::lavender_wash())
+                    d.px(px(2.0))
+                        .rounded(theme::r_xs())
+                        .bg(theme::lavender_wash())
                 })
                 .text_color(theme::text_primary())
                 .child(text.to_owned()),
@@ -11466,7 +11736,7 @@ fn chat_multiline_input(
                 .child(
                     div()
                         .when(all_selected, |d| {
-                            d.rounded(px(3.0)).bg(theme::lavender_wash())
+                            d.rounded(theme::r_xs()).bg(theme::lavender_wash())
                         })
                         .text_color(theme::text_primary())
                         .child(if line.is_empty() {
@@ -11570,7 +11840,7 @@ fn drawer_header(
                         .id(SharedString::from(format!("close-drawer-{title}")))
                         .px(px(5.0))
                         .py(px(2.0))
-                        .rounded(px(5.0))
+                        .rounded(theme::r_xs())
                         .hover(|s| s.bg(theme::row_hover()))
                         .cursor_pointer()
                         .text_xs()
@@ -11591,7 +11861,7 @@ fn cmd_keycap(label: &'static str) -> impl IntoElement {
     div()
         .px(px(5.0))
         .py(px(1.5))
-        .rounded(px(4.0))
+        .rounded(theme::r_xs())
         .bg(theme::surface_subtle())
         .border_1()
         .border_color(theme::hairline())

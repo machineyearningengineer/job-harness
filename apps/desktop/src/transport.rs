@@ -36,6 +36,7 @@ impl WorkspaceTarget {
             ),
         }
     }
+    #[allow(dead_code)]
     pub fn monogram(&self) -> String {
         let name = self.label();
         let parts: Vec<&str> = name

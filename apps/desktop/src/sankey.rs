@@ -290,13 +290,14 @@ pub fn render_sankey_view<V: 'static>(
     zoom_scale: f32,
     selected: Option<SankeyBucket>,
     hovered: Option<SankeyBucket>,
+    filter_query: &str,
+    filter_active: bool,
     anim_epoch: u64,
     reduce_motion: bool,
     on_hover: impl Fn(Option<SankeyBucket>, &mut V, &mut Window, &mut Context<V>) + Clone + 'static,
     on_zoom: impl Fn(Option<SankeyBucket>, &mut V, &mut Window, &mut Context<V>) + Clone + 'static,
-    on_expand_all: impl Fn(bool, &mut V, &mut Window, &mut Context<V>) + Clone + 'static,
-    on_scale: impl Fn(f32, &mut V, &mut Window, &mut Context<V>) + Clone + 'static,
     on_select: impl Fn(Option<SankeyBucket>, &mut V, &mut Window, &mut Context<V>) + Clone + 'static,
+    on_focus_filter: impl Fn(&mut V, &mut Window, &mut Context<V>) + Clone + 'static,
     on_open_role: impl Fn(RoleCard, &mut V, &mut Window, &mut Context<V>) + Clone + 'static,
     cx: &mut Context<V>,
 ) -> AnyElement {
@@ -333,8 +334,8 @@ pub fn render_sankey_view<V: 'static>(
     let focus_bucket = hovered.or(selected);
 
     let effective_scale = zoom_scale.clamp(0.75, 1.45);
-    let diagram_h = (430.0 * effective_scale).clamp(320.0, 620.0);
-    let top_pad = 34.0_f32;
+    let diagram_h = (470.0 * effective_scale).clamp(340.0, 660.0);
+    let top_pad = 30.0_f32;
     let two_col = zoom_root.is_some();
 
     let denom = match zoom_root {
@@ -762,7 +763,7 @@ pub fn render_sankey_view<V: 'static>(
                 .top(px(y_pos))
                 .px(px(6.0))
                 .py(px(1.5))
-                .rounded(px(5.0))
+                .rounded(theme::r_xs())
                 .when(is_sel, |d| d.bg(theme::surface_subtle()))
                 .cursor_pointer()
                 .flex()
@@ -826,7 +827,7 @@ pub fn render_sankey_view<V: 'static>(
                 .top(px(top_pad + n.y))
                 .h(px(n.h))
                 .px(px(8.0))
-                .rounded(px(6.0))
+                .rounded(theme::r_sm())
                 .when(is_sel, |d| d.bg(theme::surface_subtle()))
                 .cursor_pointer()
                 .flex()
@@ -920,13 +921,6 @@ pub fn render_sankey_view<V: 'static>(
         })
         .unwrap_or_default();
 
-    let on_exp_ov = on_expand_all.clone();
-    let on_exp_full = on_expand_all;
-    let on_sc_out = on_scale.clone();
-    let on_sc_reset = on_scale.clone();
-    let on_sc_in = on_scale;
-    let scale_pct = (effective_scale * 100.0).round() as i32;
-
     div()
         .id("sankey-flow-view")
         .relative()
@@ -936,155 +930,7 @@ pub fn render_sankey_view<V: 'static>(
         .overflow_hidden()
         .flex()
         .flex_col()
-        // Quiet top controls: Breadcrumbs (when zoomed) + Overview / Expand all + Zoom − / 100% / +
-        .child(
-            div()
-                .flex_shrink_0()
-                .pb_1()
-                .flex()
-                .items_center()
-                .justify_between()
-                .gap_2()
-                .child(if let Some(zr) = zoom_root {
-                    let on_back = on_zoom.clone();
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(6.0))
-                        .text_xs()
-                        .child(
-                            div()
-                                .id("sk-crumb-root")
-                                .px(px(6.0))
-                                .py(px(2.0))
-                                .rounded(px(5.0))
-                                .hover(|s| {
-                                    s.bg(theme::row_hover()).text_color(theme::text_primary())
-                                })
-                                .cursor_pointer()
-                                .text_color(theme::text_muted())
-                                .on_click(cx.listener(move |this, _, window, cx| {
-                                    on_back(None, this, window, cx);
-                                }))
-                                .child("← All roles"),
-                        )
-                        .child(div().text_color(theme::text_muted()).child("›"))
-                        .child(
-                            div()
-                                .font_weight(FontWeight::MEDIUM)
-                                .text_color(zr.color())
-                                .child(zr.label()),
-                        )
-                        .into_any_element()
-                } else {
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap_1()
-                        .child(
-                            div()
-                                .id("sk-mode-overview")
-                                .px_2()
-                                .py(px(2.0))
-                                .rounded(px(5.0))
-                                .when(!expand_all, |d| d.bg(theme::surface_subtle()))
-                                .hover(|s| s.bg(theme::row_hover()))
-                                .cursor_pointer()
-                                .text_xs()
-                                .text_color(if !expand_all {
-                                    theme::text_primary()
-                                } else {
-                                    theme::text_muted()
-                                })
-                                .on_click(cx.listener(move |this, _, window, cx| {
-                                    on_exp_ov(false, this, window, cx);
-                                }))
-                                .child("Overview"),
-                        )
-                        .child(
-                            div()
-                                .id("sk-mode-expand")
-                                .px_2()
-                                .py(px(2.0))
-                                .rounded(px(5.0))
-                                .when(expand_all, |d| d.bg(theme::surface_subtle()))
-                                .hover(|s| s.bg(theme::row_hover()))
-                                .cursor_pointer()
-                                .text_xs()
-                                .text_color(if expand_all {
-                                    theme::text_primary()
-                                } else {
-                                    theme::text_muted()
-                                })
-                                .on_click(cx.listener(move |this, _, window, cx| {
-                                    on_exp_full(true, this, window, cx);
-                                }))
-                                .child("Expand all"),
-                        )
-                        .into_any_element()
-                })
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(2.0))
-                        .text_xs()
-                        .text_color(theme::text_muted())
-                        .child(
-                            div()
-                                .id("sk-zoom-out")
-                                .w(px(22.0))
-                                .h(px(22.0))
-                                .rounded(px(5.0))
-                                .hover(|s| {
-                                    s.bg(theme::row_hover()).text_color(theme::text_primary())
-                                })
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .cursor_pointer()
-                                .on_click(cx.listener(move |this, _, window, cx| {
-                                    on_sc_out((effective_scale - 0.15).max(0.75), this, window, cx);
-                                }))
-                                .child("−"),
-                        )
-                        .child(
-                            div()
-                                .id("sk-zoom-reset")
-                                .px(px(5.0))
-                                .py(px(2.0))
-                                .rounded(px(5.0))
-                                .hover(|s| {
-                                    s.bg(theme::row_hover()).text_color(theme::text_primary())
-                                })
-                                .cursor_pointer()
-                                .text_size(px(11.0))
-                                .on_click(cx.listener(move |this, _, window, cx| {
-                                    on_sc_reset(1.0, this, window, cx);
-                                }))
-                                .child(format!("{scale_pct}%")),
-                        )
-                        .child(
-                            div()
-                                .id("sk-zoom-in")
-                                .w(px(22.0))
-                                .h(px(22.0))
-                                .rounded(px(5.0))
-                                .hover(|s| {
-                                    s.bg(theme::row_hover()).text_color(theme::text_primary())
-                                })
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .cursor_pointer()
-                                .on_click(cx.listener(move |this, _, window, cx| {
-                                    on_sc_in((effective_scale + 0.15).min(1.45), this, window, cx);
-                                }))
-                                .child("+"),
-                        ),
-                ),
-        )
-        // Scrollable canvas wrapper so zoomed-in (>100%) diagrams pan cleanly
+        // Scrollable canvas wrapper so zoomed-in (>100%) diagrams pan cleanly (controls live inline in the board/flow toolbar!)
         .child(
             div()
                 .id("sankey-canvas-scroll")
@@ -1099,154 +945,223 @@ pub fn render_sankey_view<V: 'static>(
         // Floating scrollable drill-down popover (opens ONLY on leaf click — zero ambiguity!)
         .when_some(selected, |d, active_bucket| {
             let on_close = on_select.clone();
+            let on_focus = on_focus_filter.clone();
+            let total_in_bucket = drill_cards.len();
+            let fq = filter_query.trim().to_ascii_lowercase();
+            let filtered_cards: Vec<RoleCard> = if fq.is_empty() {
+                drill_cards
+            } else {
+                drill_cards
+                    .into_iter()
+                    .filter(|c| c.search_blob.contains(&fq))
+                    .collect()
+            };
+            let matched_count = filtered_cards.len();
             let pct = if !matches!(active_bucket, SankeyBucket::Total | SankeyBucket::Saved) {
-                Some(((drill_cards.len() as f32 / denom as f32) * 100.0).round() as usize)
+                Some(((total_in_bucket as f32 / denom as f32) * 100.0).round() as usize)
             } else {
                 None
             };
-            let card_h = (58.0 + (drill_cards.len().clamp(1, 6) as f32) * 52.0).min(368.0);
-            let card =
-                div()
-                    .id("sankey-drill-popover")
-                    .occlude()
-                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                        cx.stop_propagation();
-                    })
-                    .w(px(360.0))
-                    .h(px(card_h))
-                    .rounded(px(12.0))
-                    .bg(theme::popover_glass())
-                    .border_1()
-                    .border_color(theme::hairline_strong())
-                    .shadow_lg()
-                    .overflow_hidden()
-                    .flex()
-                    .flex_col()
-                    .child(
-                        div()
-                            .flex_shrink_0()
-                            .px_4()
-                            .py_3()
-                            .border_b_1()
-                            .border_color(theme::hairline())
-                            .flex()
-                            .items_center()
-                            .justify_between()
-                            .gap_2()
-                            .child(
+            let count_meta = if !fq.is_empty() {
+                format!("{matched_count} / {total_in_bucket}")
+            } else {
+                match pct {
+                    Some(p) => format!("{total_in_bucket} · {p}%"),
+                    None => total_in_bucket.to_string(),
+                }
+            };
+            let card_h = (58.0 + (matched_count.clamp(1, 6) as f32) * 52.0).min(368.0);
+            let placeholder = format!("Filter {}…", active_bucket.label());
+            let typed_text = filter_query.to_owned();
+            let card = div()
+                .id("sankey-drill-popover")
+                .occlude()
+                .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                    cx.stop_propagation();
+                })
+                .w(px(360.0))
+                .h(px(card_h))
+                .rounded(theme::r_lg())
+                .bg(theme::popover_glass())
+                .border_1()
+                .border_color(theme::hairline_strong())
+                .shadow_lg()
+                .overflow_hidden()
+                .flex()
+                .flex_col()
+                .child(
+                    div()
+                        .flex_shrink_0()
+                        .px_4()
+                        .py_3()
+                        .border_b_1()
+                        .border_color(theme::hairline())
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .gap_2()
+                        .child(
+                            div()
+                                .id("sk-drill-filter")
+                                .flex_1()
+                                .min_w_0()
+                                .overflow_hidden()
+                                .cursor_text()
+                                .flex()
+                                .items_center()
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    on_focus(this, window, cx);
+                                }))
+                                .child(if typed_text.is_empty() {
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .text_xs()
+                                        .when(filter_active, |row| {
+                                            row.child(
+                                                div()
+                                                    .w(px(1.5))
+                                                    .h(px(13.0))
+                                                    .mr(px(2.0))
+                                                    .bg(theme::text_primary()),
+                                            )
+                                        })
+                                        .child(
+                                            div()
+                                                .text_color(theme::text_muted())
+                                                .child(placeholder),
+                                        )
+                                } else {
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .text_xs()
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .text_color(theme::text_primary())
+                                        .child(typed_text)
+                                        .when(filter_active, |row| {
+                                            row.child(
+                                                div()
+                                                    .w(px(1.5))
+                                                    .h(px(13.0))
+                                                    .ml(px(1.5))
+                                                    .bg(theme::text_primary()),
+                                            )
+                                        })
+                                }),
+                        )
+                        .child(
+                            div()
+                                .flex_shrink_0()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .child(
+                                    div()
+                                        .text_size(px(11.0))
+                                        .text_color(theme::text_muted())
+                                        .child(count_meta),
+                                )
+                                .child(
+                                    div()
+                                        .id("sk-drill-close")
+                                        .px(px(6.0))
+                                        .py(px(2.0))
+                                        .rounded(theme::r_xs())
+                                        .hover(|s| {
+                                            s.bg(theme::row_hover())
+                                                .text_color(theme::text_primary())
+                                        })
+                                        .cursor_pointer()
+                                        .text_xs()
+                                        .text_color(theme::text_muted())
+                                        .on_click(cx.listener(move |this, _, window, cx| {
+                                            on_close(None, this, window, cx);
+                                        }))
+                                        .child("✕"),
+                                ),
+                        ),
+                )
+                .child(
+                    div()
+                        .id("sankey-drill-scroll")
+                        .flex_1()
+                        .min_h_0()
+                        .w_full()
+                        .overflow_y_scroll()
+                        .p_2()
+                        .flex()
+                        .flex_col()
+                        .gap(px(2.0))
+                        .when(filtered_cards.is_empty(), |col| {
+                            col.child(
                                 div()
-                                    .flex()
-                                    .items_center()
-                                    .gap_2()
-                                    .child(
-                                        div()
-                                            .w(px(7.0))
-                                            .h(px(7.0))
-                                            .rounded(px(99.0))
-                                            .bg(active_bucket.color()),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_xs()
-                                            .font_weight(FontWeight::SEMIBOLD)
-                                            .text_color(theme::text_primary())
-                                            .child(active_bucket.label()),
-                                    )
-                                    .child(div().text_xs().text_color(theme::text_muted()).child(
-                                        match pct {
-                                            Some(p) => format!("{} · {p}%", drill_cards.len()),
-                                            None => drill_cards.len().to_string(),
-                                        },
-                                    )),
-                            )
-                            .child(
-                                div()
-                                    .id("sk-drill-close")
-                                    .px(px(6.0))
-                                    .py(px(2.0))
-                                    .rounded(px(5.0))
-                                    .hover(|s| {
-                                        s.bg(theme::row_hover()).text_color(theme::text_primary())
-                                    })
-                                    .cursor_pointer()
+                                    .px_3()
+                                    .py_4()
                                     .text_xs()
                                     .text_color(theme::text_muted())
+                                    .child("No matching roles"),
+                            )
+                        })
+                        .children(filtered_cards.into_iter().take(80).enumerate().map(
+                            |(i, role)| {
+                                let open_cb = on_open_role.clone();
+                                let role_click = role.clone();
+                                div()
+                                    .id(SharedString::from(format!("sk-pop-role-{i}")))
+                                    .flex_shrink_0()
+                                    .w_full()
+                                    .px_3()
+                                    .py_2()
+                                    .rounded(theme::r_sm())
+                                    .hover(|s| s.bg(theme::row_hover()))
+                                    .cursor_pointer()
+                                    .overflow_hidden()
+                                    .flex()
+                                    .flex_col()
+                                    .gap(px(2.0))
                                     .on_click(cx.listener(move |this, _, window, cx| {
-                                        on_close(None, this, window, cx);
+                                        open_cb(role_click.clone(), this, window, cx);
                                     }))
-                                    .child("✕"),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .id("sankey-drill-scroll")
-                            .flex_1()
-                            .min_h_0()
-                            .w_full()
-                            .overflow_y_scroll()
-                            .p_2()
-                            .flex()
-                            .flex_col()
-                            .gap(px(2.0))
-                            .children(drill_cards.into_iter().take(80).enumerate().map(
-                                |(i, role)| {
-                                    let open_cb = on_open_role.clone();
-                                    let role_click = role.clone();
-                                    div()
-                                        .id(SharedString::from(format!("sk-pop-role-{i}")))
-                                        .flex_shrink_0()
-                                        .w_full()
-                                        .px_3()
-                                        .py_2()
-                                        .rounded(px(7.0))
-                                        .hover(|s| s.bg(theme::row_hover()))
-                                        .cursor_pointer()
-                                        .overflow_hidden()
-                                        .flex()
-                                        .flex_col()
-                                        .gap(px(2.0))
-                                        .on_click(cx.listener(move |this, _, window, cx| {
-                                            open_cb(role_click.clone(), this, window, cx);
-                                        }))
-                                        .child(
-                                            div()
-                                                .flex()
-                                                .items_center()
-                                                .justify_between()
-                                                .gap_2()
-                                                .child(
-                                                    div()
-                                                        .flex_1()
-                                                        .min_w_0()
-                                                        .overflow_hidden()
-                                                        .text_xs()
-                                                        .font_weight(FontWeight::MEDIUM)
-                                                        .text_color(theme::text_primary())
-                                                        .child(role.company.clone()),
-                                                )
-                                                .child(
-                                                    div()
-                                                        .flex_shrink_0()
-                                                        .text_size(px(10.5))
-                                                        .text_color(theme::text_muted())
-                                                        .child(
-                                                            role.note_line.clone().unwrap_or_else(
-                                                                || role.checked.clone(),
-                                                            ),
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .items_center()
+                                            .justify_between()
+                                            .gap_2()
+                                            .child(
+                                                div()
+                                                    .flex_1()
+                                                    .min_w_0()
+                                                    .overflow_hidden()
+                                                    .text_xs()
+                                                    .font_weight(FontWeight::MEDIUM)
+                                                    .text_color(theme::text_primary())
+                                                    .child(role.company.clone()),
+                                            )
+                                            .child(
+                                                div()
+                                                    .flex_shrink_0()
+                                                    .text_size(px(10.5))
+                                                    .text_color(theme::text_muted())
+                                                    .child(
+                                                        role.note_line.clone().unwrap_or_else(
+                                                            || role.checked.clone(),
                                                         ),
-                                                ),
-                                        )
-                                        .child(
-                                            div()
-                                                .min_w_0()
-                                                .overflow_hidden()
-                                                .text_size(px(11.0))
-                                                .text_color(theme::text_muted())
-                                                .child(role.title.clone()),
-                                        )
-                                },
-                            )),
-                    );
+                                                    ),
+                                            ),
+                                    )
+                                    .child(
+                                        div()
+                                            .min_w_0()
+                                            .overflow_hidden()
+                                            .text_size(px(11.0))
+                                            .text_color(theme::text_muted())
+                                            .child(role.title.clone()),
+                                    )
+                            },
+                        )),
+                );
 
             let pop = if reduce_motion {
                 card.into_any_element()

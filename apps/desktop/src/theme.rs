@@ -1,6 +1,21 @@
 //! Zeron Dark-inspired high-contrast frosted palette for GPUI.
 //! Deep 95%+ charcoal glass keeps subtle macOS vibrancy without text bleed-through.
-use gpui::{Rgba, rgba};
+use gpui::{Pixels, Rgba, px, rgba};
+
+/// Standardized architectural corner radius scale (tighter, more sculpted than generic 6/8/12/16px defaults).
+#[allow(dead_code)]
+pub fn r_xs() -> Pixels {
+    px(3.5)
+}
+pub fn r_sm() -> Pixels {
+    px(5.0)
+}
+pub fn r_md() -> Pixels {
+    px(8.0)
+}
+pub fn r_lg() -> Pixels {
+    px(11.0)
+}
 
 pub fn window_glass() -> Rgba {
     rgba(0x0b0b0eff)
