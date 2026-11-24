@@ -145,6 +145,14 @@ impl Engine {
         {
             return Err(Error::new("invalid_arguments", "Invalid schedule state"));
         }
+        if let Some(outcome) = merged.get("outcome").and_then(Value::as_str)
+            && !domain::OUTCOMES.contains(&outcome)
+        {
+            return Err(Error::new(
+                "invalid_arguments",
+                "Invalid outcome; use rejected, withdrawn, expired, filled, accepted, or other",
+            ));
+        }
         if let Some(start) = merged.get("scheduled_start").and_then(Value::as_str)
             && (merged["schedule_state"] != "booked"
                 || domain::iso_datetime(start).map_or(true, |(_, zone)| zone.is_none()))

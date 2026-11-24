@@ -194,6 +194,22 @@ pub fn discover_mcp_servers() -> Vec<DiscoveredMcpServer> {
         &mut out,
         &mut seen,
     );
+    read_json_mcp_names(
+        &home.join(".pi/agent/mcp.json"),
+        "Pi",
+        McpScope::AgentOnly("pi"),
+        &mut out,
+        &mut seen,
+    );
+    read_hermes_yaml_mcp_names(&home.join(".hermes/config.yaml"), &mut out, &mut seen);
+    read_hermes_yaml_mcp_names(
+        &home
+            .join(".hermes/profiles")
+            .join(hermes_profile())
+            .join("config.yaml"),
+        &mut out,
+        &mut seen,
+    );
     if let Ok(toml_txt) = std::fs::read_to_string(home.join(".codex/config.toml")) {
         for line in toml_txt.lines() {
             let t = line.trim();
@@ -215,6 +231,46 @@ pub fn discover_mcp_servers() -> Vec<DiscoveredMcpServer> {
         }
     }
     out
+}
+
+fn read_hermes_yaml_mcp_names(
+    path: &Path,
+    out: &mut Vec<DiscoveredMcpServer>,
+    seen: &mut std::collections::HashSet<(String, &'static str)>,
+) {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return;
+    };
+    let mut in_mcp = false;
+    let mut child_indent: Option<usize> = None;
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let indent = line.len() - line.trim_start().len();
+        if indent == 0 {
+            in_mcp = trimmed == "mcp_servers:" || trimmed.starts_with("mcp_servers:");
+            child_indent = None;
+            continue;
+        }
+        if !in_mcp {
+            continue;
+        }
+        let target = *child_indent.get_or_insert(indent);
+        if indent == target
+            && let Some((raw_key, _)) = trimmed.split_once(':')
+        {
+            let name = raw_key.trim().trim_matches('"').trim_matches('\'');
+            if !name.is_empty() && seen.insert((name.to_owned(), "hermes")) {
+                out.push(DiscoveredMcpServer {
+                    name: name.to_owned(),
+                    source: "Hermes".into(),
+                    scope: McpScope::AgentOnly("hermes"),
+                });
+            }
+        }
+    }
 }
 
 fn read_json_mcp_names(
@@ -320,6 +376,24 @@ impl AgentRuntime {
             Self::Pi { .. } => "Pi",
             Self::Custom { name, .. } => name.as_str(),
             Self::Unconfigured => "No agent",
+        }
+    }
+
+    /// Exact command or config hint to connect this runtime to the Job Harness MCP server.
+    pub fn mcp_connect_command(&self, root: Option<&Path>) -> String {
+        let root_flag = root
+            .map(|r| format!(" --root {}", r.display()))
+            .unwrap_or_default();
+        match self {
+            Self::ClaudeCode { .. } => {
+                format!("claude mcp add job-harness -- jh{root_flag} mcp --tool-profile focused")
+            }
+            Self::Codex { .. } => {
+                format!("codex mcp add job-harness -- jh{root_flag} mcp --tool-profile focused")
+            }
+            Self::Hermes { .. } => format!("jh{root_flag} connect mcp --client hermes"),
+            Self::Pi { .. } => format!("jh{root_flag} connect mcp"),
+            Self::Custom { .. } | Self::Unconfigured => format!("jh{root_flag} connect mcp"),
         }
     }
 

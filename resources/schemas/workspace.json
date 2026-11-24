@@ -109,6 +109,26 @@
           "type": "string",
           "minLength": 1,
           "maxLength": 16
+        },
+        "notice_period": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 200
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "avoid_list": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          },
+          "maxItems": 50
         }
       },
       "required": [],
@@ -124,9 +144,15 @@
           "maxLength": 32
         },
         "tone": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 2000
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 2000
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "anti_patterns": {
           "type": "array",
@@ -137,11 +163,21 @@
           },
           "maxItems": 50
         },
+        "application_email": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 320
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "sender_email": {
           "anyOf": [
             {
               "type": "string",
-              "minLength": 1,
               "maxLength": 320
             },
             {
@@ -237,8 +273,8 @@
         },
         "applied_ghost_days": {
           "type": "integer",
-          "minimum": 7,
-          "maximum": 180
+          "minimum": 1,
+          "maximum": 365
         },
         "stage_followup_days": {
           "type": "object",

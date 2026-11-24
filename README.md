@@ -14,8 +14,9 @@
   <p>
     <a href="#quick-start">Quick Start</a> ·
     <a href="#why-job-harness">Why</a> ·
-    <a href="#how-it-works">Architecture</a> ·
-    <a href="#permissions--safety">Safety</a> ·
+    <a href="#job-harness-vs-the-alternatives">Compare</a> ·
+    <a href="#how-it-works">How It Works</a> ·
+    <a href="#delegation--safety">Safety</a> ·
     <a href="#documentation">Docs</a>
   </p>
 </div>
@@ -53,6 +54,23 @@ AI agents are great at researching companies, tailoring CVs, and drafting recrui
   <img src="docs/assets/demo.gif" alt="Animated walkthrough of Job Harness desktop workbench" width="100%">
 </p>
 </details>
+
+---
+
+## Job Harness vs. the alternatives
+
+Most open-source job bots optimize for blasting applications. Serious job searches break *after* you click submit — duplicate outreach, fabricated CV claims, forgotten recruiter threads, and zero interview prep.
+
+| Capability | Job Harness | Auto-apply bots *(ApplyPilot, AIHawk)* | Spreadsheets / Notion |
+|---|---|---|---|
+| **Core job** | End-to-end search memory, safety rails, inbox triage & interview prep | High-volume scraping & portal form-filling | Manual row tracking |
+| **Agent & model lock-in** | **Any agent via MCP / CLI** *(Hermes, Claude Code, Codex, Pi, Cursor, local models)* | Tied to one Python bot loop & provider stack | None |
+| **CV integrity** | **Verified master + child tracks**, SHA-256 frozen per submission — never invents facts | Per-job LLM rewrites (risk of drift or unverified metrics) | Manual copy-paste |
+| **Double-apply & email safety** | **Hard transactional lock** — blocks retries on unconfirmed submits, checks live Sent mail | Best-effort local logs | Human memory |
+| **Interview prep & debriefs** | **2-layer company + round briefs**, pre-call reminders, CARL story bank & transcripts | Not covered | Unstructured docs |
+| **Funnel truth** | Native Kanban + **Sankey flow** separating Rejected, Withdrawn & Ghosted | Raw apply counter | Manual formulas |
+| **Privacy & secrets** | **100% local Markdown + SQLite**, 1-use self-destructing secret handoff | Plaintext YAML / env configs | Cloud-hosted |
+| **License** | **MIT** | AGPL-3.0 / MIT | Proprietary |
 
 ---
 
@@ -101,11 +119,12 @@ jh --root "$HOME/Career/workspace" connect mcp
 
 *(Windows PowerShell: `irm https://raw.githubusercontent.com/machineyearningengineer/job-harness/main/scripts/get.ps1 | iex`)*
 
-### 3. Try the Desktop App with synthetic demo data
+### 3. Open the Desktop App
+
+Download the latest macOS app from [GitHub Releases](https://github.com/machineyearningengineer/job-harness/releases), or launch it locally with synthetic demo data in one command:
 
 ```sh
-python3 scripts/seed_demo.py /tmp/job-harness-demo
-cargo run --release --manifest-path apps/desktop/Cargo.toml -- --root /tmp/job-harness-demo
+make desktop-demo
 ```
 
 ---

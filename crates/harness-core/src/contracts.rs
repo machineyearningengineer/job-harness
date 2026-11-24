@@ -98,12 +98,19 @@ fn validate_at(schema: &Value, value: &Value, path: &str) -> Result<()> {
                 }
             }
             let properties = schema.get("properties").and_then(Value::as_object);
-            if schema.get("additionalProperties") == Some(&Value::Bool(false))
-                && object
+            if schema.get("additionalProperties") == Some(&Value::Bool(false)) {
+                let mut unknown: Vec<&str> = object
                     .keys()
-                    .any(|name| properties.is_none_or(|p| !p.contains_key(name)))
-            {
-                return Err(invalid(path, "unknown fields"));
+                    .filter(|name| properties.is_none_or(|p| !p.contains_key(*name)))
+                    .map(String::as_str)
+                    .collect();
+                if !unknown.is_empty() {
+                    unknown.sort_unstable();
+                    return Err(invalid(
+                        path,
+                        &format!("unknown fields: {}", unknown.join(", ")),
+                    ));
+                }
             }
             if let Some(properties) = properties {
                 for (name, value) in object {

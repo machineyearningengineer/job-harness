@@ -20,8 +20,18 @@ pub const SCHEDULES: &[&str] = &[
     "awaiting-outcome",
     "handled-unconfirmed",
 ];
+pub const OUTCOMES: &[&str] = &[
+    "rejected",
+    "withdrawn",
+    "expired",
+    "filled",
+    "accepted",
+    "outcome_unknown",
+    "other",
+];
 pub const TRACKING_KEYS: &[&str] = &[
     "stage",
+    "outcome",
     "checked",
     "next_action",
     "status_detail",
@@ -34,6 +44,7 @@ pub const TRACKING_KEYS: &[&str] = &[
     "record_evidence",
     "evidence",
     "company",
+    "company_id",
     "posting_id",
     "vacancy_url",
     "source",

@@ -1,5 +1,5 @@
 CARGO ?= cargo
-.PHONY: check test check-parity check-package check-models check-desktop assets build demo
+.PHONY: check test check-parity check-package check-models check-desktop assets build demo desktop-demo
 
 test:
 	$(CARGO) test --workspace --all-targets --locked
@@ -40,3 +40,7 @@ assets:
 demo:
 	$(CARGO) build --locked
 	JOB_HARNESS_BINARY="$$(pwd)/target/debug/job-harness" ./scripts/demo.sh
+
+desktop-demo:
+	python3 scripts/seed_demo.py /tmp/job-harness-demo
+	$(CARGO) run --release --manifest-path apps/desktop/Cargo.toml -- --root /tmp/job-harness-demo

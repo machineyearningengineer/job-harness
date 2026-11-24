@@ -2,7 +2,7 @@
 use crate::Result;
 pub use job_harness_domain::identity::{casefold, company_key, normal_url};
 pub use job_harness_domain::time::iso_datetime;
-pub use job_harness_domain::tracking::{SCHEDULES, STAGES, TRACKING_KEYS};
+pub use job_harness_domain::tracking::{OUTCOMES, SCHEDULES, STAGES, TRACKING_KEYS};
 pub use job_harness_domain::{SubmissionLifecycle, SubmissionStatus as SubmissionState};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};

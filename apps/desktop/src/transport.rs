@@ -513,6 +513,9 @@ impl WorkspaceClient {
                 {
                     Some("rejected" | "rejection") => Some("Rejected".into()),
                     Some("withdrawn" | "declined") => Some("Withdrawn".into()),
+                    Some("expired") => Some("Expired".into()),
+                    Some("filled") => Some("Role filled".into()),
+                    Some("accepted") => Some("Accepted".into()),
                     _ => None,
                 }
             } else if stage == "technical" {

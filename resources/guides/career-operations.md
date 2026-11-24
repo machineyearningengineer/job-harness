@@ -69,6 +69,8 @@ Never put credentials, OTPs, cookies, private session tokens, transport headers 
     "record": "applications/<slug>.md",
     "tracking": {
       "stage": "closed",
+      "outcome": "expired",
+      "company_id": "<company-slug>",
       "checked": "YYYY-MM-DD",
       "next_action": "none"
     },
@@ -77,6 +79,7 @@ Never put credentials, OTPs, cookies, private session tokens, transport headers 
     "idempotency_key": "close-<slug>-YYYY-MM-DD"
   }
   ```
+- **Canonical outcome & company linking:** On closed roles, set explicit `tracking.outcome` (`rejected` | `withdrawn` | `expired` | `filled` | `accepted` | `other`) so funnel analytics never guess from prose. Set `tracking.company_id` (lowercase company slug) alongside `company` and `brief` so multi-role company history links cleanly.
 - **Delete/remove means archive:** removing a role marks it `closed` while preserving cooldown notes, receipts, and audit history. Never `rm` canonical evidence files.
 
 ## Scannable writing, emails & avoid-list rules

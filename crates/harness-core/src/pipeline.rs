@@ -177,6 +177,12 @@ pub fn validate_tracking(root: &Path, name: &str, data: &Value) -> Result<()> {
     {
         return Err(bad(name, "invalid schedule state"));
     }
+    if data["outcome"]
+        .as_str()
+        .is_some_and(|s| !s.is_empty() && !crate::domain::OUTCOMES.contains(&s))
+    {
+        return Err(bad(name, "invalid tracking outcome"));
+    }
     if let Some(time) = data["scheduled_start"].as_str().filter(|s| !s.is_empty())
         && (!crate::domain::iso_datetime(time).is_ok_and(|(_, offset)| offset.is_some())
             || data["schedule_state"] != "booked")

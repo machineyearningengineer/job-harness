@@ -2296,6 +2296,25 @@
               "type": "string",
               "minLength": 1,
               "maxLength": 20000
+            },
+            "outcome": {
+              "type": "string",
+              "enum": [
+                "rejected",
+                "withdrawn",
+                "expired",
+                "filled",
+                "accepted",
+                "outcome_unknown",
+                "other"
+              ],
+              "minLength": 1,
+              "maxLength": 64
+            },
+            "company_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
             }
           },
           "required": [],
@@ -2559,6 +2578,25 @@
               "type": "string",
               "minLength": 1,
               "maxLength": 20000
+            },
+            "outcome": {
+              "type": "string",
+              "enum": [
+                "rejected",
+                "withdrawn",
+                "expired",
+                "filled",
+                "accepted",
+                "outcome_unknown",
+                "other"
+              ],
+              "minLength": 1,
+              "maxLength": 64
+            },
+            "company_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
             }
           },
           "required": [],

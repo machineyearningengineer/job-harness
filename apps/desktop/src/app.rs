@@ -224,6 +224,10 @@ pub struct JobHarnessApp {
     resumed_session_label: Option<String>,
     show_connect_help: bool,
     show_mcp_servers: bool,
+    tools_subview: bool,
+    tools_subview_epoch: u64,
+    desktop_notifications: bool,
+    notified_keys: HashSet<String>,
     setup_step: usize,
     tour_step: usize,
     copied_flash: Option<(SharedString, u64)>,
@@ -399,6 +403,10 @@ impl JobHarnessApp {
             resumed_session_label: None,
             show_connect_help: false,
             show_mcp_servers: false,
+            tools_subview: false,
+            tools_subview_epoch: 1,
+            desktop_notifications: saved.desktop_notifications,
+            notified_keys: HashSet::new(),
             setup_step: 0,
             tour_step: 0,
             copied_flash: None,
@@ -689,6 +697,7 @@ impl JobHarnessApp {
         collapsed.sort();
         UiState {
             reduce_motion: self.reduce_motion,
+            desktop_notifications: self.desktop_notifications,
             show_archive: self.show_archive,
             only_attention: self.only_attention,
             interviews_expanded: self.interviews_expanded,
@@ -1005,6 +1014,35 @@ impl JobHarnessApp {
         .detach();
     }
 
+    fn send_desktop_notification(&self, title: &str, subtitle: &str, body: &str, force: bool) {
+        if !force && !self.desktop_notifications {
+            return;
+        }
+        #[cfg(target_os = "macos")]
+        {
+            let esc = |s: &str| {
+                s.replace('\\', "\\\\")
+                    .replace('"', "\\\"")
+                    .replace(['\n', '\r'], " ")
+            };
+            let script = format!(
+                "display notification \"{}\" with title \"{}\" subtitle \"{}\"",
+                esc(&truncate_end(body, 140)),
+                esc(title),
+                esc(subtitle),
+            );
+            std::thread::spawn(move || {
+                let _ = std::process::Command::new("osascript")
+                    .args(["-e", &script])
+                    .output();
+            });
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = (title, subtitle, body);
+        }
+    }
+
     /// Loads workspace snapshot strictly on the background executor (zero UI-thread stalls).
     /// Background/watcher reloads stay silent (`show_pill = false`); explicit user actions show the pill.
     fn refresh_snapshot_async(&mut self, show_pill: bool, cx: &mut Context<Self>) {
@@ -1034,6 +1072,30 @@ impl JobHarnessApp {
                                 .find(|c| c.record_path == sel.record_path)
                         {
                             app.selected_role = Some(updated.clone());
+                        }
+                        // Standardized native macOS desktop notification for upcoming interviews within prep lead time
+                        let lead_mins = snap.permissions.brief_lead_time_minutes.max(5);
+                        let now = chrono::Utc::now();
+                        for card in &snap.active_cards {
+                            if let Some(start) = card.scheduled_start.as_deref()
+                                && let Ok(dt) = chrono::DateTime::parse_from_rfc3339(start)
+                            {
+                                let mins = dt
+                                    .with_timezone(&chrono::Utc)
+                                    .signed_duration_since(now)
+                                    .num_minutes();
+                                if (0..=lead_mins).contains(&mins) {
+                                    let key = format!("interview:{}:{}", card.record_path, start);
+                                    if app.notified_keys.insert(key) {
+                                        app.send_desktop_notification(
+                                            "Job Harness",
+                                            &format!("Interview in {mins} min"),
+                                            &format!("{} — {}", card.company, card.title),
+                                            false,
+                                        );
+                                    }
+                                }
+                            }
                         }
                         app.snapshot = snap;
                         if show_pill {
@@ -1604,9 +1666,13 @@ impl JobHarnessApp {
     fn validate_inline_config(key: &'static str, raw: &str) -> Result<(), String> {
         let t = raw.trim();
         match key {
-            "prep_reminder_minutes" | "applied_ghost_days" => match t.parse::<u64>() {
-                Ok(n) if n >= 1 => Ok(()),
-                _ => Err("Enter a whole number ≥ 1".into()),
+            "prep_reminder_minutes" => match t.parse::<u64>() {
+                Ok(n) if (5..=1440).contains(&n) => Ok(()),
+                _ => Err("Enter minutes between 5 and 1440".into()),
+            },
+            "applied_ghost_days" => match t.parse::<u64>() {
+                Ok(n) if (1..=365).contains(&n) => Ok(()),
+                _ => Err("Enter days between 1 and 365".into()),
             },
             "min_base_salary" | "target_base_salary" => {
                 let digits: String = t
@@ -1734,13 +1800,21 @@ impl JobHarnessApp {
                             if !cfg["communication"].is_object() {
                                 cfg["communication"] = json!({});
                             }
-                            cfg["communication"]["application_email"] = json!(raw);
+                            cfg["communication"]["application_email"] = if raw.is_empty() {
+                                serde_json::Value::Null
+                            } else {
+                                json!(raw)
+                            };
                         }
                         "sender_email" => {
                             if !cfg["communication"].is_object() {
                                 cfg["communication"] = json!({});
                             }
-                            cfg["communication"]["sender_email"] = json!(raw);
+                            cfg["communication"]["sender_email"] = if raw.is_empty() {
+                                serde_json::Value::Null
+                            } else {
+                                json!(raw)
+                            };
                         }
                         "timezone" => {
                             cfg["timezone"] = json!(raw);
@@ -1769,7 +1843,11 @@ impl JobHarnessApp {
                             if !cfg["discovery"].is_object() {
                                 cfg["discovery"] = json!({});
                             }
-                            cfg["discovery"]["notice_period"] = json!(raw);
+                            cfg["discovery"]["notice_period"] = if raw.is_empty() {
+                                serde_json::Value::Null
+                            } else {
+                                json!(raw)
+                            };
                         }
                         "target_roles" => {
                             cfg["target_roles"] = json!(split_csv(&raw));
@@ -1784,7 +1862,11 @@ impl JobHarnessApp {
                             if !cfg["communication"].is_object() {
                                 cfg["communication"] = json!({});
                             }
-                            cfg["communication"]["tone"] = json!(raw);
+                            cfg["communication"]["tone"] = if raw.is_empty() {
+                                serde_json::Value::Null
+                            } else {
+                                json!(raw)
+                            };
                         }
                         _ => {}
                     })
@@ -2290,6 +2372,18 @@ impl JobHarnessApp {
         self.armed_secrets = armed;
         self.known_ready_secrets = new_ready_map;
         if let Some(req) = newly_pending {
+            let key = format!("secret:{}", req.id);
+            if self.notified_keys.insert(key) {
+                self.send_desktop_notification(
+                    "Job Harness",
+                    "Secret requested",
+                    &format!(
+                        "{} — enter once in the app (auto-shreds after use)",
+                        req.label
+                    ),
+                    false,
+                );
+            }
             self.open_secret_modal(req, cx);
             return;
         }
@@ -2718,12 +2812,29 @@ impl JobHarnessApp {
                             .is_none_or(|m| m.revealed >= m.text.len());
                         let finished = done && fully_shown;
                         if finished {
+                            let mut notify_turn: Option<(&'static str, String)> = None;
                             if let Some(last) = app.chat_messages.last_mut()
                                 && !last.is_user
                             {
                                 if last.duration_ms.is_none() {
                                     last.duration_ms =
                                         Some(last.started_at.elapsed().as_millis() as u64);
+                                }
+                                let dur = last.duration_ms.unwrap_or(0);
+                                if last.is_error {
+                                    notify_turn = Some((
+                                        "Agent run failed",
+                                        truncate_end(last.text.trim(), 120),
+                                    ));
+                                } else if dur >= 15_000 {
+                                    let first_line = last
+                                        .text
+                                        .lines()
+                                        .find(|l| !l.trim().is_empty())
+                                        .unwrap_or("Completed agent run")
+                                        .trim();
+                                    notify_turn =
+                                        Some(("Agent run finished", truncate_end(first_line, 120)));
                                 }
                                 last.sent_label = chrono::Local::now().format("%H:%M").to_string();
                                 for st in &mut last.steps {
@@ -2732,6 +2843,9 @@ impl JobHarnessApp {
                                 if !last.text.is_empty() {
                                     last.steps_expanded = false;
                                 }
+                            }
+                            if let Some((sub, body)) = notify_turn {
+                                app.send_desktop_notification("Job Harness", sub, &body, false);
                             }
                             app.streaming = false;
                             app.stream_status.clear();
@@ -6992,6 +7106,67 @@ impl JobHarnessApp {
             .pt_2()
             .pb(px(56.0))
             .gap_2()
+            .when(
+                !self.loading
+                    && !self.snapshot.healthy
+                    && self.snapshot.total_records == 0
+                    && !self.snapshot.status_note.is_empty(),
+                |root_d| {
+                    let note = self.snapshot.status_note.clone();
+                    root_d.child(
+                        div()
+                            .w_full()
+                            .px_3()
+                            .py_2()
+                            .rounded(theme::r_md())
+                            .bg(theme::rose_wash())
+                            .border_1()
+                            .border_color(theme::rose_text())
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .gap_3()
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .flex()
+                                    .flex_col()
+                                    .gap(px(2.0))
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .font_weight(FontWeight::MEDIUM)
+                                            .text_color(theme::rose_text())
+                                            .child("Workspace sync failed"),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_size(px(11.0))
+                                            .text_color(theme::text_secondary())
+                                            .child(note),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .id("board-retry-sync")
+                                    .flex_shrink_0()
+                                    .px_2()
+                                    .py(px(4.0))
+                                    .rounded(theme::r_sm())
+                                    .bg(theme::surface_active())
+                                    .hover(|s| s.bg(theme::row_hover()))
+                                    .cursor_pointer()
+                                    .text_xs()
+                                    .text_color(theme::text_primary())
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.refresh_snapshot_async(true, cx);
+                                    }))
+                                    .child("Retry"),
+                            ),
+                    )
+                },
+            )
             // Single unified Board / Flow toolbar (fixed 28px height — zero wasted vertical space or layout jump!)
             .child(
                 div()
@@ -10498,6 +10673,72 @@ impl JobHarnessApp {
                                         .gap_2()
                                         .child(
                                             div()
+                                                .flex()
+                                                .items_center()
+                                                .gap_2()
+                                                .child(
+                                                    div()
+                                                        .text_xs()
+                                                        .text_color(theme::text_primary())
+                                                        .child("Desktop notifications"),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .id("test-desktop-notif")
+                                                        .px(px(6.0))
+                                                        .py(px(1.0))
+                                                        .rounded(theme::r_xs())
+                                                        .hover(|s| {
+                                                            s.bg(theme::row_hover())
+                                                                .text_color(theme::text_primary())
+                                                        })
+                                                        .cursor_pointer()
+                                                        .text_size(px(10.5))
+                                                        .text_color(theme::text_muted())
+                                                        .on_click(cx.listener(|this, _, _, cx| {
+                                                            this.send_desktop_notification(
+                                                                "Job Harness",
+                                                                "Notifications active",
+                                                                "Interviews, secret requests, and finished runs will alert you here.",
+                                                                true,
+                                                            );
+                                                            this.set_toast(
+                                                                "Sent test macOS notification",
+                                                                cx,
+                                                            );
+                                                        }))
+                                                        .child("Test"),
+                                                ),
+                                        )
+                                        .child(
+                                            div()
+                                                .id("toggle-desktop-notifications")
+                                                .cursor_pointer()
+                                                .on_click(cx.listener(|this, _, _, cx| {
+                                                    this.desktop_notifications =
+                                                        !this.desktop_notifications;
+                                                    let on = this.desktop_notifications;
+                                                    this.set_toast(
+                                                        if on {
+                                                            "macOS notifications enabled"
+                                                        } else {
+                                                            "macOS notifications muted"
+                                                        },
+                                                        cx,
+                                                    );
+                                                }))
+                                                .child(switch_pill(self.desktop_notifications)),
+                                        ),
+                                )
+                                .child(
+                                    div()
+                                        .py_1()
+                                        .flex()
+                                        .items_center()
+                                        .justify_between()
+                                        .gap_2()
+                                        .child(
+                                            div()
                                                 .text_xs()
                                                 .text_color(theme::text_primary())
                                                 .child("Reduce motion"),
@@ -10534,13 +10775,22 @@ impl JobHarnessApp {
                                 ))
                                 .child(kv_row("Storage", self.snapshot.status_note.clone())),
                         )
-                        // Section 4: Tools & connectors (placed below actionable settings; compact & actionable)
+                        // Section 4: Tools & connectors (with in-section sliding compartment for Career Ledger MCP setup)
                         .child({
                             let active_kind = self.runtime.kind();
                             let active_name = self.runtime.short_name().to_owned();
-                            let mcp_cmd = match self.client.target.local_root() {
+                            let local_root = self.client.target.local_root();
+                            let mcp_cmd = match local_root {
                                 Some(root) => format!("jh --root {} connect mcp", root.display()),
                                 None => "jh connect mcp".to_owned(),
+                            };
+                            let setup_prompt = match local_root {
+                                Some(root) => format!(
+                                    "Connect the Job Harness Career Ledger MCP server for `{}` using `jh --root {} connect mcp`, then verify with `bootstrap`.",
+                                    root.display(),
+                                    root.display()
+                                ),
+                                None => "Connect the Job Harness Career Ledger MCP server using `jh connect mcp`, then verify with `bootstrap`.".to_owned(),
                             };
                             let web_search_access = match evaluate_capability(
                                 &self.mcp_servers,
@@ -10608,96 +10858,359 @@ impl JobHarnessApp {
                                 .filter(|s| s.visible_to(active_kind))
                                 .collect();
                             let mcp_open = self.show_mcp_servers;
-                            div()
-                                .pt_3()
-                                .border_t_1()
-                                .border_color(theme::hairline())
-                                .flex()
-                                .flex_col()
-                                .gap_2()
-                                .child(
-                                    div()
-                                        .flex()
-                                        .items_center()
-                                        .justify_between()
-                                        .child(
-                                            div()
-                                                .text_xs()
-                                                .font_weight(FontWeight::MEDIUM)
-                                                .text_color(theme::text_primary())
-                                                .child("Tools & connectors"),
+                            let in_subview = self.tools_subview;
+                            let sub_epoch = self.tools_subview_epoch;
+                            let reduce_motion = self.reduce_motion;
+
+                            let section_body = if in_subview {
+                                let runtime_rows: Vec<(String, bool, String, String)> = self
+                                    .available_runtimes
+                                    .iter()
+                                    .map(|rt| {
+                                        let kind = rt.kind();
+                                        let connected = self.mcp_servers.iter().any(|s| {
+                                            let low = s.name.to_ascii_lowercase();
+                                            (low.contains("career")
+                                                || low.contains("job-harness")
+                                                || low.contains("job_harness"))
+                                                && s.visible_to(kind)
+                                        });
+                                        (
+                                            rt.short_name().to_owned(),
+                                            connected,
+                                            rt.mcp_connect_command(local_root),
+                                            format!("connect-rt-{kind}"),
                                         )
-                                        .child(
-                                            div()
-                                                .text_size(px(10.5))
-                                                .text_color(theme::text_muted())
-                                                .child(format!("for {active_name}")),
-                                        ),
-                                )
-                                .child(
-                                    div()
-                                        .flex()
-                                        .flex_col()
-                                        .gap(px(2.0))
-                                        // Career Ledger: 1-click copy MCP command
-                                        .child(
-                                            div()
-                                                .id("set-copy-mcp-cmd")
-                                                .px_2()
-                                                .py(px(5.0))
-                                                .mx(px(-8.0))
-                                                .rounded(theme::r_sm())
-                                                .hover(|s| s.bg(theme::row_hover()))
-                                                .cursor_pointer()
-                                                .flex()
-                                                .items_center()
-                                                .justify_between()
-                                                .gap_2()
-                                                .on_click(cx.listener(move |this, _, _, cx| {
-                                                    cx.write_to_clipboard(
-                                                        ClipboardItem::new_string(mcp_cmd.clone()),
-                                                    );
-                                                    this.flash_copied("set-copy-mcp-cmd", cx);
-                                                    this.set_toast(
-                                                        "Copied `jh connect mcp` command",
-                                                        cx,
-                                                    );
-                                                }))
-                                                .child(
+                                    })
+                                    .collect();
+                                let copied_cmd = self.is_copied_flash("sub-copy-mcp-cmd");
+                                let copied_prompt = self.is_copied_flash("sub-copy-agent-prompt");
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .gap_2()
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .items_center()
+                                            .justify_between()
+                                            .child(
+                                                div()
+                                                    .id("tools-subview-back")
+                                                    .px_1()
+                                                    .py(px(2.0))
+                                                    .mx(px(-4.0))
+                                                    .rounded(theme::r_xs())
+                                                    .hover(|s| s.bg(theme::row_hover()))
+                                                    .cursor_pointer()
+                                                    .flex()
+                                                    .items_center()
+                                                    .gap(px(5.0))
+                                                    .on_click(cx.listener(|this, _, _, cx| {
+                                                        this.tools_subview = false;
+                                                        this.tools_subview_epoch =
+                                                            this.tools_subview_epoch.wrapping_add(1);
+                                                        cx.notify();
+                                                    }))
+                                                    .child(
+                                                        div()
+                                                            .text_xs()
+                                                            .text_color(theme::text_muted())
+                                                            .child("‹"),
+                                                    )
+                                                    .child(
+                                                        div()
+                                                            .text_xs()
+                                                            .font_weight(FontWeight::MEDIUM)
+                                                            .text_color(theme::text_primary())
+                                                            .child("Connect Career Ledger"),
+                                                    ),
+                                            ),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_size(px(11.0))
+                                            .text_color(theme::text_muted())
+                                            .child("Detected runtimes on this Mac"),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .flex_col()
+                                            .children(runtime_rows.into_iter().map(
+                                                |(name, connected, cmd, key_id)| {
+                                                    let flash_key = key_id.clone();
+                                                    let copied = self.is_copied_flash(&key_id);
+                                                    let name_toast = name.clone();
                                                     div()
+                                                        .id(SharedString::from(key_id))
+                                                        .py(px(6.0))
+                                                        .border_b_1()
+                                                        .border_color(theme::hairline())
                                                         .flex()
                                                         .items_center()
+                                                        .justify_between()
                                                         .gap_2()
+                                                        .when(!connected, |r| {
+                                                            r.cursor_pointer()
+                                                                .hover(|s| s.bg(theme::row_hover()))
+                                                                .px_2()
+                                                                .mx(px(-8.0))
+                                                                .rounded(theme::r_sm())
+                                                                .on_click(cx.listener(
+                                                                    move |this, _, _, cx| {
+                                                                        cx.write_to_clipboard(
+                                                                            ClipboardItem::new_string(
+                                                                                cmd.clone(),
+                                                                            ),
+                                                                        );
+                                                                        this.flash_copied(
+                                                                            flash_key.clone(),
+                                                                            cx,
+                                                                        );
+                                                                        this.set_toast(
+                                                                            format!(
+                                                                                "Copied MCP connect command for {name_toast}"
+                                                                            ),
+                                                                            cx,
+                                                                        );
+                                                                    },
+                                                                ))
+                                                        })
                                                         .child(
                                                             div()
-                                                                .w(px(6.0))
-                                                                .h(px(6.0))
-                                                                .rounded(px(99.0))
-                                                                .bg(theme::emerald()),
+                                                                .flex()
+                                                                .items_center()
+                                                                .gap_2()
+                                                                .child(
+                                                                    div()
+                                                                        .w(px(6.0))
+                                                                        .h(px(6.0))
+                                                                        .rounded(px(99.0))
+                                                                        .bg(if connected {
+                                                                            theme::emerald()
+                                                                        } else {
+                                                                            theme::text_muted()
+                                                                        }),
+                                                                )
+                                                                .child(
+                                                                    div()
+                                                                        .text_xs()
+                                                                        .text_color(
+                                                                            theme::text_primary(),
+                                                                        )
+                                                                        .child(name),
+                                                                ),
                                                         )
                                                         .child(
                                                             div()
-                                                                .text_xs()
-                                                                .text_color(theme::text_primary())
-                                                                .child("Career Ledger"),
-                                                        ),
-                                                )
-                                                .child({
-                                                    let copied = self.is_copied_flash("set-copy-mcp-cmd");
-                                                    div()
-                                                        .text_size(px(11.0))
-                                                        .text_color(if copied {
-                                                            theme::emerald()
-                                                        } else {
-                                                            theme::text_muted()
-                                                        })
-                                                        .child(if copied { "Copied ✓" } else { "Copy MCP" })
-                                                }),
-                                        )
-                                        .children(caps.into_iter().enumerate().map(
-                                            |(ci, (label, access))| {
-                                                let (dot_col, status_txt, status_col, action_kind) =
-                                                    match access {
+                                                                .text_size(px(11.0))
+                                                                .text_color(if connected || copied {
+                                                                    theme::emerald()
+                                                                } else {
+                                                                    theme::lavender()
+                                                                })
+                                                                .child(if connected {
+                                                                    "Connected"
+                                                                } else if copied {
+                                                                    "Copied ✓"
+                                                                } else {
+                                                                    "Copy config"
+                                                                }),
+                                                        )
+                                                },
+                                            )),
+                                    )
+                                    .child(
+                                        div()
+                                            .pt_1()
+                                            .flex()
+                                            .flex_col()
+                                            .gap(px(2.0))
+                                            .child(
+                                                div()
+                                                    .id("sub-copy-mcp-cmd")
+                                                    .px_2()
+                                                    .py(px(5.0))
+                                                    .mx(px(-8.0))
+                                                    .rounded(theme::r_sm())
+                                                    .hover(|s| s.bg(theme::row_hover()))
+                                                    .cursor_pointer()
+                                                    .flex()
+                                                    .items_center()
+                                                    .justify_between()
+                                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                                        cx.write_to_clipboard(
+                                                            ClipboardItem::new_string(
+                                                                mcp_cmd.clone(),
+                                                            ),
+                                                        );
+                                                        this.flash_copied("sub-copy-mcp-cmd", cx);
+                                                        this.set_toast(
+                                                            "Copied `jh connect mcp` command",
+                                                            cx,
+                                                        );
+                                                    }))
+                                                    .child(
+                                                        div()
+                                                            .text_xs()
+                                                            .text_color(theme::text_secondary())
+                                                            .child("Copy MCP command"),
+                                                    )
+                                                    .child(
+                                                        div()
+                                                            .text_size(px(11.0))
+                                                            .text_color(if copied_cmd {
+                                                                theme::emerald()
+                                                            } else {
+                                                                theme::text_muted()
+                                                            })
+                                                            .child(if copied_cmd {
+                                                                "Copied ✓"
+                                                            } else {
+                                                                "CLI"
+                                                            }),
+                                                    ),
+                                            )
+                                            .child(
+                                                div()
+                                                    .id("sub-copy-agent-prompt")
+                                                    .px_2()
+                                                    .py(px(5.0))
+                                                    .mx(px(-8.0))
+                                                    .rounded(theme::r_sm())
+                                                    .hover(|s| s.bg(theme::row_hover()))
+                                                    .cursor_pointer()
+                                                    .flex()
+                                                    .items_center()
+                                                    .justify_between()
+                                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                                        cx.write_to_clipboard(
+                                                            ClipboardItem::new_string(
+                                                                setup_prompt.clone(),
+                                                            ),
+                                                        );
+                                                        this.flash_copied(
+                                                            "sub-copy-agent-prompt",
+                                                            cx,
+                                                        );
+                                                        this.set_toast(
+                                                            "Copied agent setup prompt",
+                                                            cx,
+                                                        );
+                                                    }))
+                                                    .child(
+                                                        div()
+                                                            .text_xs()
+                                                            .text_color(theme::text_secondary())
+                                                            .child("Copy setup prompt for agent"),
+                                                    )
+                                                    .child(
+                                                        div()
+                                                            .text_size(px(11.0))
+                                                            .text_color(if copied_prompt {
+                                                                theme::emerald()
+                                                            } else {
+                                                                theme::text_muted()
+                                                            })
+                                                            .child(if copied_prompt {
+                                                                "Copied ✓"
+                                                            } else {
+                                                                "Prompt"
+                                                            }),
+                                                    ),
+                                            ),
+                                    )
+                                    .into_any_element()
+                            } else {
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .gap_2()
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .items_center()
+                                            .justify_between()
+                                            .child(
+                                                div()
+                                                    .text_xs()
+                                                    .font_weight(FontWeight::MEDIUM)
+                                                    .text_color(theme::text_primary())
+                                                    .child("Tools & connectors"),
+                                            )
+                                            .child(
+                                                div()
+                                                    .text_size(px(10.5))
+                                                    .text_color(theme::text_muted())
+                                                    .child(format!("for {active_name}")),
+                                            ),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .flex_col()
+                                            .gap(px(2.0))
+                                            // Career Ledger: slides this section into runtime & MCP connection view
+                                            .child(
+                                                div()
+                                                    .id("open-career-ledger-subview")
+                                                    .px_2()
+                                                    .py(px(5.0))
+                                                    .mx(px(-8.0))
+                                                    .rounded(theme::r_sm())
+                                                    .hover(|s| s.bg(theme::row_hover()))
+                                                    .cursor_pointer()
+                                                    .flex()
+                                                    .items_center()
+                                                    .justify_between()
+                                                    .gap_2()
+                                                    .on_click(cx.listener(|this, _, _, cx| {
+                                                        this.tools_subview = true;
+                                                        this.tools_subview_epoch =
+                                                            this.tools_subview_epoch.wrapping_add(1);
+                                                        cx.notify();
+                                                    }))
+                                                    .child(
+                                                        div()
+                                                            .flex()
+                                                            .items_center()
+                                                            .gap_2()
+                                                            .child(
+                                                                div()
+                                                                    .w(px(6.0))
+                                                                    .h(px(6.0))
+                                                                    .rounded(px(99.0))
+                                                                    .bg(theme::emerald()),
+                                                            )
+                                                            .child(
+                                                                div()
+                                                                    .text_xs()
+                                                                    .text_color(
+                                                                        theme::text_primary(),
+                                                                    )
+                                                                    .child("Career Ledger"),
+                                                            ),
+                                                    )
+                                                    .child(
+                                                        div()
+                                                            .flex()
+                                                            .items_center()
+                                                            .gap(px(5.0))
+                                                            .text_size(px(11.0))
+                                                            .text_color(theme::text_muted())
+                                                            .child("Connect")
+                                                            .child("›"),
+                                                    ),
+                                            )
+                                            .children(caps.into_iter().enumerate().map(
+                                                |(ci, (label, access))| {
+                                                    let (
+                                                        dot_col,
+                                                        status_txt,
+                                                        status_col,
+                                                        action_kind,
+                                                    ) = match access {
                                                         CapabilityAccess::Active {
                                                             server, ..
                                                         } => (
@@ -10728,137 +11241,186 @@ impl JobHarnessApp {
                                                             2u8,
                                                         ),
                                                     };
-                                                let cap_label = label.to_owned();
-                                                let owner_target = status_txt.clone();
-                                                div()
-                                                    .id(SharedString::from(format!("cap-row-{ci}")))
-                                                    .px_2()
-                                                    .py(px(5.0))
-                                                    .mx(px(-8.0))
-                                                    .rounded(theme::r_sm())
-                                                    .when(action_kind > 0, |d| {
-                                                        d.hover(|s| s.bg(theme::row_hover()))
-                                                            .cursor_pointer()
-                                                            .on_click(cx.listener(
-                                                                move |this, _, _, cx| {
-                                                                    if action_kind == 1 {
-                                                                        let low = owner_target
-                                                                            .to_ascii_lowercase();
-                                                                        if let Some(rt) = this
-                                                                            .available_runtimes
-                                                                            .iter()
-                                                                            .find(|r| {
-                                                                                low.contains(
-                                                                                    &r.short_name()
-                                                                                        .to_ascii_lowercase(),
-                                                                                )
-                                                                            })
-                                                                            .cloned()
-                                                                        {
-                                                                            let nm = rt
-                                                                                .short_name()
-                                                                                .to_owned();
-                                                                            this.runtime = rt;
-                                                                            this.set_toast(
+                                                    let cap_label = label.to_owned();
+                                                    let owner_target = status_txt.clone();
+                                                    div()
+                                                        .id(SharedString::from(format!(
+                                                            "cap-row-{ci}"
+                                                        )))
+                                                        .px_2()
+                                                        .py(px(5.0))
+                                                        .mx(px(-8.0))
+                                                        .rounded(theme::r_sm())
+                                                        .when(action_kind > 0, |d| {
+                                                            d.hover(|s| s.bg(theme::row_hover()))
+                                                                .cursor_pointer()
+                                                                .on_click(cx.listener(
+                                                                    move |this, _, _, cx| {
+                                                                        if action_kind == 1 {
+                                                                            let low = owner_target
+                                                                                .to_ascii_lowercase();
+                                                                            if let Some(rt) = this
+                                                                                .available_runtimes
+                                                                                .iter()
+                                                                                .find(|r| {
+                                                                                    low.contains(
+                                                                                        &r.short_name()
+                                                                                            .to_ascii_lowercase(),
+                                                                                    )
+                                                                                })
+                                                                                .cloned()
+                                                                            {
+                                                                                let nm = rt
+                                                                                    .short_name()
+                                                                                    .to_owned();
+                                                                                this.runtime = rt;
+                                                                                this.set_toast(
+                                                                                    format!(
+                                                                                        "Switched to {nm}"
+                                                                                    ),
+                                                                                    cx,
+                                                                                );
+                                                                            }
+                                                                        } else {
+                                                                            this.submit_prompt(
                                                                                 format!(
-                                                                                    "Switched to {nm}"
+                                                                                    "Help me connect {cap_label} tools for {} in this Job Harness workspace.",
+                                                                                    this.runtime.short_name()
                                                                                 ),
+                                                                                false,
                                                                                 cx,
                                                                             );
                                                                         }
-                                                                    } else {
-                                                                        this.submit_prompt(
-                                                                            format!(
-                                                                                "Help me connect {cap_label} tools for {} in this Job Harness workspace.",
-                                                                                this.runtime.short_name()
-                                                                            ),
-                                                                            false,
-                                                                            cx,
-                                                                        );
-                                                                    }
-                                                                },
-                                                            ))
-                                                    })
-                                                    .flex()
-                                                    .items_center()
-                                                    .justify_between()
-                                                    .gap_2()
-                                                    .child(
-                                                        div()
-                                                            .flex()
-                                                            .items_center()
-                                                            .gap_2()
-                                                            .child(
-                                                                div()
-                                                                    .w(px(6.0))
-                                                                    .h(px(6.0))
-                                                                    .rounded(px(99.0))
-                                                                    .bg(dot_col),
-                                                            )
-                                                            .child(
-                                                                div()
-                                                                    .text_xs()
-                                                                    .text_color(
-                                                                        theme::text_primary(),
-                                                                    )
-                                                                    .child(label),
-                                                            ),
-                                                    )
-                                                    .child(
-                                                        div()
-                                                            .text_size(px(11.0))
-                                                            .text_color(status_col)
-                                                            .child(status_txt),
-                                                    )
-                                            },
-                                        )),
-                                )
-                                .when(!visible_servers.is_empty(), |d| {
-                                    let srv_count = visible_servers.len();
-                                    d.child(
-                                        div()
-                                            .id("toggle-mcp-servers")
-                                            .pt_1()
-                                            .cursor_pointer()
-                                            .text_size(px(11.0))
-                                            .text_color(theme::text_muted())
-                                            .hover(|s| s.text_color(theme::text_primary()))
-                                            .on_click(cx.listener(|this, _, _, cx| {
-                                                this.show_mcp_servers = !this.show_mcp_servers;
-                                                cx.notify();
-                                            }))
-                                            .child(if mcp_open {
-                                                format!("All MCP servers ({srv_count}) ▾")
-                                            } else {
-                                                format!("All MCP servers ({srv_count}) ▸")
-                                            }),
+                                                                    },
+                                                                ))
+                                                        })
+                                                        .flex()
+                                                        .items_center()
+                                                        .justify_between()
+                                                        .gap_2()
+                                                        .child(
+                                                            div()
+                                                                .flex()
+                                                                .items_center()
+                                                                .gap_2()
+                                                                .child(
+                                                                    div()
+                                                                        .w(px(6.0))
+                                                                        .h(px(6.0))
+                                                                        .rounded(px(99.0))
+                                                                        .bg(dot_col),
+                                                                )
+                                                                .child(
+                                                                    div()
+                                                                        .text_xs()
+                                                                        .text_color(
+                                                                            theme::text_primary(),
+                                                                        )
+                                                                        .child(label),
+                                                                ),
+                                                        )
+                                                        .child(
+                                                            div()
+                                                                .text_size(px(11.0))
+                                                                .text_color(status_col)
+                                                                .child(status_txt),
+                                                        )
+                                                },
+                                            )),
                                     )
-                                    .when(mcp_open, |box_d| {
-                                        box_d.child(div().flex().flex_wrap().gap(px(5.0)).children(
-                                            visible_servers.into_iter().take(12).map(|srv| {
+                                    .when(!visible_servers.is_empty(), |d| {
+                                        let srv_count = visible_servers.len();
+                                        d.child(
+                                            div()
+                                                .id("toggle-mcp-servers")
+                                                .pt_1()
+                                                .cursor_pointer()
+                                                .flex()
+                                                .items_center()
+                                                .justify_between()
+                                                .text_size(px(11.0))
+                                                .text_color(theme::text_muted())
+                                                .hover(|s| s.text_color(theme::text_primary()))
+                                                .on_click(cx.listener(|this, _, _, cx| {
+                                                    this.show_mcp_servers = !this.show_mcp_servers;
+                                                    cx.notify();
+                                                }))
+                                                .child(format!("Other MCP servers ({srv_count})"))
+                                                .child(if mcp_open { "▾" } else { "▸" }),
+                                        )
+                                        .when(mcp_open, |box_d| {
+                                            box_d.child(
                                                 div()
-                                                    .px_2()
-                                                    .py(px(3.0))
-                                                    .rounded(theme::r_sm())
-                                                    .bg(theme::surface_subtle())
-                                                    .border_1()
-                                                    .border_color(theme::hairline())
+                                                    .pt_1()
                                                     .flex()
-                                                    .items_center()
-                                                    .gap(px(5.0))
-                                                    .text_size(px(10.5))
-                                                    .text_color(theme::text_secondary())
-                                                    .child(srv.name.clone())
-                                                    .child(
-                                                        div()
-                                                            .text_size(px(9.5))
-                                                            .text_color(theme::text_muted())
-                                                            .child(srv.source.clone()),
-                                                    )
-                                            }),
-                                        ))
+                                                    .flex_col()
+                                                    .children(
+                                                        visible_servers
+                                                            .into_iter()
+                                                            .take(16)
+                                                            .map(|srv| {
+                                                                div()
+                                                                    .py(px(4.5))
+                                                                    .border_t_1()
+                                                                    .border_color(theme::hairline())
+                                                                    .flex()
+                                                                    .items_center()
+                                                                    .justify_between()
+                                                                    .gap_2()
+                                                                    .child(
+                                                                        div()
+                                                                            .flex_1()
+                                                                            .min_w_0()
+                                                                            .text_size(px(11.0))
+                                                                            .text_color(
+                                                                                theme::text_secondary(),
+                                                                            )
+                                                                            .child(truncate_end(
+                                                                                &srv.name, 26,
+                                                                            )),
+                                                                    )
+                                                                    .child(
+                                                                        div()
+                                                                            .flex_shrink_0()
+                                                                            .text_size(px(10.5))
+                                                                            .text_color(
+                                                                                theme::text_muted(),
+                                                                            )
+                                                                            .child(
+                                                                                srv.source.clone(),
+                                                                            ),
+                                                                    )
+                                                            }),
+                                                    ),
+                                            )
+                                        })
                                     })
-                                })
+                                    .into_any_element()
+                            };
+
+                            div()
+                                .pt_3()
+                                .border_t_1()
+                                .border_color(theme::hairline())
+                                .overflow_hidden()
+                                .child(section_body)
+                                .with_animation(
+                                    SharedString::from(format!("tools-compartment-{sub_epoch}")),
+                                    Animation::new(Duration::from_millis(if reduce_motion {
+                                        1
+                                    } else {
+                                        150
+                                    }))
+                                    .with_easing(ease_out_quint()),
+                                    move |el, delta| {
+                                        let shift = if in_subview {
+                                            (1.0 - delta) * 14.0
+                                        } else {
+                                            -(1.0 - delta) * 14.0
+                                        };
+                                        el.ml(px(shift)).opacity(0.45 + 0.55 * delta)
+                                    },
+                                )
                         })
                         // Section 5: Setup Wizard & Spotlight UI Tour (re-runnable anytime)
                         .child(
@@ -13786,7 +14348,7 @@ fn truncate_end(text: &str, max_chars: usize) -> String {
 fn numeric_scrub_spec(key: &str) -> Option<(i64, i64, i64)> {
     match key {
         "prep_reminder_minutes" => Some((5, 5, 1440)),
-        "applied_ghost_days" => Some((1, 1, 180)),
+        "applied_ghost_days" => Some((1, 1, 365)),
         "min_base_salary" | "target_base_salary" => Some((1000, 0, 500_000)),
         _ => None,
     }

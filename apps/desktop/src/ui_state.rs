@@ -6,10 +6,16 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+fn default_true() -> bool {
+    true
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct UiState {
     pub reduce_motion: bool,
+    #[serde(default = "default_true")]
+    pub desktop_notifications: bool,
     pub show_archive: bool,
     pub only_attention: bool,
     pub interviews_expanded: bool,
@@ -20,6 +26,25 @@ pub struct UiState {
     pub agent_kind: Option<String>,
     pub agent: AgentOptions,
     pub last_seen_activity_at: Option<String>,
+}
+
+impl Default for UiState {
+    fn default() -> Self {
+        Self {
+            reduce_motion: false,
+            desktop_notifications: true,
+            show_archive: false,
+            only_attention: false,
+            interviews_expanded: false,
+            collapsed_cols: Vec::new(),
+            chat_open: false,
+            chat_width: None,
+            drawer_width: None,
+            agent_kind: None,
+            agent: AgentOptions::default(),
+            last_seen_activity_at: None,
+        }
+    }
 }
 
 impl UiState {
