@@ -4,8 +4,9 @@
 //! `output/...`, `context/...`).
 use crate::theme;
 use gpui::{
-    AnyElement, App, FontStyle, FontWeight, HighlightStyle, InteractiveText, IntoElement,
-    ParentElement, SharedString, Styled, StyledText, UnderlineStyle, Window, div, px,
+    AnyElement, App, FontStyle, FontWeight, HighlightStyle, InteractiveElement, InteractiveText,
+    IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement,
+    SharedString, Styled, StyledText, UnderlineStyle, Window, div, px,
 };
 use std::{ops::Range, rc::Rc};
 
@@ -15,7 +16,29 @@ pub enum LinkTarget {
     WorkspacePath(String),
 }
 
+#[derive(Clone, Debug)]
+pub enum TextSelectEvent {
+    Start {
+        block_id: SharedString,
+        index: usize,
+        full_text: String,
+    },
+    Move {
+        block_id: SharedString,
+        index: usize,
+    },
+    End,
+}
+
+#[derive(Clone, Debug)]
+pub struct ActiveSelection {
+    pub block_id: SharedString,
+    pub start: usize,
+    pub end: usize,
+}
+
 pub type LinkHandler = Rc<dyn Fn(LinkTarget, &mut Window, &mut App)>;
+pub type SelectHandler = Rc<dyn Fn(TextSelectEvent, &mut Window, &mut App)>;
 
 struct InlineParsed {
     text: String,
@@ -25,12 +48,14 @@ struct InlineParsed {
 }
 
 /// Renders Markdown into clean, well-proportioned GPUI blocks with true inline bold/italic/code,
-/// clickable URLs, and clickable workspace citations.
+/// clickable URLs, clickable workspace citations, and native drag-to-select inline text.
 pub fn render_markdown(
     id_prefix: &str,
     source: &str,
     spacious: bool,
+    selection: Option<&ActiveSelection>,
     on_link: LinkHandler,
+    on_select: SelectHandler,
 ) -> impl IntoElement {
     let mut blocks: Vec<AnyElement> = Vec::new();
     let mut in_code = false;
@@ -39,6 +64,16 @@ pub fn render_markdown(
 
     let body_size = if spacious { px(14.0) } else { px(12.5) };
     let body_lh = if spacious { px(22.0) } else { px(19.0) };
+
+    let sel_for = |el_id: &SharedString| -> Option<Range<usize>> {
+        selection.and_then(|s| {
+            if &s.block_id == el_id && s.start != s.end {
+                Some(s.start.min(s.end)..s.start.max(s.end))
+            } else {
+                None
+            }
+        })
+    };
 
     for raw_line in source.lines() {
         let line = raw_line.trim();
@@ -77,6 +112,7 @@ pub fn render_markdown(
 
         block_ix += 1;
         let el_id = SharedString::from(format!("{id_prefix}-b-{block_ix}"));
+        let sel_range = sel_for(&el_id);
 
         if line == "---" || line == "***" || line == "___" {
             blocks.push(
@@ -95,7 +131,13 @@ pub fn render_markdown(
                     .line_height(if spacious { px(24.0) } else { px(20.0) })
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(theme::text_primary())
-                    .child(render_inline(el_id, h1, on_link.clone()))
+                    .child(render_inline(
+                        el_id,
+                        h1,
+                        sel_range,
+                        on_link.clone(),
+                        on_select.clone(),
+                    ))
                     .into_any_element(),
             );
         } else if let Some(h2) = line.strip_prefix("## ") {
@@ -109,7 +151,13 @@ pub fn render_markdown(
                     .line_height(if spacious { px(21.0) } else { px(18.5) })
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(theme::text_primary())
-                    .child(render_inline(el_id, h2, on_link.clone()))
+                    .child(render_inline(
+                        el_id,
+                        h2,
+                        sel_range,
+                        on_link.clone(),
+                        on_select.clone(),
+                    ))
                     .into_any_element(),
             );
         } else if let Some(h3) = line.strip_prefix("### ") {
@@ -120,7 +168,13 @@ pub fn render_markdown(
                     .line_height(if spacious { px(20.0) } else { px(18.0) })
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(theme::lavender())
-                    .child(render_inline(el_id, h3, on_link.clone()))
+                    .child(render_inline(
+                        el_id,
+                        h3,
+                        sel_range,
+                        on_link.clone(),
+                        on_select.clone(),
+                    ))
                     .into_any_element(),
             );
         } else if let Some(quote) = line.strip_prefix("> ") {
@@ -133,7 +187,13 @@ pub fn render_markdown(
                     .text_size(body_size)
                     .line_height(body_lh)
                     .text_color(theme::text_muted())
-                    .child(render_inline(el_id, quote, on_link.clone()))
+                    .child(render_inline(
+                        el_id,
+                        quote,
+                        sel_range,
+                        on_link.clone(),
+                        on_select.clone(),
+                    ))
                     .into_any_element(),
             );
         } else if let Some(bullet) = line.strip_prefix("- ").or_else(|| line.strip_prefix("* ")) {
@@ -150,7 +210,9 @@ pub fn render_markdown(
                     .child(div().flex_1().min_w_0().child(render_inline(
                         el_id,
                         bullet,
+                        sel_range,
                         on_link.clone(),
+                        on_select.clone(),
                     )))
                     .into_any_element(),
             );
@@ -172,7 +234,9 @@ pub fn render_markdown(
                     .child(div().flex_1().min_w_0().child(render_inline(
                         el_id,
                         rest,
+                        sel_range,
                         on_link.clone(),
+                        on_select.clone(),
                     )))
                     .into_any_element(),
             );
@@ -182,7 +246,13 @@ pub fn render_markdown(
                     .text_size(body_size)
                     .line_height(body_lh)
                     .text_color(theme::text_secondary())
-                    .child(render_inline(el_id, line, on_link.clone()))
+                    .child(render_inline(
+                        el_id,
+                        line,
+                        sel_range,
+                        on_link.clone(),
+                        on_select.clone(),
+                    ))
                     .into_any_element(),
             );
         }
@@ -225,10 +295,41 @@ fn split_numbered_list(line: &str) -> Option<(&str, &str)> {
     }
 }
 
-fn render_inline(id: SharedString, raw: &str, on_link: LinkHandler) -> AnyElement {
-    let parsed = parse_inline(raw);
+fn render_inline(
+    id: SharedString,
+    raw: &str,
+    sel_range: Option<Range<usize>>,
+    on_link: LinkHandler,
+    on_select: SelectHandler,
+) -> AnyElement {
+    let mut parsed = parse_inline(raw);
+    let full_text = parsed.text.clone();
+    if let Some(sr) = sel_range {
+        let len = parsed.text.len();
+        let s = sr.start.min(len);
+        let e = sr.end.min(len);
+        if s < e && parsed.text.is_char_boundary(s) && parsed.text.is_char_boundary(e) {
+            parsed.highlights.push((
+                s..e,
+                HighlightStyle {
+                    background_color: Some(theme::lavender_wash().into()),
+                    color: Some(theme::text_primary().into()),
+                    ..Default::default()
+                },
+            ));
+            parsed.highlights.sort_by_key(|(r, _)| r.start);
+        }
+    }
     let styled = StyledText::new(parsed.text).with_highlights(parsed.highlights);
-    if parsed.click_ranges.is_empty() {
+    let layout_down = styled.layout().clone();
+    let layout_move = styled.layout().clone();
+    let id_down = id.clone();
+    let id_move = id.clone();
+    let on_sel_down = on_select.clone();
+    let on_sel_move = on_select.clone();
+    let on_sel_up = on_select;
+
+    let inner: AnyElement = if parsed.click_ranges.is_empty() {
         styled.into_any_element()
     } else {
         let targets = parsed.click_targets;
@@ -239,7 +340,44 @@ fn render_inline(id: SharedString, raw: &str, on_link: LinkHandler) -> AnyElemen
                 }
             })
             .into_any_element()
-    }
+    };
+
+    div()
+        .cursor_text()
+        .on_mouse_down(MouseButton::Left, move |ev: &MouseDownEvent, window, cx| {
+            let idx = match layout_down.index_for_position(ev.position) {
+                Ok(i) | Err(i) => i,
+            };
+            on_sel_down(
+                TextSelectEvent::Start {
+                    block_id: id_down.clone(),
+                    index: idx,
+                    full_text: full_text.clone(),
+                },
+                window,
+                cx,
+            );
+        })
+        .on_mouse_move(move |ev: &MouseMoveEvent, window, cx| {
+            if ev.dragging() {
+                let idx = match layout_move.index_for_position(ev.position) {
+                    Ok(i) | Err(i) => i,
+                };
+                on_sel_move(
+                    TextSelectEvent::Move {
+                        block_id: id_move.clone(),
+                        index: idx,
+                    },
+                    window,
+                    cx,
+                );
+            }
+        })
+        .on_mouse_up(MouseButton::Left, move |_ev: &MouseUpEvent, window, cx| {
+            on_sel_up(TextSelectEvent::End, window, cx);
+        })
+        .child(inner)
+        .into_any_element()
 }
 
 fn parse_inline(raw: &str) -> InlineParsed {
@@ -424,8 +562,12 @@ fn is_workspace_citation(token: &str) -> bool {
     (token.starts_with("applications/")
         || token.starts_with("briefs/")
         || token.starts_with("output/")
-        || token.starts_with("context/"))
-        && (token.ends_with(".md") || token.ends_with(".pdf") || token.ends_with(".json"))
+        || token.starts_with("context/")
+        || token.starts_with("content/"))
+        && (token.ends_with(".md")
+            || token.ends_with(".pdf")
+            || token.ends_with(".json")
+            || token.ends_with(".txt"))
 }
 
 fn shorten_url_display(url: &str) -> String {

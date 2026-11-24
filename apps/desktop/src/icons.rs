@@ -30,6 +30,10 @@ const REFRESH_CW: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="14" h
 
 const CHECK: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>"#;
 
+const USER: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>"#;
+
+const EXTERNAL_LINK: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M15 3h6v6"/><path d="M10 14 21 3"/><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/></svg>"#;
+
 impl AssetSource for EmbeddedIcons {
     fn load(&self, path: &str) -> Result<Option<Cow<'static, [u8]>>> {
         let bytes = match path {
@@ -46,6 +50,8 @@ impl AssetSource for EmbeddedIcons {
             "icons/stop.svg" => Some(STOP.as_bytes()),
             "icons/refresh-cw.svg" => Some(REFRESH_CW.as_bytes()),
             "icons/check.svg" => Some(CHECK.as_bytes()),
+            "icons/user.svg" => Some(USER.as_bytes()),
+            "icons/external-link.svg" => Some(EXTERNAL_LINK.as_bytes()),
             _ => None,
         };
         Ok(bytes.map(Cow::Borrowed))
@@ -66,6 +72,8 @@ impl AssetSource for EmbeddedIcons {
             "icons/stop.svg".into(),
             "icons/refresh-cw.svg".into(),
             "icons/check.svg".into(),
+            "icons/user.svg".into(),
+            "icons/external-link.svg".into(),
         ])
     }
 }

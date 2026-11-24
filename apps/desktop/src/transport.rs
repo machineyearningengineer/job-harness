@@ -123,6 +123,27 @@ pub struct CvNode {
     pub exists: bool,
 }
 
+#[derive(Clone, Debug)]
+pub struct ProfileDoc {
+    pub group: &'static str,
+    pub label: String,
+    pub relative_path: String,
+    pub full_path: Option<PathBuf>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct ProfileSettings {
+    pub sender_email: String,
+    pub timezone: String,
+    pub currency: String,
+    pub min_base_salary: u64,
+    pub target_base_salary: u64,
+    pub location_preferences: String,
+    pub target_roles: String,
+    pub tone: String,
+    pub applied_ghost_days: u64,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct WorkspaceSnapshot {
     pub total_records: usize,
@@ -136,7 +157,9 @@ pub struct WorkspaceSnapshot {
     pub latest_activity_at: Option<String>,
     pub daily_budget: DailyBudget,
     pub permissions: PermissionsState,
+    pub profile_settings: ProfileSettings,
     pub cv_nodes: Vec<CvNode>,
+    pub profile_docs: Vec<ProfileDoc>,
     pub suggest_new_track: bool,
     pub unmatched_track_titles: Vec<String>,
     pub unfinished_runs: u64,
@@ -178,6 +201,7 @@ pub struct RoleOverviewDetails {
     pub salary: Option<String>,
     pub location_mode: Option<String>,
     pub fit_summary: Option<String>,
+    #[allow(dead_code)]
     pub status_detail: Option<String>,
     pub source_channel: Option<String>,
     pub contact: Option<String>,
@@ -269,6 +293,8 @@ impl WorkspaceClient {
 
         let perms = settings.get("permissions");
         let reminders = settings.get("time_and_reminders");
+        let disc = settings.get("discovery");
+        let comm = settings.get("communication");
         let permissions = PermissionsState {
             auto_apply_portal: perms
                 .and_then(|p| p["auto_apply_portal"].as_bool())
@@ -283,8 +309,48 @@ impl WorkspaceClient {
                 .and_then(|p| p["auto_archive_mail"].as_bool())
                 .unwrap_or(false),
             brief_lead_time_minutes: reminders
-                .and_then(|r| r["brief_lead_time_minutes"].as_i64())
+                .and_then(|r| {
+                    r["pre_interview_reminder_minutes"]
+                        .as_i64()
+                        .or_else(|| r["brief_lead_time_minutes"].as_i64())
+                })
                 .unwrap_or(90),
+        };
+        let join_str_array = |val: Option<&Value>| -> String {
+            val.and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|x| x.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                })
+                .unwrap_or_default()
+        };
+        let profile_settings = ProfileSettings {
+            sender_email: comm
+                .and_then(|c| c["sender_email"].as_str())
+                .unwrap_or("")
+                .to_owned(),
+            timezone: settings["timezone"].as_str().unwrap_or("UTC").to_owned(),
+            currency: disc
+                .and_then(|d| d["currency"].as_str())
+                .unwrap_or("GBP")
+                .to_owned(),
+            min_base_salary: disc
+                .and_then(|d| d["min_base_salary"].as_u64())
+                .unwrap_or(0),
+            target_base_salary: disc
+                .and_then(|d| d["target_base_salary"].as_u64())
+                .unwrap_or(0),
+            location_preferences: join_str_array(disc.and_then(|d| d.get("location_preferences"))),
+            target_roles: join_str_array(settings.get("target_roles")),
+            tone: comm
+                .and_then(|c| c["tone"].as_str())
+                .unwrap_or("")
+                .to_owned(),
+            applied_ghost_days: reminders
+                .and_then(|r| r["applied_ghost_days"].as_u64())
+                .unwrap_or(30),
         };
 
         // Map derived urgency by record_path from review_queue
@@ -492,6 +558,8 @@ impl WorkspaceClient {
         }
         let latest_activity_at = recent_activity.first().map(|a| a.at.clone());
 
+        let profile_docs = self.discover_profile_docs();
+
         Ok(WorkspaceSnapshot {
             total_records,
             closed_count,
@@ -504,7 +572,9 @@ impl WorkspaceClient {
             latest_activity_at,
             daily_budget,
             permissions,
+            profile_settings,
             cv_nodes,
+            profile_docs,
             suggest_new_track,
             unmatched_track_titles,
             unfinished_runs,
@@ -516,6 +586,82 @@ impl WorkspaceClient {
                 format!("{unfinished_runs} unfinished run(s) need reconcile")
             },
         })
+    }
+
+    fn discover_profile_docs(&self) -> Vec<ProfileDoc> {
+        let Some(root) = self.target.local_root() else {
+            return Vec::new();
+        };
+        let mut docs = Vec::new();
+        let known: [(&'static str, &str, &str); 6] = [
+            (
+                "Defaults & screening",
+                "Approved screening answers",
+                "applications/approved-answers.md",
+            ),
+            (
+                "Defaults & screening",
+                "Application decisions & preferences",
+                "context/profile/application-decisions.md",
+            ),
+            (
+                "Career context",
+                "Story bank (CARL stories)",
+                "context/profile/story-bank.md",
+            ),
+            (
+                "Career context",
+                "Career learning & coaching",
+                "context/profile/career-learning.md",
+            ),
+            (
+                "Career context",
+                "Baseline CV evidence",
+                "context/baseline-evidence.md",
+            ),
+            (
+                "Career context",
+                "Master CV facts (JSON)",
+                "content/baseline.json",
+            ),
+        ];
+        for (group, label, rel) in known {
+            let full = root.join(rel);
+            if full.is_file() {
+                docs.push(ProfileDoc {
+                    group,
+                    label: label.to_owned(),
+                    relative_path: rel.to_owned(),
+                    full_path: Some(full),
+                });
+            }
+        }
+        let proj_dir = root.join("context/projects");
+        if let Ok(entries) = fs::read_dir(&proj_dir) {
+            let mut projs: Vec<PathBuf> = entries
+                .flatten()
+                .map(|e| e.path())
+                .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("md"))
+                .collect();
+            projs.sort();
+            for p in projs {
+                if let Some(name) = p.file_name().and_then(|s| s.to_str()) {
+                    let stem = name.trim_end_matches(".md").replace('-', " ");
+                    let mut ch = stem.chars();
+                    let title = match ch.next() {
+                        Some(f) => format!("{}{}", f.to_uppercase(), ch.as_str()),
+                        None => stem,
+                    };
+                    docs.push(ProfileDoc {
+                        group: "Projects & evidence",
+                        label: title,
+                        relative_path: format!("context/projects/{name}"),
+                        full_path: Some(p),
+                    });
+                }
+            }
+        }
+        docs
     }
 
     fn load_records(&self) -> Result<Vec<Value>> {
@@ -828,10 +974,31 @@ pub fn spawn_change_listener(
         WorkspaceTarget::Local(root) => {
             let mut watcher =
                 notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
-                    if let Ok(ev) = res
-                        && !matches!(ev.kind, notify::EventKind::Access(_))
-                    {
-                        let _ = tx.send(());
+                    if let Ok(ev) = res {
+                        let is_content_change = matches!(
+                            ev.kind,
+                            notify::EventKind::Create(_)
+                                | notify::EventKind::Remove(_)
+                                | notify::EventKind::Modify(
+                                    notify::event::ModifyKind::Data(_)
+                                        | notify::event::ModifyKind::Name(_)
+                                )
+                        );
+                        if !is_content_change {
+                            return;
+                        }
+                        let relevant = ev.paths.iter().any(|p| {
+                            let s = p.to_string_lossy();
+                            !s.ends_with(".sqlite3-wal")
+                                && !s.ends_with(".sqlite3-shm")
+                                && !s.ends_with(".sqlite3-journal")
+                                && !s.ends_with(".tmp")
+                                && !s.ends_with(".DS_Store")
+                                && !s.contains("/.git/")
+                        });
+                        if relevant {
+                            let _ = tx.send(());
+                        }
                     }
                 })
                 .ok()?;

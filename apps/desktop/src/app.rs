@@ -14,9 +14,9 @@ use crate::{
 use gpui::{
     Animation, AnimationExt, AnyElement, App, AppContext, ClipboardItem, Context, ExternalPaths,
     FocusHandle, Focusable, InteractiveElement, IntoElement, KeyDownEvent, MouseButton,
-    ParentElement, Render, ScrollHandle, ScrollWheelEvent, SharedString,
-    StatefulInteractiveElement, Styled, TouchPhase, Window, div, ease_out_quint, img, point,
-    prelude::FluentBuilder, px, svg,
+    MouseMoveEvent, MouseUpEvent, ParentElement, Render, ScrollHandle, ScrollWheelEvent,
+    SharedString, StatefulInteractiveElement, Styled, TouchPhase, Window, div, ease_out_quint, img,
+    point, prelude::FluentBuilder, px, svg,
 };
 use notify::RecommendedWatcher;
 use serde_json::json;
@@ -82,6 +82,13 @@ enum ActiveInput {
     Chat,
     CommandBar,
     ModelField,
+    InlineConfig,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ResizeRail {
+    Chat,
+    RightDrawer,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -97,7 +104,6 @@ enum ActivePopover {
 enum DrawerTab {
     Overview,
     Brief,
-    Packet,
     Notes,
 }
 
@@ -106,6 +112,7 @@ enum RightDrawer {
     Closed,
     Role,
     Cvs,
+    Profile,
     Tidy,
     Notifications,
     Settings,
@@ -116,6 +123,7 @@ enum CommandAction {
     OpenRole(Box<RoleCard>),
     ToggleChat,
     OpenCvs,
+    OpenProfile,
     OpenTidy,
     OpenBudget,
     OpenSettings,
@@ -247,8 +255,22 @@ pub struct JobHarnessApp {
     chat_messages: Vec<ChatMessage>,
     chat_input: String,
     chat_attachments: Vec<PathBuf>,
+    pasted_snippets: Vec<String>,
     attached_role: Option<(String, String)>,
     quoted_reply: Option<String>,
+    input_all_selected: bool,
+    text_selection: Option<(SharedString, usize, usize, String)>,
+    selecting_block: Option<SharedString>,
+    popover_pinned: bool,
+    popover_hover_trigger: Option<ActivePopover>,
+    popover_hover_panel: bool,
+    popover_hover_gen: u64,
+    chat_width: f32,
+    drawer_width: f32,
+    resizing_rail: Option<ResizeRail>,
+    editing_config_key: Option<&'static str>,
+    config_draft: String,
+    config_error: Option<String>,
     quick_input: String,
     quick_popover_open: bool,
     quick_reply_preview: String,
@@ -372,8 +394,28 @@ impl JobHarnessApp {
             chat_messages: Vec::new(),
             chat_input: String::new(),
             chat_attachments: Vec::new(),
+            pasted_snippets: Vec::new(),
             attached_role: None,
             quoted_reply: None,
+            input_all_selected: false,
+            text_selection: None,
+            selecting_block: None,
+            popover_pinned: false,
+            popover_hover_trigger: None,
+            popover_hover_panel: false,
+            popover_hover_gen: 0,
+            chat_width: saved
+                .chat_width
+                .map(|w| (w as f32).clamp(260.0, 540.0))
+                .unwrap_or(300.0),
+            drawer_width: saved
+                .drawer_width
+                .map(|w| (w as f32).clamp(300.0, 620.0))
+                .unwrap_or(360.0),
+            resizing_rail: None,
+            editing_config_key: None,
+            config_draft: String::new(),
+            config_error: None,
             quick_input: String::new(),
             quick_popover_open: false,
             quick_reply_preview: String::new(),
@@ -383,12 +425,12 @@ impl JobHarnessApp {
             stream_cancel: None,
             stream_turn_id: 0,
             chat_follow: true,
-            sync_state: SyncIndicator::Working("Syncing…".into()),
+            sync_state: SyncIndicator::Idle,
             sync_epoch: 1,
             toast: None,
             undo_move: None,
         };
-        app.refresh_snapshot_async(cx);
+        app.refresh_snapshot_async(false, cx);
         app
     }
 
@@ -409,7 +451,7 @@ impl JobHarnessApp {
                         .await;
                     while rx.try_recv().is_ok() {}
                     let _ = this.update(cx, |app, cx| {
-                        app.refresh_snapshot_async(cx);
+                        app.refresh_snapshot_async(false, cx);
                     });
                 } else {
                     let _ = this.update(cx, |app, cx| {
@@ -479,6 +521,8 @@ impl JobHarnessApp {
             interviews_expanded: self.interviews_expanded,
             collapsed_cols: collapsed,
             chat_open: self.chat_open,
+            chat_width: Some(self.chat_width.round() as u32),
+            drawer_width: Some(self.drawer_width.round() as u32),
             agent_kind: Some(self.runtime.kind().to_owned()),
             agent: self.agent_opts.clone(),
             last_seen_activity_at: self.last_seen_activity_at.clone(),
@@ -515,6 +559,54 @@ impl JobHarnessApp {
         })
     }
 
+    fn active_text_selection(&self) -> Option<markdown::ActiveSelection> {
+        self.text_selection
+            .as_ref()
+            .map(|(block_id, start, end, _)| markdown::ActiveSelection {
+                block_id: block_id.clone(),
+                start: *start,
+                end: *end,
+            })
+    }
+
+    fn md_select_handler(&self, cx: &mut Context<Self>) -> markdown::SelectHandler {
+        let weak = cx.entity().downgrade();
+        Rc::new(move |ev, _window, cx| {
+            let _ = weak.update(cx, |app, cx| match ev {
+                markdown::TextSelectEvent::Start {
+                    block_id,
+                    index,
+                    full_text,
+                } => {
+                    app.selecting_block = Some(block_id.clone());
+                    app.text_selection = Some((block_id, index, index, full_text));
+                    cx.notify();
+                }
+                markdown::TextSelectEvent::Move { block_id, index } => {
+                    if app.selecting_block.as_ref() == Some(&block_id)
+                        && let Some((_, _, end, _)) = app.text_selection.as_mut()
+                        && *end != index
+                    {
+                        *end = index;
+                        cx.notify();
+                    }
+                }
+                markdown::TextSelectEvent::End => {
+                    if app.selecting_block.take().is_some() {
+                        if app
+                            .text_selection
+                            .as_ref()
+                            .is_some_and(|(_, s, e, _)| s == e)
+                        {
+                            app.text_selection = None;
+                        }
+                        cx.notify();
+                    }
+                }
+            });
+        })
+    }
+
     fn pick_chat_attachments(&mut self, cx: &mut Context<Self>) {
         cx.spawn(async move |this, cx| {
             let picked = cx
@@ -544,12 +636,15 @@ impl JobHarnessApp {
     }
 
     /// Loads workspace snapshot strictly on the background executor (zero UI-thread stalls).
-    fn refresh_snapshot_async(&mut self, cx: &mut Context<Self>) {
+    /// Background/watcher reloads stay silent (`show_pill = false`); explicit user actions show the pill.
+    fn refresh_snapshot_async(&mut self, show_pill: bool, cx: &mut Context<Self>) {
         if self.refresh_in_flight {
             return;
         }
         self.refresh_in_flight = true;
-        self.mark_sync_working("Syncing…", cx);
+        if show_pill {
+            self.mark_sync_working("Syncing…", cx);
+        }
         let client = self.client.clone();
         cx.spawn(async move |this, cx| {
             let result = cx
@@ -571,7 +666,9 @@ impl JobHarnessApp {
                             app.selected_role = Some(updated.clone());
                         }
                         app.snapshot = snap;
-                        app.mark_sync_saved("Synced", cx);
+                        if show_pill {
+                            app.mark_sync_saved("Synced", cx);
+                        }
                     }
                     Err(err) => {
                         app.snapshot.healthy = false;
@@ -592,9 +689,118 @@ impl JobHarnessApp {
 
     fn close_overlays(&mut self) {
         self.active_popover = ActivePopover::None;
+        self.popover_pinned = false;
+        self.popover_hover_trigger = None;
+        self.popover_hover_panel = false;
+        self.popover_hover_gen = self.popover_hover_gen.wrapping_add(1);
         self.expanded_info = None;
         self.expanded_reader = None;
         self.quick_popover_open = false;
+    }
+
+    /// Hover-intent state machine for bottom-dock popovers (`Budget` / `Health`):
+    /// - Click (`popover_pinned = true`) always holds priority over hover-out.
+    /// - First hover waits 180ms (prevents accidental triggers while crossing the dock).
+    /// - Switching between sibling dock triggers while one is already open is 0ms instant.
+    /// - Leaving a trigger or panel waits 240ms (safe hover bridge so you can interact inside the popover).
+    fn on_dock_trigger_hover(
+        &mut self,
+        target: ActivePopover,
+        hovered: bool,
+        cx: &mut Context<Self>,
+    ) {
+        self.popover_hover_gen = self.popover_hover_gen.wrapping_add(1);
+        let seq = self.popover_hover_gen;
+        if hovered {
+            self.popover_hover_trigger = Some(target);
+            // Click-pinned state owns priority unless user hovers the sibling trigger
+            if self.active_popover == target {
+                return;
+            }
+            let sibling_open = matches!(
+                self.active_popover,
+                ActivePopover::Budget | ActivePopover::Health
+            );
+            if sibling_open && !self.popover_pinned {
+                // Instant 0ms handoff between sibling hover popovers
+                self.active_popover = target;
+                self.cmd_anim_epoch = self.cmd_anim_epoch.wrapping_add(1);
+                cx.notify();
+            } else if !self.popover_pinned && self.active_popover == ActivePopover::None {
+                // 180ms hover-intent delay on cold entry
+                cx.spawn(async move |this, cx| {
+                    cx.background_executor()
+                        .timer(Duration::from_millis(180))
+                        .await;
+                    let _ = this.update(cx, |app, cx| {
+                        if app.popover_hover_gen == seq
+                            && app.popover_hover_trigger == Some(target)
+                            && !app.popover_pinned
+                            && app.active_popover == ActivePopover::None
+                        {
+                            app.active_popover = target;
+                            app.cmd_anim_epoch = app.cmd_anim_epoch.wrapping_add(1);
+                            cx.notify();
+                        }
+                    });
+                })
+                .detach();
+            }
+        } else {
+            if self.popover_hover_trigger == Some(target) {
+                self.popover_hover_trigger = None;
+            }
+            if !self.popover_pinned {
+                self.schedule_dock_hover_close(seq, cx);
+            }
+        }
+    }
+
+    fn on_dock_panel_hover(&mut self, hovered: bool, cx: &mut Context<Self>) {
+        self.popover_hover_gen = self.popover_hover_gen.wrapping_add(1);
+        let seq = self.popover_hover_gen;
+        self.popover_hover_panel = hovered;
+        if !hovered && !self.popover_pinned {
+            self.schedule_dock_hover_close(seq, cx);
+        }
+    }
+
+    fn schedule_dock_hover_close(&self, seq: u64, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(240))
+                .await;
+            let _ = this.update(cx, |app, cx| {
+                if app.popover_hover_gen == seq
+                    && !app.popover_pinned
+                    && !app.popover_hover_panel
+                    && app.popover_hover_trigger.is_none()
+                    && matches!(
+                        app.active_popover,
+                        ActivePopover::Budget | ActivePopover::Health
+                    )
+                {
+                    app.active_popover = ActivePopover::None;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn toggle_dock_popover_pin(&mut self, target: ActivePopover, cx: &mut Context<Self>) {
+        self.popover_hover_gen = self.popover_hover_gen.wrapping_add(1);
+        if self.active_popover == target && self.popover_pinned {
+            self.active_popover = ActivePopover::None;
+            self.popover_pinned = false;
+        } else {
+            if self.active_popover != target {
+                self.cmd_anim_epoch = self.cmd_anim_epoch.wrapping_add(1);
+            }
+            self.active_popover = target;
+            self.popover_pinned = true;
+        }
+        cx.notify();
     }
 
     fn toggle_chat_rail(&mut self, cx: &mut Context<Self>) {
@@ -673,6 +879,26 @@ impl JobHarnessApp {
         .detach();
     }
 
+    fn switch_role_tab(&mut self, tab: DrawerTab, cx: &mut Context<Self>) {
+        self.drawer_tab = tab;
+        self.drawer_tab_epoch = self.drawer_tab_epoch.wrapping_add(1);
+        if tab == DrawerTab::Brief {
+            self.load_selected_brief_async(cx);
+        } else if tab == DrawerTab::Notes
+            && let Some(r) = &self.selected_role
+        {
+            let p = r.record_path.clone();
+            self.citation_title = Some(p.clone());
+            if let Some(d) = &self.role_details {
+                self.citation_body = Some(d.full_text.clone());
+            } else {
+                self.citation_body = Some("Loading…".into());
+                self.read_citation_async(p, cx);
+            }
+        }
+        cx.notify();
+    }
+
     fn load_selected_brief_async(&mut self, cx: &mut Context<Self>) {
         let Some(role) = &self.selected_role else {
             return;
@@ -689,6 +915,37 @@ impl JobHarnessApp {
             );
             cx.notify();
         }
+    }
+
+    fn open_file_in_reader_async(&mut self, rel_path: String, cx: &mut Context<Self>) {
+        let client = self.client.clone();
+        let title = rel_path.clone();
+        self.brief_section = None;
+        self.expanded_reader = Some((title.clone(), "Loading…".into()));
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let res = cx
+                .background_executor()
+                .spawn(async move { client.read_text_preview(&rel_path) })
+                .await;
+            let _ = this.update(cx, |app, cx| {
+                if app
+                    .expanded_reader
+                    .as_ref()
+                    .is_some_and(|(t, _)| t == &title)
+                {
+                    app.expanded_reader = Some((
+                        title,
+                        match res {
+                            Ok(body) => body,
+                            Err(err) => format!("Could not read file: {err}"),
+                        },
+                    ));
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
     }
 
     fn read_citation_async(&mut self, normalized: String, cx: &mut Context<Self>) {
@@ -838,7 +1095,8 @@ impl JobHarnessApp {
                         has_scheduled_start: drag_owned.has_scheduled_start,
                         created_at: Instant::now(),
                     });
-                    app.refresh_snapshot_async(cx);
+                    app.mark_sync_saved("Saved", cx);
+                    app.refresh_snapshot_async(false, cx);
                     cx.notify();
                 }
                 Err(err) => {
@@ -846,8 +1104,9 @@ impl JobHarnessApp {
                     app.snapshot.archived_cards = prev_archived;
                     app.snapshot.closed_count = app.snapshot.archived_cards.len();
                     app.last_moved_record = None;
+                    app.mark_sync_failed("Move failed", cx);
                     app.set_toast(format!("Reverted: {err}"), cx);
-                    app.refresh_snapshot_async(cx);
+                    app.refresh_snapshot_async(false, cx);
                 }
             });
         })
@@ -875,8 +1134,9 @@ impl JobHarnessApp {
                 .await;
             let _ = this.update(cx, |app, cx| match res {
                 Ok(_) => {
+                    app.mark_sync_saved("Undone", cx);
                     app.set_toast(format!("Undid move for {}", undo.company), cx);
-                    app.refresh_snapshot_async(cx);
+                    app.refresh_snapshot_async(false, cx);
                 }
                 Err(err) => app.set_toast(format!("Undo failed: {err}"), cx),
             });
@@ -929,11 +1189,323 @@ impl JobHarnessApp {
                 Err(err) => {
                     app.mark_sync_failed("Cap save failed", cx);
                     app.set_toast(format!("Cap save failed: {err}"), cx);
-                    app.refresh_snapshot_async(cx);
+                    app.refresh_snapshot_async(false, cx);
                 }
             });
         })
         .detach();
+    }
+
+    fn start_inline_config(&mut self, key: &'static str, initial: String, cx: &mut Context<Self>) {
+        self.editing_config_key = Some(key);
+        self.config_draft = initial;
+        self.config_error = None;
+        self.active_input = ActiveInput::InlineConfig;
+        self.input_all_selected = true;
+        cx.notify();
+    }
+
+    fn cancel_inline_config(&mut self, cx: &mut Context<Self>) {
+        self.editing_config_key = None;
+        self.config_draft.clear();
+        self.config_error = None;
+        self.input_all_selected = false;
+        if self.active_input == ActiveInput::InlineConfig {
+            self.active_input = ActiveInput::None;
+        }
+        cx.notify();
+    }
+
+    fn validate_inline_config(key: &'static str, raw: &str) -> Result<(), String> {
+        let t = raw.trim();
+        match key {
+            "prep_reminder_minutes" | "applied_ghost_days" => match t.parse::<u64>() {
+                Ok(n) if n >= 1 => Ok(()),
+                _ => Err("Enter a whole number ≥ 1".into()),
+            },
+            "min_base_salary" | "target_base_salary" => {
+                let digits: String = t
+                    .chars()
+                    .filter(|c| *c != ',' && *c != '£' && *c != '$' && *c != ' ')
+                    .collect();
+                match digits.parse::<u64>() {
+                    Ok(_) => Ok(()),
+                    Err(_) => Err("Enter a whole number ≥ 0".into()),
+                }
+            }
+            "sender_email" => {
+                if t.contains('@') && t.contains('.') && !t.contains(' ') {
+                    Ok(())
+                } else {
+                    Err("Enter a valid email address".into())
+                }
+            }
+            "timezone" => {
+                if !t.is_empty() && !t.contains(' ') {
+                    Ok(())
+                } else {
+                    Err("Use an IANA timezone, e.g. Europe/London".into())
+                }
+            }
+            _ => {
+                if t.is_empty() {
+                    Err("Value cannot be empty".into())
+                } else {
+                    Ok(())
+                }
+            }
+        }
+    }
+
+    fn commit_inline_config(&mut self, cx: &mut Context<Self>) {
+        let Some(key) = self.editing_config_key else {
+            return;
+        };
+        let raw = self.config_draft.trim().to_owned();
+        if let Err(msg) = Self::validate_inline_config(key, &raw) {
+            self.config_error = Some(msg);
+            cx.notify();
+            return;
+        }
+        let clean_num = |s: &str| -> u64 {
+            s.chars()
+                .filter(|c| c.is_ascii_digit())
+                .collect::<String>()
+                .parse::<u64>()
+                .unwrap_or(0)
+        };
+        let split_csv = |s: &str| -> Vec<String> {
+            s.split(',')
+                .map(str::trim)
+                .filter(|x| !x.is_empty())
+                .map(str::to_owned)
+                .collect()
+        };
+
+        // Optimistic UI update immediately
+        match key {
+            "prep_reminder_minutes" => {
+                let v = clean_num(&raw) as i64;
+                self.snapshot.permissions.brief_lead_time_minutes = v;
+            }
+            "applied_ghost_days" => {
+                self.snapshot.profile_settings.applied_ghost_days = clean_num(&raw);
+            }
+            "sender_email" => self.snapshot.profile_settings.sender_email = raw.clone(),
+            "timezone" => self.snapshot.profile_settings.timezone = raw.clone(),
+            "min_base_salary" => {
+                self.snapshot.profile_settings.min_base_salary = clean_num(&raw);
+            }
+            "target_base_salary" => {
+                self.snapshot.profile_settings.target_base_salary = clean_num(&raw);
+            }
+            "location_preferences" => {
+                self.snapshot.profile_settings.location_preferences = split_csv(&raw).join(", ");
+            }
+            "target_roles" => {
+                self.snapshot.profile_settings.target_roles = split_csv(&raw).join(", ");
+            }
+            "tone" => self.snapshot.profile_settings.tone = raw.clone(),
+            _ => {}
+        }
+
+        self.editing_config_key = None;
+        self.config_draft.clear();
+        self.config_error = None;
+        self.input_all_selected = false;
+        self.active_input = ActiveInput::None;
+        self.mark_sync_working("Saving…", cx);
+
+        let client = self.client.clone();
+        cx.spawn(async move |this, cx| {
+            let res = cx
+                .background_executor()
+                .spawn(async move {
+                    client.update_ledger_config(|cfg| match key {
+                        "prep_reminder_minutes" => {
+                            let v = clean_num(&raw);
+                            if !cfg["time_and_reminders"].is_object() {
+                                cfg["time_and_reminders"] = json!({});
+                            }
+                            cfg["time_and_reminders"]["pre_interview_reminder_minutes"] = json!(v);
+                            cfg["time_and_reminders"]["brief_lead_time_minutes"] = json!(v);
+                        }
+                        "applied_ghost_days" => {
+                            let v = clean_num(&raw);
+                            if !cfg["time_and_reminders"].is_object() {
+                                cfg["time_and_reminders"] = json!({});
+                            }
+                            cfg["time_and_reminders"]["applied_ghost_days"] = json!(v);
+                        }
+                        "sender_email" => {
+                            if !cfg["communication"].is_object() {
+                                cfg["communication"] = json!({});
+                            }
+                            cfg["communication"]["sender_email"] = json!(raw);
+                        }
+                        "timezone" => {
+                            cfg["timezone"] = json!(raw);
+                        }
+                        "min_base_salary" => {
+                            let v = clean_num(&raw);
+                            if !cfg["discovery"].is_object() {
+                                cfg["discovery"] = json!({});
+                            }
+                            cfg["discovery"]["min_base_salary"] = json!(v);
+                        }
+                        "target_base_salary" => {
+                            let v = clean_num(&raw);
+                            if !cfg["discovery"].is_object() {
+                                cfg["discovery"] = json!({});
+                            }
+                            cfg["discovery"]["target_base_salary"] = json!(v);
+                        }
+                        "location_preferences" => {
+                            if !cfg["discovery"].is_object() {
+                                cfg["discovery"] = json!({});
+                            }
+                            cfg["discovery"]["location_preferences"] = json!(split_csv(&raw));
+                        }
+                        "target_roles" => {
+                            cfg["target_roles"] = json!(split_csv(&raw));
+                        }
+                        "tone" => {
+                            if !cfg["communication"].is_object() {
+                                cfg["communication"] = json!({});
+                            }
+                            cfg["communication"]["tone"] = json!(raw);
+                        }
+                        _ => {}
+                    })
+                })
+                .await;
+            let _ = this.update(cx, |app, cx| match res {
+                Ok(()) => app.mark_sync_saved("Saved", cx),
+                Err(err) => {
+                    app.mark_sync_failed("Save failed", cx);
+                    app.set_toast(format!("Save failed: {err}"), cx);
+                    app.refresh_snapshot_async(false, cx);
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn render_editable_kv(
+        &self,
+        key: &'static str,
+        label: &str,
+        display_value: String,
+        edit_initial: String,
+        placeholder: &str,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let is_editing = self.editing_config_key == Some(key);
+        let err = if is_editing {
+            self.config_error.clone()
+        } else {
+            None
+        };
+        div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_3()
+                    .text_xs()
+                    .child(
+                        div()
+                            .flex_shrink_0()
+                            .text_color(theme::text_muted())
+                            .child(label.to_owned()),
+                    )
+                    .child(if is_editing {
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .items_center()
+                            .justify_end()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .id(SharedString::from(format!("cfg-edit-{key}")))
+                                    .flex_1()
+                                    .min_w(px(72.0))
+                                    .px_2()
+                                    .py(px(3.0))
+                                    .rounded(px(6.0))
+                                    .bg(theme::surface_active())
+                                    .border_1()
+                                    .border_color(if err.is_some() {
+                                        theme::rose_text()
+                                    } else {
+                                        theme::lavender_border()
+                                    })
+                                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                        cx.stop_propagation();
+                                    })
+                                    .child(input_line(
+                                        &self.config_draft,
+                                        placeholder,
+                                        true,
+                                        self.reduce_motion,
+                                        "cfg",
+                                        28,
+                                    )),
+                            )
+                            .child(
+                                div()
+                                    .id(SharedString::from(format!("cfg-save-{key}")))
+                                    .px(px(6.0))
+                                    .py(px(3.0))
+                                    .rounded(px(5.0))
+                                    .bg(theme::lavender_wash())
+                                    .hover(|s| s.bg(theme::surface_active()))
+                                    .cursor_pointer()
+                                    .text_size(px(11.0))
+                                    .text_color(theme::lavender())
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.commit_inline_config(cx);
+                                    }))
+                                    .child("Save"),
+                            )
+                            .into_any_element()
+                    } else {
+                        // Subtle dashed underline signifies clickable/editable value cleanly!
+                        div()
+                            .id(SharedString::from(format!("cfg-val-{key}")))
+                            .min_w_0()
+                            .overflow_hidden()
+                            .pb(px(1.0))
+                            .border_b_1()
+                            .border_dashed()
+                            .border_color(theme::lavender_border())
+                            .hover(|s| {
+                                s.border_color(theme::lavender())
+                                    .text_color(theme::lavender())
+                            })
+                            .cursor_pointer()
+                            .text_color(theme::text_primary())
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.start_inline_config(key, edit_initial.clone(), cx);
+                            }))
+                            .child(display_value)
+                            .into_any_element()
+                    }),
+            )
+            .when_some(err, |d, msg| {
+                d.child(
+                    div()
+                        .text_size(px(11.0))
+                        .text_color(theme::rose_text())
+                        .child(msg),
+                )
+            })
     }
 
     fn toggle_permission(&mut self, key: &'static str, cx: &mut Context<Self>) {
@@ -977,7 +1549,7 @@ impl JobHarnessApp {
                 Err(err) => {
                     app.mark_sync_failed("Save failed", cx);
                     app.set_toast(format!("Save failed: {err}"), cx);
-                    app.refresh_snapshot_async(cx);
+                    app.refresh_snapshot_async(false, cx);
                 }
             });
         })
@@ -1059,6 +1631,7 @@ impl JobHarnessApp {
                 CommandAction::OpenTidy,
             ),
             ("Open CVs & Tracks", "⌘D", CommandAction::OpenCvs),
+            ("Open Profile & Context", "⌘P", CommandAction::OpenProfile),
             ("Daily Submission Cap", "Split", CommandAction::OpenBudget),
             ("Permissions & Timing", "Rules", CommandAction::OpenSettings),
             (
@@ -1108,9 +1681,11 @@ impl JobHarnessApp {
             }
             CommandAction::ToggleChat => self.toggle_chat_rail(cx),
             CommandAction::OpenCvs => self.open_right_drawer(RightDrawer::Cvs, cx),
+            CommandAction::OpenProfile => self.open_right_drawer(RightDrawer::Profile, cx),
             CommandAction::OpenTidy => self.open_right_drawer(RightDrawer::Tidy, cx),
             CommandAction::OpenBudget => {
                 self.active_popover = ActivePopover::Budget;
+                self.popover_pinned = true;
                 cx.notify();
             }
             CommandAction::OpenSettings => {
@@ -1125,8 +1700,7 @@ impl JobHarnessApp {
                 cx.notify();
             }
             CommandAction::RefreshWorkspace => {
-                self.refresh_snapshot_async(cx);
-                self.set_toast("Syncing workspace…", cx);
+                self.refresh_snapshot_async(true, cx);
             }
             CommandAction::ImportMasterCv => self.import_cv_dialog(cx),
             CommandAction::AskAgent(prompt) => self.submit_prompt(prompt, false, cx),
@@ -1146,8 +1720,9 @@ impl JobHarnessApp {
                     .await;
                 let _ = this.update(cx, |app, cx| match res {
                     Ok(rel) => {
+                        app.mark_sync_saved("Imported", cx);
                         app.set_toast(format!("Imported Master CV: {rel}"), cx);
-                        app.refresh_snapshot_async(cx);
+                        app.refresh_snapshot_async(false, cx);
                     }
                     Err(e) => app.set_toast(format!("Import failed: {e}"), cx),
                 });
@@ -1169,8 +1744,9 @@ impl JobHarnessApp {
                     .await;
                 let _ = this.update(cx, |app, cx| match res {
                     Ok(rel) => {
+                        app.mark_sync_saved("Replaced", cx);
                         app.set_toast(format!("Replaced track CV: {rel}"), cx);
-                        app.refresh_snapshot_async(cx);
+                        app.refresh_snapshot_async(false, cx);
                     }
                     Err(e) => app.set_toast(format!("Replace failed: {e}"), cx),
                 });
@@ -1181,7 +1757,15 @@ impl JobHarnessApp {
 
     fn submit_chat_input(&mut self, cx: &mut Context<Self>) {
         let raw = std::mem::take(&mut self.chat_input);
-        let trimmed = raw.trim();
+        self.input_all_selected = false;
+        let snippets = std::mem::take(&mut self.pasted_snippets);
+        let mut trimmed = raw.trim().to_owned();
+        for snip in snippets {
+            if !trimmed.is_empty() {
+                trimmed.push_str("\n\n");
+            }
+            trimmed.push_str(&snip);
+        }
         let mut prompt = match self.attached_role.take() {
             Some((company, record_path)) => {
                 if trimmed.is_empty() {
@@ -1192,7 +1776,7 @@ impl JobHarnessApp {
                     format!("{trimmed}\n\n[Role context: {company} — `{record_path}`]")
                 }
             }
-            None => trimmed.to_owned(),
+            None => trimmed,
         };
         if let Some(quote) = self.quoted_reply.take()
             && !prompt.is_empty()
@@ -1434,7 +2018,7 @@ impl JobHarnessApp {
                             app.streaming = false;
                             app.stream_status.clear();
                             app.stream_cancel = None;
-                            app.refresh_snapshot_async(cx);
+                            app.refresh_snapshot_async(false, cx);
                             dirty = true;
                         }
                         if dirty && app.chat_follow {
@@ -1491,33 +2075,106 @@ impl JobHarnessApp {
             return;
         }
         if cmd && key == "r" {
-            self.refresh_snapshot_async(cx);
-            self.set_toast("Syncing workspace…", cx);
+            self.refresh_snapshot_async(true, cx);
             return;
         }
         if cmd && key == "d" {
             self.open_right_drawer(RightDrawer::Cvs, cx);
             return;
         }
+        if cmd && key == "p" {
+            self.open_right_drawer(RightDrawer::Profile, cx);
+            return;
+        }
+        if cmd && key == "," {
+            self.open_right_drawer(RightDrawer::Settings, cx);
+            return;
+        }
         if cmd && key == "z" && self.undo_move.is_some() {
             self.perform_undo(cx);
             return;
         }
-        // Native Copy (⌘C) & Paste (⌘V) for inputs and latest Chat reply
+        // Native Select All (⌘A), Cut (⌘X), Copy (⌘C), Paste (⌘V with large-paste chips in Chat)
+        if cmd && key == "a" && self.active_input != ActiveInput::None {
+            self.input_all_selected = true;
+            cx.notify();
+            return;
+        }
+        if cmd && key == "x" && self.active_input != ActiveInput::None {
+            let cut = match self.active_input {
+                ActiveInput::CommandBar => std::mem::take(&mut self.command_query),
+                ActiveInput::Search => std::mem::take(&mut self.search_query),
+                ActiveInput::QuickAsk => std::mem::take(&mut self.quick_input),
+                ActiveInput::Chat => std::mem::take(&mut self.chat_input),
+                ActiveInput::ModelField => std::mem::take(&mut self.model_draft),
+                ActiveInput::InlineConfig => {
+                    self.config_error = None;
+                    std::mem::take(&mut self.config_draft)
+                }
+                ActiveInput::None => String::new(),
+            };
+            self.input_all_selected = false;
+            if !cut.is_empty() {
+                cx.write_to_clipboard(ClipboardItem::new_string(cut));
+                self.set_toast("Cut to clipboard", cx);
+            }
+            cx.notify();
+            return;
+        }
         if cmd && key == "v" {
             if let Some(item) = cx.read_from_clipboard()
                 && let Some(pasted) = item.text()
             {
                 let clean = pasted.replace('\r', "");
+                let replace_all = std::mem::take(&mut self.input_all_selected);
                 match self.active_input {
                     ActiveInput::CommandBar => {
+                        if replace_all {
+                            self.command_query.clear();
+                        }
                         self.command_query.push_str(clean.trim());
                         self.command_index = 0;
                     }
-                    ActiveInput::Search => self.search_query.push_str(clean.trim()),
-                    ActiveInput::QuickAsk => self.quick_input.push_str(&clean),
-                    ActiveInput::Chat => self.chat_input.push_str(&clean),
-                    ActiveInput::ModelField => self.model_draft.push_str(clean.trim()),
+                    ActiveInput::Search => {
+                        if replace_all {
+                            self.search_query.clear();
+                        }
+                        self.search_query.push_str(clean.trim());
+                    }
+                    ActiveInput::QuickAsk => {
+                        if replace_all {
+                            self.quick_input.clear();
+                        }
+                        self.quick_input.push_str(&clean);
+                    }
+                    ActiveInput::Chat => {
+                        if replace_all {
+                            self.chat_input.clear();
+                        }
+                        // Large multi-line pastes become a compact chip (T3 Code pattern) instead of flooding the composer!
+                        if clean.len() > 300 || clean.lines().count() >= 5 {
+                            self.pasted_snippets.push(clean);
+                            self.set_toast("Attached pasted text block", cx);
+                        } else {
+                            self.chat_input.push_str(&clean);
+                        }
+                    }
+                    ActiveInput::ModelField => {
+                        if replace_all {
+                            self.model_draft.clear();
+                        }
+                        self.model_draft.push_str(clean.trim());
+                    }
+                    ActiveInput::InlineConfig => {
+                        if replace_all {
+                            self.config_draft.clear();
+                        }
+                        self.config_draft.push_str(clean.trim());
+                        if let Some(k) = self.editing_config_key {
+                            self.config_error =
+                                Self::validate_inline_config(k, &self.config_draft).err();
+                        }
+                    }
                     ActiveInput::None => {}
                 }
                 cx.notify();
@@ -1525,7 +2182,23 @@ impl JobHarnessApp {
             return;
         }
         if cmd && key == "c" {
+            // 1. Prioritize active drag-selection inside Markdown (Chat / Role Inspector / Focused Reader)
+            if let Some((_, s_idx, e_idx, full)) = &self.text_selection
+                && s_idx != e_idx
+            {
+                let lo = (*s_idx).min(*e_idx).min(full.len());
+                let hi = (*s_idx).max(*e_idx).min(full.len());
+                if lo < hi && full.is_char_boundary(lo) && full.is_char_boundary(hi) {
+                    cx.write_to_clipboard(ClipboardItem::new_string(full[lo..hi].to_owned()));
+                    self.set_toast("Copied selection", cx);
+                    return;
+                }
+            }
+            // 2. Otherwise copy focused input buffer (or latest assistant reply)
             let to_copy = match self.active_input {
+                ActiveInput::CommandBar if !self.command_query.is_empty() => {
+                    Some(self.command_query.clone())
+                }
                 ActiveInput::Chat if !self.chat_input.is_empty() => Some(self.chat_input.clone()),
                 ActiveInput::QuickAsk if !self.quick_input.is_empty() => {
                     Some(self.quick_input.clone())
@@ -1535,6 +2208,9 @@ impl JobHarnessApp {
                 }
                 ActiveInput::ModelField if !self.model_draft.is_empty() => {
                     Some(self.model_draft.clone())
+                }
+                ActiveInput::InlineConfig if !self.config_draft.is_empty() => {
+                    Some(self.config_draft.clone())
                 }
                 _ => self
                     .chat_messages
@@ -1550,13 +2226,78 @@ impl JobHarnessApp {
             return;
         }
         if key == "escape" {
-            self.close_overlays();
+            if self.editing_config_key.is_some() {
+                self.cancel_inline_config(cx);
+                return;
+            }
+            if self.expanded_reader.is_some() {
+                self.expanded_reader = None;
+                cx.notify();
+                return;
+            }
+            if self.active_popover != ActivePopover::None || self.quick_popover_open {
+                self.close_overlays();
+                self.active_input = ActiveInput::None;
+                cx.notify();
+                return;
+            }
             self.right_drawer = RightDrawer::Closed;
             self.active_input = ActiveInput::None;
             cx.notify();
             return;
         }
+        // Keyboard section stepping inside the Focused Reader Modal (← / →)
+        if let Some((_, body)) = &self.expanded_reader
+            && !cmd
+            && (key == "left" || key == "right")
+        {
+            let sec_count = parse_brief_sections(body).len();
+            if sec_count >= 2 {
+                self.brief_section = if key == "left" {
+                    match self.brief_section {
+                        None | Some(0) => Some(sec_count.saturating_sub(1)),
+                        Some(i) => Some(i - 1),
+                    }
+                } else {
+                    match self.brief_section {
+                        None => Some(0),
+                        Some(i) if i + 1 < sec_count => Some(i + 1),
+                        Some(_) => None,
+                    }
+                };
+                self.brief_section_epoch = self.brief_section_epoch.wrapping_add(1);
+                cx.notify();
+            }
+            return;
+        }
         if self.active_input == ActiveInput::None && !cmd {
+            if key == "/" {
+                self.active_input = ActiveInput::Search;
+                cx.notify();
+                return;
+            }
+            if self.right_drawer == RightDrawer::Role {
+                let target_tab = match key {
+                    "1" => Some(DrawerTab::Overview),
+                    "2" => Some(DrawerTab::Brief),
+                    "3" => Some(DrawerTab::Notes),
+                    "[" => Some(match self.drawer_tab {
+                        DrawerTab::Overview => DrawerTab::Notes,
+                        DrawerTab::Brief => DrawerTab::Overview,
+                        DrawerTab::Notes => DrawerTab::Brief,
+                    }),
+                    "]" => Some(match self.drawer_tab {
+                        DrawerTab::Overview => DrawerTab::Brief,
+                        DrawerTab::Brief => DrawerTab::Notes,
+                        DrawerTab::Notes => DrawerTab::Overview,
+                    }),
+                    _ => None,
+                };
+                if let Some(tab) = target_tab {
+                    self.switch_role_tab(tab, cx);
+                    return;
+                }
+            }
             if key == "left" {
                 self.nudge_board_x(284.0, cx);
                 return;
@@ -1592,7 +2333,11 @@ impl JobHarnessApp {
                     return;
                 }
                 "backspace" => {
-                    self.command_query.pop();
+                    if cmd || std::mem::take(&mut self.input_all_selected) {
+                        self.command_query.clear();
+                    } else {
+                        self.command_query.pop();
+                    }
                     self.command_index = 0;
                     cx.notify();
                     return;
@@ -1602,6 +2347,9 @@ impl JobHarnessApp {
                         && let Some(ch) = &event.keystroke.key_char
                         && !ch.chars().any(char::is_control)
                     {
+                        if std::mem::take(&mut self.input_all_selected) {
+                            self.command_query.clear();
+                        }
                         self.command_query.push_str(ch);
                         self.command_index = 0;
                         cx.notify();
@@ -1611,42 +2359,78 @@ impl JobHarnessApp {
             }
         }
 
-        let target_buf = match self.active_input {
+        let shift = event.keystroke.modifiers.shift;
+        let all_sel = self.input_all_selected;
+        let active_in = self.active_input;
+        let target_buf = match active_in {
             ActiveInput::Search => Some(&mut self.search_query),
             ActiveInput::QuickAsk => Some(&mut self.quick_input),
             ActiveInput::Chat => Some(&mut self.chat_input),
             ActiveInput::ModelField => Some(&mut self.model_draft),
+            ActiveInput::InlineConfig => Some(&mut self.config_draft),
             ActiveInput::None | ActiveInput::CommandBar => None,
         };
         if let Some(buf) = target_buf {
             match key {
                 "backspace" => {
-                    if cmd {
+                    if cmd || all_sel {
                         buf.clear();
                     } else {
                         buf.pop();
                     }
+                    self.input_all_selected = false;
+                    if active_in == ActiveInput::InlineConfig
+                        && let Some(k) = self.editing_config_key
+                    {
+                        self.config_error =
+                            Self::validate_inline_config(k, &self.config_draft).err();
+                    }
                     cx.notify();
                 }
-                "enter" => match self.active_input {
-                    ActiveInput::QuickAsk => {
-                        let q = std::mem::take(&mut self.quick_input);
-                        self.submit_prompt(q, true, cx);
+                "enter" => {
+                    if active_in == ActiveInput::Chat && shift {
+                        if all_sel {
+                            buf.clear();
+                        }
+                        buf.push('\n');
+                        self.input_all_selected = false;
+                        cx.notify();
+                    } else {
+                        self.input_all_selected = false;
+                        match active_in {
+                            ActiveInput::QuickAsk => {
+                                let q = std::mem::take(&mut self.quick_input);
+                                self.submit_prompt(q, true, cx);
+                            }
+                            ActiveInput::Chat => {
+                                self.submit_chat_input(cx);
+                            }
+                            ActiveInput::ModelField => {
+                                self.apply_model_draft(cx);
+                            }
+                            ActiveInput::InlineConfig => {
+                                self.commit_inline_config(cx);
+                            }
+                            _ => {}
+                        }
                     }
-                    ActiveInput::Chat => {
-                        self.submit_chat_input(cx);
-                    }
-                    ActiveInput::ModelField => {
-                        self.apply_model_draft(cx);
-                    }
-                    _ => {}
-                },
+                }
                 _ => {
                     if !cmd
                         && let Some(ch) = &event.keystroke.key_char
                         && !ch.chars().any(char::is_control)
                     {
+                        if all_sel {
+                            buf.clear();
+                        }
                         buf.push_str(ch);
+                        self.input_all_selected = false;
+                        if active_in == ActiveInput::InlineConfig
+                            && let Some(k) = self.editing_config_key
+                        {
+                            self.config_error =
+                                Self::validate_inline_config(k, &self.config_draft).err();
+                        }
                         cx.notify();
                     }
                 }
@@ -1698,6 +2482,7 @@ impl JobHarnessApp {
         let urgent = self.snapshot.urgent_count > 0 || unseen_activity;
         let chat_open = self.chat_open;
         let cvs_open = self.right_drawer == RightDrawer::Cvs;
+        let profile_open = self.right_drawer == RightDrawer::Profile;
         let tidy_open = self.right_drawer == RightDrawer::Tidy;
         let tidy_n = self.tidy_count();
         let ws_label = self.client.target.label();
@@ -1832,6 +2617,29 @@ impl JobHarnessApp {
                     )
                     .child(
                         div()
+                            .id("btn-profile")
+                            .w(px(28.0))
+                            .h(px(28.0))
+                            .rounded(px(7.0))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .cursor_pointer()
+                            .when(profile_open, |d| d.bg(theme::surface_active()))
+                            .hover(|s| s.bg(theme::row_hover()))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.open_right_drawer(RightDrawer::Profile, cx);
+                            }))
+                            .child(svg().path("icons/user.svg").size(px(15.5)).text_color(
+                                if profile_open {
+                                    theme::text_primary()
+                                } else {
+                                    theme::text_secondary()
+                                },
+                            )),
+                    )
+                    .child(
+                        div()
                             .id("btn-bell")
                             .relative()
                             .w(px(28.0))
@@ -1911,6 +2719,42 @@ impl JobHarnessApp {
         self.set_toast(format!("Model set to {}", self.active_model_badge()), cx);
     }
 
+    fn suggest_chat_followups(&self, msg: &ChatMessage) -> Vec<(String, String)> {
+        let mut out = Vec::new();
+        if let Some(brief) = msg.citations.iter().find(|c| c.contains("briefs/")) {
+            let short = brief.rsplit('/').next().unwrap_or(brief);
+            out.push((
+                format!("Drill me on {short}"),
+                format!("Run a 1-question-at-a-time mock prep drill from `{brief}`."),
+            ));
+        }
+        let lower = msg.text.to_ascii_lowercase();
+        if lower.contains("availability") || lower.contains("rsvp") || lower.contains("reply") {
+            out.push((
+                "Draft the reply in my voice".into(),
+                "Draft the short reply email in my voice (check Gmail Sent first; save as draft only).".into(),
+            ));
+        }
+        if out.len() < 2 && self.snapshot.unresolved_attempts > 0 && !lower.contains("reconcil") {
+            out.push((
+                format!(
+                    "Reconcile {} unknown guard(s)",
+                    self.snapshot.unresolved_attempts
+                ),
+                "Reconcile unknown submission outcomes against Gmail Sent.".into(),
+            ));
+        }
+        if out.len() < 2 {
+            out.push((
+                "What's the next highest-leverage move?".into(),
+                "What is the single highest-leverage next action across my active roles right now?"
+                    .into(),
+            ));
+        }
+        out.truncate(2);
+        out
+    }
+
     fn render_chat_rail(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let input_active = self.active_input == ActiveInput::Chat;
         let agent_pop_open = self.active_popover == ActivePopover::Agent;
@@ -1923,9 +2767,15 @@ impl JobHarnessApp {
             "Message your agent…".to_owned()
         };
         let on_link = self.md_link_handler(cx);
+        let on_select = self.md_select_handler(cx);
+        let active_sel = self.active_text_selection();
 
         div()
             .id("chat-rail-drop")
+            .drag_over::<ExternalPaths>(|s, _, _, _| {
+                s.bg(theme::lavender_wash())
+                    .border_color(theme::lavender_border())
+            })
             .on_drop(cx.listener(|this, paths: &ExternalPaths, _, cx| {
                 let mut added = 0usize;
                 for p in paths.paths() {
@@ -1940,7 +2790,7 @@ impl JobHarnessApp {
                 }
             }))
             .relative()
-            .w(px(300.0))
+            .w_full()
             .h_full()
             .flex_shrink_0()
             .flex()
@@ -1984,19 +2834,15 @@ impl JobHarnessApp {
                                 };
                                 cx.notify();
                             }))
-                            .child(
-                                div()
-                                    .w(px(6.0))
-                                    .h(px(6.0))
-                                    .rounded(px(99.0))
-                                    .bg(if self.streaming {
-                                        theme::lavender()
-                                    } else if self.runtime.is_ready() {
-                                        theme::emerald()
-                                    } else {
-                                        theme::amber_accent()
-                                    }),
-                            )
+                            .child(div().w(px(6.0)).h(px(6.0)).rounded(px(99.0)).bg(
+                                if self.streaming {
+                                    theme::lavender()
+                                } else if self.runtime.is_ready() {
+                                    theme::emerald()
+                                } else {
+                                    theme::amber_accent()
+                                },
+                            ))
                             .child(
                                 div()
                                     .text_xs()
@@ -2025,6 +2871,8 @@ impl JobHarnessApp {
                                     this.chat_messages.clear();
                                     this.quoted_reply = None;
                                     this.chat_attachments.clear();
+                                    this.pasted_snippets.clear();
+                                    this.text_selection = None;
                                     this.chat_follow = true;
                                     cx.notify();
                                 }))
@@ -2032,62 +2880,53 @@ impl JobHarnessApp {
                         )
                     }),
             )
-            // Scrollable message stream with tappable tool steps, rich inline Markdown, and T3 Code hover footer
+            // Scrollable message stream wrapped in `.relative()` so jump-to-bottom floats cleanly above the composer
             .child(
                 div()
-                    .id("chat-scroll")
-                    .track_scroll(&self.chat_scroll)
-                    .on_scroll_wheel(cx.listener(|this, ev: &ScrollWheelEvent, _, cx| {
-                        let dy: f32 = ev.delta.pixel_delta(px(20.0)).y.into();
-                        if dy > 1.0 {
-                            this.chat_follow = false;
-                            cx.notify();
-                        } else if dy < -1.0 {
-                            let cur_y: f32 = this.chat_scroll.offset().y.into();
-                            let max_y: f32 = this.chat_scroll.max_offset().height.into();
-                            if max_y <= 0.0 || (cur_y + max_y).abs() < 28.0 {
-                                this.chat_follow = true;
-                                cx.notify();
-                            }
-                        }
-                        cx.stop_propagation();
-                    }))
+                    .relative()
                     .flex_1()
                     .min_h_0()
-                    .overflow_y_scroll()
-                    .px_4()
-                    .py_3()
                     .flex()
                     .flex_col()
-                    .gap_4()
-                    .when(self.chat_messages.is_empty(), |d| {
-                        d.child(
-                            div()
-                                .pt_1()
-                                .flex()
-                                .flex_col()
-                                .gap_3()
-                                .child(
-                                    div()
-                                        .text_xs()
-                                        .line_height(px(18.0))
-                                        .text_color(theme::text_secondary())
-                                        .child("Connected to your live career ledger. Ask what needs attention, drop screenshots, or prepare a brief."),
-                                )
-                                .child(
-                                    div()
-                                        .flex()
-                                        .flex_col()
-                                        .gap_1()
-                                        .children(
-                                            [
-                                                "What needs attention today?",
-                                                "Catch me up on recent inbox & calendar changes",
-                                                "Prepare a 2-layer brief for my next interview",
-                                            ]
-                                            .into_iter()
-                                            .enumerate()
-                                            .map(|(i, prompt)| {
+                    .child(
+                        div()
+                            .id("chat-scroll")
+                            .track_scroll(&self.chat_scroll)
+                            .on_scroll_wheel(cx.listener(|this, ev: &ScrollWheelEvent, _, cx| {
+                                let dy: f32 = ev.delta.pixel_delta(px(20.0)).y.into();
+                                if dy > 1.0 {
+                                    this.chat_follow = false;
+                                    cx.notify();
+                                } else if dy < -1.0 {
+                                    let cur_y: f32 = this.chat_scroll.offset().y.into();
+                                    let max_y: f32 = this.chat_scroll.max_offset().height.into();
+                                    if max_y <= 0.0 || (cur_y + max_y).abs() < 28.0 {
+                                        this.chat_follow = true;
+                                        cx.notify();
+                                    }
+                                }
+                                cx.stop_propagation();
+                            }))
+                            .flex_1()
+                            .min_h_0()
+                            .overflow_y_scroll()
+                            .px_4()
+                            .py_3()
+                            .flex()
+                            .flex_col()
+                            .gap_4()
+                            .when(self.chat_messages.is_empty(), |d| {
+                                d.child(
+                                    div().pt_1().flex().flex_col().gap_1().children(
+                                        [
+                                            "What needs attention today?",
+                                            "Catch me up on recent inbox & calendar changes",
+                                            "Prepare a 2-layer brief for my next interview",
+                                        ]
+                                        .into_iter()
+                                        .enumerate()
+                                        .map(
+                                            |(i, prompt)| {
                                                 let p = prompt.to_owned();
                                                 div()
                                                     .id(SharedString::from(format!(
@@ -2105,450 +2944,470 @@ impl JobHarnessApp {
                                                         this.submit_prompt(p.clone(), false, cx);
                                                     }))
                                                     .child(format!("→  {prompt}"))
-                                            }),
+                                            },
                                         ),
-                                ),
-                        )
-                    })
-                    .children(self.chat_messages.iter().enumerate().map(|(idx, msg)| {
-                        let is_last = idx + 1 == self.chat_messages.len();
-                        let shown = if msg.is_user {
-                            msg.text.as_str()
-                        } else {
-                            let end = msg.revealed.min(msg.text.len());
-                            &msg.text[..end]
-                        };
-                        let actively_writing = !msg.is_user
-                            && is_last
-                            && (self.streaming || msg.revealed < msg.text.len());
-                        let elapsed_s = msg
-                            .duration_ms
-                            .map(|ms| ms as f32 / 1000.0)
-                            .unwrap_or_else(|| msg.started_at.elapsed().as_secs_f32());
-                        let has_trace = !msg.steps.is_empty() || !msg.thinking.is_empty();
-                        let copy_text = msg.text.clone();
-                        let reply_text = msg.text.clone();
-                        let expand_text = msg.text.clone();
-                        let prev_user_prompt = if !msg.is_user && idx > 0 {
-                            self.chat_messages
-                                .get(idx - 1)
-                                .filter(|m| m.is_user)
-                                .map(|m| m.text.clone())
-                        } else {
-                            None
-                        };
-                        let has_model_override =
-                            self.agent_opts.model.is_some() || self.agent_opts.provider.is_some();
-                        let group_name = SharedString::from(format!("chat-msg-grp-{idx}"));
-
-                        let mut block = div()
-                            .group(group_name.clone())
-                            .flex()
-                            .flex_col()
-                            .gap_2();
-
-                        // Live / collapsible inline Activity Trace with tappable steps + real token count
-                        if !msg.is_user && (actively_writing || has_trace) {
-                            let step_count = msg.steps.len();
-                            let tok_suffix = msg
-                                .total_tokens
-                                .map(|t| format!(" · {}", format_tokens(t)))
-                                .unwrap_or_default();
-                            let header_label = if actively_writing {
-                                let base = if self.stream_status.is_empty() {
-                                    "Thinking…".to_owned()
+                                    ),
+                                )
+                            })
+                            .children(self.chat_messages.iter().enumerate().map(|(idx, msg)| {
+                                let is_last = idx + 1 == self.chat_messages.len();
+                                let shown = if msg.is_user {
+                                    msg.text.as_str()
                                 } else {
-                                    self.stream_status.clone()
+                                    let end = msg.revealed.min(msg.text.len());
+                                    &msg.text[..end]
                                 };
-                                format!("{base} · {:.0}s", elapsed_s.max(0.0))
-                            } else if step_count > 0 {
-                                let noun = if step_count == 1 { "step" } else { "steps" };
-                                format!("{step_count} {noun} · {elapsed_s:.1}s{tok_suffix}")
-                            } else {
-                                format!("Thought · {elapsed_s:.1}s{tok_suffix}")
-                            };
-
-                            let dot = div()
-                                .w(px(6.0))
-                                .h(px(6.0))
-                                .rounded(px(99.0))
-                                .bg(if actively_writing {
-                                    theme::lavender()
+                                let actively_writing = !msg.is_user
+                                    && is_last
+                                    && (self.streaming || msg.revealed < msg.text.len());
+                                let elapsed_s = msg
+                                    .duration_ms
+                                    .map(|ms| ms as f32 / 1000.0)
+                                    .unwrap_or_else(|| msg.started_at.elapsed().as_secs_f32());
+                                let has_trace = !msg.steps.is_empty() || !msg.thinking.is_empty();
+                                let copy_text = msg.text.clone();
+                                let reply_text = msg.text.clone();
+                                let expand_text = msg.text.clone();
+                                let prev_user_prompt = if !msg.is_user && idx > 0 {
+                                    self.chat_messages
+                                        .get(idx - 1)
+                                        .filter(|m| m.is_user)
+                                        .map(|m| m.text.clone())
                                 } else {
-                                    theme::emerald()
-                                });
-                            let header_row = div()
-                                .id(SharedString::from(format!("trace-tog-{idx}")))
-                                .flex()
-                                .items_center()
-                                .justify_between()
-                                .gap_2()
-                                .cursor_pointer()
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    if let Some(m) = this.chat_messages.get_mut(idx) {
-                                        m.steps_expanded = !m.steps_expanded;
-                                        cx.notify();
-                                    }
-                                }))
-                                .child(
-                                    div()
+                                    None
+                                };
+                                let has_model_override = self.agent_opts.model.is_some()
+                                    || self.agent_opts.provider.is_some();
+                                let group_name = SharedString::from(format!("chat-msg-grp-{idx}"));
+
+                                let mut block =
+                                    div().group(group_name.clone()).flex().flex_col().gap_2();
+
+                                // Live / collapsible inline Activity Trace with tappable steps + real token count
+                                if !msg.is_user && (actively_writing || has_trace) {
+                                    let step_count = msg.steps.len();
+                                    let tok_suffix = msg
+                                        .total_tokens
+                                        .map(|t| format!(" · {}", format_tokens(t)))
+                                        .unwrap_or_default();
+                                    let header_label = if actively_writing {
+                                        let base = if self.stream_status.is_empty() {
+                                            "Thinking…".to_owned()
+                                        } else {
+                                            self.stream_status.clone()
+                                        };
+                                        format!("{base} · {:.0}s", elapsed_s.max(0.0))
+                                    } else if step_count > 0 {
+                                        let noun = if step_count == 1 { "step" } else { "steps" };
+                                        format!("{step_count} {noun} · {elapsed_s:.1}s{tok_suffix}")
+                                    } else {
+                                        format!("Thought · {elapsed_s:.1}s{tok_suffix}")
+                                    };
+
+                                    let dot = div().w(px(6.0)).h(px(6.0)).rounded(px(99.0)).bg(
+                                        if actively_writing {
+                                            theme::lavender()
+                                        } else {
+                                            theme::emerald()
+                                        },
+                                    );
+                                    let header_row = div()
+                                        .id(SharedString::from(format!("trace-tog-{idx}")))
                                         .flex()
                                         .items_center()
+                                        .justify_between()
                                         .gap_2()
-                                        .child(dot)
+                                        .cursor_pointer()
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            if let Some(m) = this.chat_messages.get_mut(idx) {
+                                                m.steps_expanded = !m.steps_expanded;
+                                                cx.notify();
+                                            }
+                                        }))
                                         .child(
-                                            div()
-                                                .text_xs()
-                                                .text_color(if actively_writing {
-                                                    theme::text_secondary()
-                                                } else {
-                                                    theme::text_muted()
-                                                })
-                                                .child(header_label),
-                                        ),
-                                )
-                                .when(has_trace, |r| {
-                                    r.child(
-                                        div()
-                                            .text_xs()
-                                            .text_color(theme::text_muted())
-                                            .child(if msg.steps_expanded { "▾" } else { "▸" }),
-                                    )
-                                });
-
-                            let header_el = if actively_writing && !self.reduce_motion {
-                                header_row
-                                    .with_animation(
-                                        SharedString::from(format!("think-pulse-{idx}")),
-                                        Animation::new(Duration::from_millis(900))
-                                            .repeat()
-                                            .with_easing(ease_out_quint()),
-                                        |el, t| {
-                                            let wave = 0.6 + 0.4 * (1.0 - (2.0 * t - 1.0).abs());
-                                            el.opacity(wave)
-                                        },
-                                    )
-                                    .into_any_element()
-                            } else {
-                                header_row.into_any_element()
-                            };
-
-                            let mut trace_box =
-                                div().flex().flex_col().gap_1().child(header_el);
-
-                            if msg.steps_expanded && has_trace {
-                                let mut inner = div()
-                                    .pl_3()
-                                    .ml(px(2.0))
-                                    .border_l_1()
-                                    .border_color(theme::hairline())
-                                    .flex()
-                                    .flex_col()
-                                    .gap_1();
-                                if !msg.thinking.trim().is_empty() {
-                                    inner = inner.child(
-                                        div()
-                                            .text_xs()
-                                            .line_height(px(17.0))
-                                            .text_color(theme::text_muted())
-                                            .child(truncate_end(msg.thinking.trim(), 220)),
-                                    );
-                                }
-                                for (si, step) in msg.steps.iter().enumerate() {
-                                    let icon = if !step.done {
-                                        "●"
-                                    } else if step.ok {
-                                        "✓"
-                                    } else {
-                                        "✕"
-                                    };
-                                    let icon_col = if !step.done {
-                                        theme::lavender()
-                                    } else if step.ok {
-                                        theme::emerald()
-                                    } else {
-                                        theme::rose_text()
-                                    };
-                                    let dur_tag = step
-                                        .duration_ms
-                                        .map(|ms| format!("{:.1}s", ms as f32 / 1000.0));
-                                    let line_txt = if step.detail.is_empty() {
-                                        step.name.clone()
-                                    } else {
-                                        format!(
-                                            "{} · {}",
-                                            step.name,
-                                            truncate_end(&step.detail, 30)
-                                        )
-                                    };
-                                    let can_expand =
-                                        !step.output.is_empty() || !step.detail.is_empty();
-                                    let mut step_wrap = div().flex().flex_col().gap_1().child(
-                                        div()
-                                            .id(SharedString::from(format!(
-                                                "step-row-{idx}-{si}"
-                                            )))
-                                            .px_1()
-                                            .mx(px(-4.0))
-                                            .py(px(2.0))
-                                            .rounded(px(5.0))
-                                            .when(can_expand, |d| {
-                                                d.hover(|s| s.bg(theme::row_hover()))
-                                                    .cursor_pointer()
-                                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                                        if let Some(m) =
-                                                            this.chat_messages.get_mut(idx)
-                                                            && let Some(st) = m.steps.get_mut(si)
-                                                        {
-                                                            st.expanded = !st.expanded;
-                                                            cx.notify();
-                                                        }
-                                                    }))
-                                            })
-                                            .flex()
-                                            .items_center()
-                                            .justify_between()
-                                            .gap_2()
-                                            .text_xs()
-                                            .child(
+                                            div().flex().items_center().gap_2().child(dot).child(
                                                 div()
-                                                    .flex_1()
-                                                    .min_w_0()
-                                                    .overflow_hidden()
-                                                    .flex()
-                                                    .items_center()
-                                                    .gap_1()
-                                                    .child(div().text_color(icon_col).child(icon))
-                                                    .child(
-                                                        div()
-                                                            .text_color(theme::text_muted())
-                                                            .child(line_txt),
-                                                    ),
-                                            )
-                                            .child(
-                                                div()
-                                                    .flex_shrink_0()
-                                                    .flex()
-                                                    .items_center()
-                                                    .gap_1()
-                                                    .when_some(dur_tag, |r, d| {
-                                                        r.child(
-                                                            div()
-                                                                .text_color(theme::text_muted())
-                                                                .child(d),
-                                                        )
+                                                    .text_xs()
+                                                    .text_color(if actively_writing {
+                                                        theme::text_secondary()
+                                                    } else {
+                                                        theme::text_muted()
                                                     })
-                                                    .when(can_expand, |r| {
-                                                        r.child(
-                                                            div()
-                                                                .text_color(theme::text_muted())
-                                                                .child(if step.expanded {
-                                                                    "▾"
-                                                                } else {
-                                                                    "›"
-                                                                }),
-                                                        )
-                                                    }),
+                                                    .child(header_label),
                                             ),
-                                    );
-                                    if step.expanded && can_expand {
-                                        let preview = if !step.output.is_empty() {
-                                            truncate_end(&step.output, 320)
-                                        } else {
-                                            step.detail.clone()
-                                        };
-                                        step_wrap = step_wrap.child(
-                                            div()
-                                                .p_2()
-                                                .rounded(px(6.0))
-                                                .bg(theme::window_glass())
-                                                .border_1()
-                                                .border_color(theme::hairline())
-                                                .text_size(px(11.0))
-                                                .line_height(px(15.5))
-                                                .text_color(theme::text_muted())
-                                                .child(preview),
+                                        )
+                                        .when(has_trace, |r| {
+                                            r.child(
+                                                div()
+                                                    .text_xs()
+                                                    .text_color(theme::text_muted())
+                                                    .child(if msg.steps_expanded {
+                                                        "▾"
+                                                    } else {
+                                                        "▸"
+                                                    }),
+                                            )
+                                        });
+
+                                    let header_el = if actively_writing && !self.reduce_motion {
+                                        header_row
+                                            .with_animation(
+                                                SharedString::from(format!("think-pulse-{idx}")),
+                                                Animation::new(Duration::from_millis(900))
+                                                    .repeat()
+                                                    .with_easing(ease_out_quint()),
+                                                |el, t| {
+                                                    let wave =
+                                                        0.6 + 0.4 * (1.0 - (2.0 * t - 1.0).abs());
+                                                    el.opacity(wave)
+                                                },
+                                            )
+                                            .into_any_element()
+                                    } else {
+                                        header_row.into_any_element()
+                                    };
+
+                                    let mut trace_box =
+                                        div().flex().flex_col().gap_1().child(header_el);
+
+                                    if msg.steps_expanded && has_trace {
+                                        let mut inner = div()
+                                            .pl_3()
+                                            .ml(px(2.0))
+                                            .border_l_1()
+                                            .border_color(theme::hairline())
+                                            .flex()
+                                            .flex_col()
+                                            .gap_1();
+                                        if !msg.thinking.trim().is_empty() {
+                                            inner = inner.child(
+                                                div()
+                                                    .text_xs()
+                                                    .line_height(px(17.0))
+                                                    .text_color(theme::text_muted())
+                                                    .child(truncate_end(msg.thinking.trim(), 220)),
+                                            );
+                                        }
+                                        for (si, step) in msg.steps.iter().enumerate() {
+                                            let icon = if !step.done {
+                                                "●"
+                                            } else if step.ok {
+                                                "✓"
+                                            } else {
+                                                "✕"
+                                            };
+                                            let icon_col = if !step.done {
+                                                theme::lavender()
+                                            } else if step.ok {
+                                                theme::emerald()
+                                            } else {
+                                                theme::rose_text()
+                                            };
+                                            let dur_tag = step
+                                                .duration_ms
+                                                .map(|ms| format!("{:.1}s", ms as f32 / 1000.0));
+                                            let line_txt = if step.detail.is_empty() {
+                                                step.name.clone()
+                                            } else {
+                                                format!(
+                                                    "{} · {}",
+                                                    step.name,
+                                                    truncate_end(&step.detail, 30)
+                                                )
+                                            };
+                                            let can_expand =
+                                                !step.output.is_empty() || !step.detail.is_empty();
+                                            let mut step_wrap =
+                                                div().flex().flex_col().gap_1().child(
+                                                    div()
+                                                        .id(SharedString::from(format!(
+                                                            "step-row-{idx}-{si}"
+                                                        )))
+                                                        .px_1()
+                                                        .mx(px(-4.0))
+                                                        .py(px(2.0))
+                                                        .rounded(px(5.0))
+                                                        .when(can_expand, |d| {
+                                                            d.hover(|s| s.bg(theme::row_hover()))
+                                                                .cursor_pointer()
+                                                                .on_click(cx.listener(
+                                                                    move |this, _, _, cx| {
+                                                                        if let Some(m) = this
+                                                                            .chat_messages
+                                                                            .get_mut(idx)
+                                                                            && let Some(st) =
+                                                                                m.steps.get_mut(si)
+                                                                        {
+                                                                            st.expanded =
+                                                                                !st.expanded;
+                                                                            cx.notify();
+                                                                        }
+                                                                    },
+                                                                ))
+                                                        })
+                                                        .flex()
+                                                        .items_center()
+                                                        .justify_between()
+                                                        .gap_2()
+                                                        .text_xs()
+                                                        .child(
+                                                            div()
+                                                                .flex_1()
+                                                                .min_w_0()
+                                                                .overflow_hidden()
+                                                                .flex()
+                                                                .items_center()
+                                                                .gap_1()
+                                                                .child(
+                                                                    div()
+                                                                        .text_color(icon_col)
+                                                                        .child(icon),
+                                                                )
+                                                                .child(
+                                                                    div()
+                                                                        .text_color(
+                                                                            theme::text_muted(),
+                                                                        )
+                                                                        .child(line_txt),
+                                                                ),
+                                                        )
+                                                        .child(
+                                                            div()
+                                                                .flex_shrink_0()
+                                                                .flex()
+                                                                .items_center()
+                                                                .gap_1()
+                                                                .when_some(dur_tag, |r, d| {
+                                                                    r.child(
+                                                                        div()
+                                                                            .text_color(
+                                                                                theme::text_muted(),
+                                                                            )
+                                                                            .child(d),
+                                                                    )
+                                                                })
+                                                                .when(can_expand, |r| {
+                                                                    r.child(
+                                                                        div()
+                                                                            .text_color(
+                                                                                theme::text_muted(),
+                                                                            )
+                                                                            .child(
+                                                                                if step.expanded {
+                                                                                    "▾"
+                                                                                } else {
+                                                                                    "›"
+                                                                                },
+                                                                            ),
+                                                                    )
+                                                                }),
+                                                        ),
+                                                );
+                                            if step.expanded && can_expand {
+                                                let preview = if !step.output.is_empty() {
+                                                    truncate_end(&step.output, 320)
+                                                } else {
+                                                    step.detail.clone()
+                                                };
+                                                step_wrap = step_wrap.child(
+                                                    div()
+                                                        .p_2()
+                                                        .rounded(px(6.0))
+                                                        .bg(theme::window_glass())
+                                                        .border_1()
+                                                        .border_color(theme::hairline())
+                                                        .text_size(px(11.0))
+                                                        .line_height(px(15.5))
+                                                        .text_color(theme::text_muted())
+                                                        .child(preview),
+                                                );
+                                            }
+                                            inner = inner.child(step_wrap);
+                                        }
+                                        trace_box = trace_box.child(inner);
+                                    }
+                                    block = block.child(trace_box);
+                                }
+
+                                // Message content body (inline thumbnails on user messages & rich Markdown on replies)
+                                if msg.is_user {
+                                    let mut bubble = div()
+                                        .px_3()
+                                        .py_2()
+                                        .rounded(px(10.0))
+                                        .bg(theme::surface_subtle())
+                                        .flex()
+                                        .flex_col()
+                                        .gap_2();
+                                    if !msg.attachments.is_empty() {
+                                        bubble = bubble.child(
+                                            div().flex().flex_wrap().gap_1().children(
+                                                msg.attachments.iter().map(|p| {
+                                                    if is_image_path(p) {
+                                                        img(p.clone())
+                                                            .size(px(44.0))
+                                                            .rounded(px(6.0))
+                                                            .into_any_element()
+                                                    } else {
+                                                        let name = p
+                                                            .file_name()
+                                                            .and_then(|s| s.to_str())
+                                                            .unwrap_or("file");
+                                                        div()
+                                                            .px_2()
+                                                            .py(px(2.0))
+                                                            .rounded(px(5.0))
+                                                            .bg(theme::surface_active())
+                                                            .text_xs()
+                                                            .text_color(theme::text_secondary())
+                                                            .child(truncate_label(name, 20))
+                                                            .into_any_element()
+                                                    }
+                                                }),
+                                            ),
                                         );
                                     }
-                                    inner = inner.child(step_wrap);
+                                    bubble = bubble.child(markdown::render_markdown(
+                                        &format!("chat-user-{idx}"),
+                                        &msg.text,
+                                        false,
+                                        active_sel.as_ref(),
+                                        on_link.clone(),
+                                        on_select.clone(),
+                                    ));
+                                    block = block.child(bubble);
+                                } else if !shown.is_empty() {
+                                    let display_str = if actively_writing {
+                                        format!("{shown} ▋")
+                                    } else {
+                                        shown.to_owned()
+                                    };
+                                    block = block.child(markdown::render_markdown(
+                                        &format!("chat-md-{idx}"),
+                                        &display_str,
+                                        false,
+                                        active_sel.as_ref(),
+                                        on_link.clone(),
+                                        on_select.clone(),
+                                    ));
                                 }
-                                trace_box = trace_box.child(inner);
-                            }
-                            block = block.child(trace_box);
-                        }
 
-                        // Message content body (inline thumbnails on user messages & rich Markdown on replies)
-                        if msg.is_user {
-                            let mut bubble = div()
-                                .px_3()
-                                .py_2()
-                                .rounded(px(10.0))
-                                .bg(theme::surface_subtle())
-                                .flex()
-                                .flex_col()
-                                .gap_2();
-                            if !msg.attachments.is_empty() {
-                                bubble = bubble.child(
-                                    div().flex().flex_wrap().gap_1().children(
-                                        msg.attachments.iter().map(|p| {
-                                            if is_image_path(p) {
-                                                img(p.clone())
-                                                    .size(px(44.0))
-                                                    .rounded(px(6.0))
-                                                    .into_any_element()
-                                            } else {
-                                                let name = p
-                                                    .file_name()
-                                                    .and_then(|s| s.to_str())
-                                                    .unwrap_or("file");
+                                // Deduplicated Sources tie-in strip at the end of assistant messages
+                                if !msg.citations.is_empty() && !actively_writing {
+                                    let links = div()
+                                        .pt_1()
+                                        .flex()
+                                        .flex_wrap()
+                                        .items_center()
+                                        .gap_1()
+                                        .children(msg.citations.iter().enumerate().map(
+                                            |(ci, path)| {
+                                                let p = path.clone();
+                                                let short = truncate_label(
+                                                    path.rsplit('/').next().unwrap_or(path),
+                                                    24,
+                                                );
                                                 div()
+                                                    .id(SharedString::from(format!(
+                                                        "cite-{idx}-{ci}"
+                                                    )))
                                                     .px_2()
                                                     .py(px(2.0))
-                                                    .rounded(px(5.0))
-                                                    .bg(theme::surface_active())
+                                                    .rounded(px(6.0))
+                                                    .bg(theme::surface_subtle())
+                                                    .hover(|s| s.bg(theme::row_hover()))
                                                     .text_xs()
-                                                    .text_color(theme::text_secondary())
-                                                    .child(truncate_label(name, 20))
-                                                    .into_any_element()
-                                            }
-                                        }),
-                                    ),
-                                );
-                            }
-                            bubble = bubble.child(
-                                div()
-                                    .text_size(px(12.5))
-                                    .line_height(px(18.5))
-                                    .text_color(theme::text_primary())
-                                    .child(msg.text.clone()),
-                            );
-                            block = block.child(bubble);
-                        } else if !shown.is_empty() {
-                            let display_str = if actively_writing {
-                                format!("{shown} ▋")
-                            } else {
-                                shown.to_owned()
-                            };
-                            block = block.child(markdown::render_markdown(
-                                &format!("chat-md-{idx}"),
-                                &display_str,
-                                false,
-                                on_link.clone(),
-                            ));
-                        }
+                                                    .text_color(theme::lavender())
+                                                    .cursor_pointer()
+                                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                                        this.open_citation(&p, cx);
+                                                    }))
+                                                    .child(format!("↗ {short}"))
+                                            },
+                                        ));
+                                    block = block.child(links);
+                                }
 
-                        // Deduplicated Sources tie-in strip at the end of assistant messages
-                        if !msg.citations.is_empty() && !actively_writing {
-                            let links = div()
-                                .pt_1()
-                                .flex()
-                                .flex_wrap()
-                                .items_center()
-                                .gap_1()
-                                .children(msg.citations.iter().enumerate().map(|(ci, path)| {
-                                    let p = path.clone();
-                                    let short =
-                                        truncate_label(path.rsplit('/').next().unwrap_or(path), 24);
-                                    div()
-                                        .id(SharedString::from(format!("cite-{idx}-{ci}")))
-                                        .px_2()
-                                        .py(px(2.0))
-                                        .rounded(px(6.0))
-                                        .bg(theme::surface_subtle())
-                                        .hover(|s| s.bg(theme::row_hover()))
-                                        .text_xs()
-                                        .text_color(theme::lavender())
-                                        .cursor_pointer()
-                                        .on_click(cx.listener(move |this, _, _, cx| {
-                                            this.open_citation(&p, cx);
-                                        }))
-                                        .child(format!("↗ {short}"))
-                                }));
-                            block = block.child(links);
-                        }
-
-                        // T3 Code hover-reveal message footer: right-aligned timestamp + Lucide icon actions
-                        if !msg.text.is_empty() && !actively_writing {
-                            let mut icon_bar = div()
-                                .flex()
-                                .items_center()
-                                .gap_1()
-                                .opacity(0.0)
-                                .group_hover(group_name.clone(), |s| s.opacity(1.0))
-                                .child(
-                                    div()
-                                        .id(SharedString::from(format!("msg-copy-{idx}")))
-                                        .p(px(4.0))
-                                        .rounded(px(5.0))
-                                        .cursor_pointer()
-                                        .hover(|s| s.bg(theme::row_hover()))
-                                        .on_click(cx.listener(move |this, _, _, cx| {
-                                            cx.write_to_clipboard(ClipboardItem::new_string(
-                                                copy_text.clone(),
-                                            ));
-                                            this.set_toast("Copied message", cx);
-                                        }))
-                                        .child(
-                                            svg()
-                                                .path("icons/copy.svg")
-                                                .size(px(13.0))
-                                                .text_color(theme::text_muted()),
-                                        ),
-                                )
-                                .child(
-                                    div()
-                                        .id(SharedString::from(format!("msg-reply-{idx}")))
-                                        .p(px(4.0))
-                                        .rounded(px(5.0))
-                                        .cursor_pointer()
-                                        .hover(|s| s.bg(theme::row_hover()))
-                                        .on_click(cx.listener(move |this, _, _, cx| {
-                                            this.quoted_reply = Some(reply_text.clone());
-                                            this.active_input = ActiveInput::Chat;
-                                            cx.notify();
-                                        }))
-                                        .child(
-                                            svg()
-                                                .path("icons/reply.svg")
-                                                .size(px(13.0))
-                                                .text_color(theme::text_muted()),
-                                        ),
-                                );
-                            if !msg.is_user {
-                                icon_bar = icon_bar.child(
-                                    div()
-                                        .id(SharedString::from(format!("msg-expand-{idx}")))
-                                        .p(px(4.0))
-                                        .rounded(px(5.0))
-                                        .cursor_pointer()
-                                        .hover(|s| s.bg(theme::row_hover()))
-                                        .on_click(cx.listener(move |this, _, _, cx| {
-                                            this.expanded_reader = Some((
-                                                format!("{} reply", this.runtime.short_name()),
-                                                expand_text.clone(),
-                                            ));
-                                            cx.notify();
-                                        }))
-                                        .child(
-                                            svg()
-                                                .path("icons/expand.svg")
-                                                .size(px(13.0))
-                                                .text_color(theme::text_muted()),
-                                        ),
-                                );
-                            }
-                            let footer = div()
-                                .mt(px(-2.0))
-                                .flex()
-                                .items_center()
-                                .justify_between()
-                                .gap_2()
-                                .child(
-                                    div()
+                                // T3 Code hover-reveal message footer: right-aligned timestamp + Lucide icon actions
+                                if !msg.text.is_empty() && !actively_writing {
+                                    let mut icon_bar = div()
                                         .flex()
                                         .items_center()
+                                        .gap_1()
+                                        .child(
+                                            div()
+                                                .id(SharedString::from(format!("msg-copy-{idx}")))
+                                                .p(px(4.0))
+                                                .rounded(px(5.0))
+                                                .cursor_pointer()
+                                                .hover(|s| s.bg(theme::row_hover()))
+                                                .on_click(cx.listener(move |this, _, _, cx| {
+                                                    cx.write_to_clipboard(
+                                                        ClipboardItem::new_string(
+                                                            copy_text.clone(),
+                                                        ),
+                                                    );
+                                                    this.set_toast("Copied message", cx);
+                                                }))
+                                                .child(
+                                                    svg()
+                                                        .path("icons/copy.svg")
+                                                        .size(px(13.0))
+                                                        .text_color(theme::text_muted()),
+                                                ),
+                                        )
+                                        .child(
+                                            div()
+                                                .id(SharedString::from(format!("msg-reply-{idx}")))
+                                                .p(px(4.0))
+                                                .rounded(px(5.0))
+                                                .cursor_pointer()
+                                                .hover(|s| s.bg(theme::row_hover()))
+                                                .on_click(cx.listener(move |this, _, _, cx| {
+                                                    this.quoted_reply = Some(reply_text.clone());
+                                                    this.active_input = ActiveInput::Chat;
+                                                    cx.notify();
+                                                }))
+                                                .child(
+                                                    svg()
+                                                        .path("icons/reply.svg")
+                                                        .size(px(13.0))
+                                                        .text_color(theme::text_muted()),
+                                                ),
+                                        );
+                                    if !msg.is_user {
+                                        icon_bar = icon_bar.child(
+                                            div()
+                                                .id(SharedString::from(format!("msg-expand-{idx}")))
+                                                .p(px(4.0))
+                                                .rounded(px(5.0))
+                                                .cursor_pointer()
+                                                .hover(|s| s.bg(theme::row_hover()))
+                                                .on_click(cx.listener(move |this, _, _, cx| {
+                                                    this.expanded_reader = Some((
+                                                        format!(
+                                                            "{} reply",
+                                                            this.runtime.short_name()
+                                                        ),
+                                                        expand_text.clone(),
+                                                    ));
+                                                    cx.notify();
+                                                }))
+                                                .child(
+                                                    svg()
+                                                        .path("icons/expand.svg")
+                                                        .size(px(13.0))
+                                                        .text_color(theme::text_muted()),
+                                                ),
+                                        );
+                                    }
+                                    let footer = div()
+                                        .mt(px(-2.0))
+                                        .flex()
+                                        .items_center()
+                                        .justify_between()
                                         .gap_2()
-                                        .when(
+                                        .child(div().flex().items_center().gap_2().when(
                                             msg.is_error
                                                 && has_model_override
                                                 && prev_user_prompt.is_some(),
@@ -2578,64 +3437,113 @@ impl JobHarnessApp {
                                                         .child("Reset model & retry"),
                                                 )
                                             },
-                                        ),
-                                )
-                                .child(
-                                    div()
-                                        .flex()
-                                        .items_center()
-                                        .gap_2()
+                                        ))
                                         .child(
                                             div()
-                                                .text_size(px(11.0))
-                                                .text_color(theme::text_muted())
-                                                .child(msg.sent_label.clone()),
-                                        )
-                                        .child(icon_bar),
-                                );
-                            block = block.child(footer);
-                        }
+                                                .flex()
+                                                .items_center()
+                                                .gap_2()
+                                                .opacity(0.0)
+                                                .group_hover(group_name.clone(), |s| s.opacity(1.0))
+                                                .child(
+                                                    div()
+                                                        .text_size(px(11.0))
+                                                        .text_color(theme::text_muted())
+                                                        .child(msg.sent_label.clone()),
+                                                )
+                                                .child(icon_bar),
+                                        );
+                                    block = block.child(footer);
+                                }
 
-                        block
-                    })),
-            )
-            // Emma-style floating jump-to-bottom pill ONLY when scrolled up away from bottom
-            .when(!self.chat_follow && !self.chat_messages.is_empty(), |d| {
-                d.child(
-                    div()
-                        .absolute()
-                        .bottom(px(86.0))
-                        .left_0()
-                        .right_0()
-                        .flex()
-                        .justify_center()
-                        .child(
+                                // Emma-style contextual follow-up suggestions (ONLY on newest completed assistant turn)
+                                if !msg.is_user
+                                    && is_last
+                                    && !actively_writing
+                                    && !msg.text.is_empty()
+                                    && !msg.is_error
+                                {
+                                    let followups = self.suggest_chat_followups(msg);
+                                    if !followups.is_empty() {
+                                        block = block.child(
+                                            div().pt_1().flex().flex_col().gap_1().children(
+                                                followups.into_iter().enumerate().map(
+                                                    |(fi, (label, prompt))| {
+                                                        div()
+                                                            .id(SharedString::from(format!(
+                                                                "fup-{idx}-{fi}"
+                                                            )))
+                                                            .px_2()
+                                                            .py(px(4.0))
+                                                            .mx(px(-6.0))
+                                                            .rounded(px(7.0))
+                                                            .hover(|s| s.bg(theme::row_hover()))
+                                                            .cursor_pointer()
+                                                            .text_xs()
+                                                            .text_color(theme::text_muted())
+                                                            .on_click(cx.listener(
+                                                                move |this, _, _, cx| {
+                                                                    this.submit_prompt(
+                                                                        prompt.clone(),
+                                                                        false,
+                                                                        cx,
+                                                                    );
+                                                                },
+                                                            ))
+                                                            .child(format!("↳  {label}"))
+                                                    },
+                                                ),
+                                            ),
+                                        );
+                                    }
+                                }
+
+                                block
+                            })),
+                    )
+                    // Emma-style floating jump-to-bottom button anchored cleanly inside the scroll pane
+                    .when(!self.chat_follow && !self.chat_messages.is_empty(), |d| {
+                        let is_busy = self.streaming;
+                        d.child(
                             div()
-                                .id("chat-jump-bottom")
-                                .px_3()
-                                .py(px(4.0))
-                                .rounded(px(99.0))
-                                .bg(theme::popover_glass())
-                                .border_1()
-                                .border_color(theme::hairline_strong())
-                                .shadow_md()
-                                .cursor_pointer()
-                                .hover(|s| s.bg(theme::row_hover()))
-                                .text_xs()
-                                .text_color(if self.streaming {
-                                    theme::lavender()
-                                } else {
-                                    theme::text_secondary()
-                                })
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.chat_follow = true;
-                                    this.chat_scroll.scroll_to_bottom();
-                                    cx.notify();
-                                }))
-                                .child(if self.streaming { "•••  ↓" } else { "↓" }),
-                        ),
-                )
-            })
+                                .absolute()
+                                .bottom(px(10.0))
+                                .left_0()
+                                .right_0()
+                                .flex()
+                                .justify_center()
+                                .child(
+                                    div()
+                                        .id("chat-jump-bottom")
+                                        .h(px(28.0))
+                                        .when(!is_busy, |b| b.w(px(28.0)))
+                                        .when(is_busy, |b| b.px_3())
+                                        .rounded(px(99.0))
+                                        .bg(theme::popover_glass())
+                                        .border_1()
+                                        .border_color(theme::hairline_strong())
+                                        .shadow_md()
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .cursor_pointer()
+                                        .hover(|s| s.bg(theme::row_hover()))
+                                        .text_xs()
+                                        .text_color(if is_busy {
+                                            theme::lavender()
+                                        } else {
+                                            theme::text_secondary()
+                                        })
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.chat_follow = true;
+                                            this.chat_scroll.scroll_to_bottom();
+                                            cx.notify();
+                                        }))
+                                        .child(if is_busy { "•••  ↓" } else { "↓" }),
+                                ),
+                        )
+                    }),
+            )
             // Queued follow-up bar with native `↪ Steer` button (interrupts & sends immediately)
             .when_some(self.queued_prompt.clone(), |d, queued| {
                 let steer_q = queued.clone();
@@ -2703,290 +3611,313 @@ impl JobHarnessApp {
             })
             // T3 Code-grade unified composer card (inline reply chip + image thumbs + paperclip + circular Stop/Send icon)
             .child(
-                div()
-                    .px_3()
-                    .pb_3()
-                    .pt_1()
-                    .child(
-                        div()
-                            .id("chat-input-box")
-                            .p(px(8.0))
-                            .rounded(px(12.0))
-                            .bg(if input_active {
-                                theme::surface_active()
-                            } else {
-                                theme::surface_subtle()
-                            })
-                            .border_1()
-                            .border_color(if input_active {
-                                theme::lavender_border()
-                            } else {
-                                theme::hairline()
-                            })
-                            .flex()
-                            .flex_col()
-                            .gap_2()
-                            .cursor_text()
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.active_input = ActiveInput::Chat;
-                                cx.notify();
-                            }))
-                            // Clean inline reply quote chip (NO curved left border!)
-                            .when_some(self.quoted_reply.clone(), |d, q| {
-                                d.child(
+                div().px_3().pb_3().pt_1().child(
+                    div()
+                        .id("chat-input-box")
+                        .p(px(8.0))
+                        .rounded(px(12.0))
+                        .bg(if input_active {
+                            theme::surface_active()
+                        } else {
+                            theme::surface_subtle()
+                        })
+                        .border_1()
+                        .border_color(if input_active {
+                            theme::lavender_border()
+                        } else {
+                            theme::hairline()
+                        })
+                        .flex()
+                        .flex_col()
+                        .gap_2()
+                        .cursor_text()
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.active_input = ActiveInput::Chat;
+                            cx.notify();
+                        }))
+                        // Clean inline reply quote chip (NO curved left border!)
+                        .when_some(self.quoted_reply.clone(), |d, q| {
+                            d.child(
+                                div()
+                                    .px_2()
+                                    .py(px(3.0))
+                                    .rounded(px(6.0))
+                                    .bg(theme::window_glass())
+                                    .flex()
+                                    .items_center()
+                                    .justify_between()
+                                    .gap_2()
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .overflow_hidden()
+                                            .text_size(px(11.5))
+                                            .text_color(theme::text_muted())
+                                            .child(truncate_end(&format!("↩  {q}"), 34)),
+                                    )
+                                    .child(
+                                        div()
+                                            .id("clear-quote-chip")
+                                            .flex_shrink_0()
+                                            .text_xs()
+                                            .text_color(theme::text_muted())
+                                            .hover(|s| s.text_color(theme::text_primary()))
+                                            .cursor_pointer()
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                this.quoted_reply = None;
+                                                cx.notify();
+                                            }))
+                                            .child("✕"),
+                                    ),
+                            )
+                        })
+                        // Attached role chip
+                        .when_some(self.attached_role.clone(), |d, (company, path)| {
+                            let short =
+                                truncate_label(path.rsplit('/').next().unwrap_or(&path), 20);
+                            d.child(
+                                div()
+                                    .px_2()
+                                    .py(px(3.0))
+                                    .rounded(px(6.0))
+                                    .bg(theme::lavender_wash())
+                                    .flex()
+                                    .items_center()
+                                    .justify_between()
+                                    .gap_2()
+                                    .child(
+                                        div()
+                                            .min_w_0()
+                                            .overflow_hidden()
+                                            .text_size(px(11.5))
+                                            .text_color(theme::lavender())
+                                            .child(format!("{company} · {short}")),
+                                    )
+                                    .child(
+                                        div()
+                                            .id("clear-role-chip")
+                                            .flex_shrink_0()
+                                            .text_xs()
+                                            .text_color(theme::text_muted())
+                                            .hover(|s| s.text_color(theme::text_primary()))
+                                            .cursor_pointer()
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                this.attached_role = None;
+                                                cx.notify();
+                                            }))
+                                            .child("✕"),
+                                    ),
+                            )
+                        })
+                        // Inline image thumbnails & file chips inside composer (T3 Code style!)
+                        .when(!self.chat_attachments.is_empty(), |d| {
+                            d.child(div().flex().flex_wrap().gap_2().children(
+                                self.chat_attachments.iter().enumerate().map(|(ai, p)| {
+                                    if is_image_path(p) {
+                                        div()
+                                            .relative()
+                                            .child(img(p.clone()).size(px(46.0)).rounded(px(7.0)))
+                                            .child(
+                                                div()
+                                                    .id(SharedString::from(format!("rm-att-{ai}")))
+                                                    .absolute()
+                                                    .top(px(2.0))
+                                                    .right(px(2.0))
+                                                    .w(px(16.0))
+                                                    .h(px(16.0))
+                                                    .rounded(px(99.0))
+                                                    .bg(gpui::rgba(0x000000cc))
+                                                    .flex()
+                                                    .items_center()
+                                                    .justify_center()
+                                                    .cursor_pointer()
+                                                    .text_size(px(10.0))
+                                                    .text_color(theme::text_primary())
+                                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                                        if ai < this.chat_attachments.len() {
+                                                            this.chat_attachments.remove(ai);
+                                                            cx.notify();
+                                                        }
+                                                    }))
+                                                    .child("✕"),
+                                            )
+                                            .into_any_element()
+                                    } else {
+                                        let fname = p
+                                            .file_name()
+                                            .and_then(|s| s.to_str())
+                                            .unwrap_or("file");
+                                        div()
+                                            .px_2()
+                                            .py(px(3.0))
+                                            .rounded(px(6.0))
+                                            .bg(theme::window_glass())
+                                            .flex()
+                                            .items_center()
+                                            .gap_2()
+                                            .text_size(px(11.0))
+                                            .text_color(theme::text_secondary())
+                                            .child(truncate_label(fname, 18))
+                                            .child(
+                                                div()
+                                                    .id(SharedString::from(format!("rm-att-{ai}")))
+                                                    .cursor_pointer()
+                                                    .text_color(theme::text_muted())
+                                                    .hover(|s| s.text_color(theme::text_primary()))
+                                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                                        if ai < this.chat_attachments.len() {
+                                                            this.chat_attachments.remove(ai);
+                                                            cx.notify();
+                                                        }
+                                                    }))
+                                                    .child("✕"),
+                                            )
+                                            .into_any_element()
+                                    }
+                                }),
+                            ))
+                        })
+                        // Compact large-paste chips (T3 Code pattern: keeps composer clean!)
+                        .when(!self.pasted_snippets.is_empty(), |d| {
+                            d.child(div().flex().flex_wrap().gap_1().children(
+                                self.pasted_snippets.iter().enumerate().map(|(pi, txt)| {
+                                    let lines = txt.lines().count().max(1);
                                     div()
                                         .px_2()
                                         .py(px(3.0))
                                         .rounded(px(6.0))
                                         .bg(theme::window_glass())
+                                        .border_1()
+                                        .border_color(theme::hairline())
                                         .flex()
                                         .items_center()
-                                        .justify_between()
                                         .gap_2()
+                                        .text_size(px(11.0))
+                                        .text_color(theme::text_secondary())
+                                        .child(format!("Pasted text · {lines} lines"))
                                         .child(
                                             div()
-                                                .flex_1()
-                                                .min_w_0()
-                                                .overflow_hidden()
-                                                .text_size(px(11.5))
-                                                .text_color(theme::text_muted())
-                                                .child(truncate_end(&format!("↩  {q}"), 34)),
-                                        )
-                                        .child(
-                                            div()
-                                                .id("clear-quote-chip")
-                                                .flex_shrink_0()
-                                                .text_xs()
+                                                .id(SharedString::from(format!("rm-paste-{pi}")))
+                                                .cursor_pointer()
                                                 .text_color(theme::text_muted())
                                                 .hover(|s| s.text_color(theme::text_primary()))
-                                                .cursor_pointer()
-                                                .on_click(cx.listener(|this, _, _, cx| {
-                                                    this.quoted_reply = None;
-                                                    cx.notify();
+                                                .on_click(cx.listener(move |this, _, _, cx| {
+                                                    if pi < this.pasted_snippets.len() {
+                                                        this.pasted_snippets.remove(pi);
+                                                        cx.notify();
+                                                    }
                                                 }))
                                                 .child("✕"),
-                                        ),
-                                )
-                            })
-                            // Attached role chip
-                            .when_some(self.attached_role.clone(), |d, (company, path)| {
-                                let short =
-                                    truncate_label(path.rsplit('/').next().unwrap_or(&path), 20);
-                                d.child(
+                                        )
+                                }),
+                            ))
+                        })
+                        // Multi-line auto-growing input region (1 line → 136px max, then smooth internal scroll)
+                        .child(
+                            div()
+                                .id("chat-input-scroll")
+                                .w_full()
+                                .min_h(px(22.0))
+                                .max_h(px(136.0))
+                                .overflow_y_scroll()
+                                .px_1()
+                                .py(px(2.0))
+                                .child(chat_multiline_input(
+                                    &self.chat_input,
+                                    &placeholder,
+                                    input_active,
+                                    input_active && self.input_all_selected,
+                                    self.reduce_motion,
+                                )),
+                        )
+                        // Bottom action bar: paperclip attach on left, circular Stop / Send icon on right
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .child(
                                     div()
-                                        .px_2()
-                                        .py(px(3.0))
+                                        .id("chat-attach-btn")
+                                        .w(px(24.0))
+                                        .h(px(24.0))
                                         .rounded(px(6.0))
-                                        .bg(theme::lavender_wash())
+                                        .hover(|s| s.bg(theme::row_hover()))
                                         .flex()
                                         .items_center()
-                                        .justify_between()
-                                        .gap_2()
+                                        .justify_center()
+                                        .cursor_pointer()
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.pick_chat_attachments(cx);
+                                        }))
                                         .child(
-                                            div()
-                                                .min_w_0()
-                                                .overflow_hidden()
-                                                .text_size(px(11.5))
-                                                .text_color(theme::lavender())
-                                                .child(format!("{company} · {short}")),
-                                        )
-                                        .child(
-                                            div()
-                                                .id("clear-role-chip")
-                                                .flex_shrink_0()
-                                                .text_xs()
-                                                .text_color(theme::text_muted())
-                                                .hover(|s| s.text_color(theme::text_primary()))
-                                                .cursor_pointer()
-                                                .on_click(cx.listener(|this, _, _, cx| {
-                                                    this.attached_role = None;
-                                                    cx.notify();
-                                                }))
-                                                .child("✕"),
+                                            svg()
+                                                .path("icons/paperclip.svg")
+                                                .size(px(14.0))
+                                                .text_color(theme::text_muted()),
                                         ),
                                 )
-                            })
-                            // Inline image thumbnails & file chips inside composer (T3 Code style!)
-                            .when(!self.chat_attachments.is_empty(), |d| {
-                                d.child(div().flex().flex_wrap().gap_2().children(
-                                    self.chat_attachments.iter().enumerate().map(|(ai, p)| {
-                                        if is_image_path(p) {
-                                            div()
-                                                .relative()
-                                                .child(
-                                                    img(p.clone())
-                                                        .size(px(46.0))
-                                                        .rounded(px(7.0)),
-                                                )
-                                                .child(
-                                                    div()
-                                                        .id(SharedString::from(format!(
-                                                            "rm-att-{ai}"
-                                                        )))
-                                                        .absolute()
-                                                        .top(px(2.0))
-                                                        .right(px(2.0))
-                                                        .w(px(16.0))
-                                                        .h(px(16.0))
-                                                        .rounded(px(99.0))
-                                                        .bg(gpui::rgba(0x000000cc))
-                                                        .flex()
-                                                        .items_center()
-                                                        .justify_center()
-                                                        .cursor_pointer()
-                                                        .text_size(px(10.0))
-                                                        .text_color(theme::text_primary())
-                                                        .on_click(cx.listener(
-                                                            move |this, _, _, cx| {
-                                                                if ai < this.chat_attachments.len()
-                                                                {
-                                                                    this.chat_attachments
-                                                                        .remove(ai);
-                                                                    cx.notify();
-                                                                }
-                                                            },
-                                                        ))
-                                                        .child("✕"),
-                                                )
-                                                .into_any_element()
+                                .child(if self.streaming {
+                                    div()
+                                        .id("stop-stream")
+                                        .w(px(26.0))
+                                        .h(px(26.0))
+                                        .rounded(px(99.0))
+                                        .bg(theme::surface_active())
+                                        .border_1()
+                                        .border_color(theme::hairline_strong())
+                                        .hover(|s| s.bg(theme::rose_wash()))
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .cursor_pointer()
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.stop_stream(cx);
+                                        }))
+                                        .child(
+                                            svg()
+                                                .path("icons/stop.svg")
+                                                .size(px(10.0))
+                                                .text_color(theme::text_primary()),
+                                        )
+                                        .into_any_element()
+                                } else {
+                                    let ready = !self.chat_input.trim().is_empty()
+                                        || self.attached_role.is_some()
+                                        || !self.chat_attachments.is_empty()
+                                        || !self.pasted_snippets.is_empty();
+                                    div()
+                                        .id("chat-send-btn")
+                                        .w(px(26.0))
+                                        .h(px(26.0))
+                                        .rounded(px(99.0))
+                                        .bg(if ready {
+                                            theme::lavender()
                                         } else {
-                                            let fname = p
-                                                .file_name()
-                                                .and_then(|s| s.to_str())
-                                                .unwrap_or("file");
-                                            div()
-                                                .px_2()
-                                                .py(px(3.0))
-                                                .rounded(px(6.0))
-                                                .bg(theme::window_glass())
-                                                .flex()
-                                                .items_center()
-                                                .gap_2()
-                                                .text_size(px(11.0))
-                                                .text_color(theme::text_secondary())
-                                                .child(truncate_label(fname, 18))
-                                                .child(
-                                                    div()
-                                                        .id(SharedString::from(format!(
-                                                            "rm-att-{ai}"
-                                                        )))
-                                                        .cursor_pointer()
-                                                        .text_color(theme::text_muted())
-                                                        .hover(|s| {
-                                                            s.text_color(theme::text_primary())
-                                                        })
-                                                        .on_click(cx.listener(
-                                                            move |this, _, _, cx| {
-                                                                if ai < this.chat_attachments.len()
-                                                                {
-                                                                    this.chat_attachments
-                                                                        .remove(ai);
-                                                                    cx.notify();
-                                                                }
-                                                            },
-                                                        ))
-                                                        .child("✕"),
-                                                )
-                                                .into_any_element()
-                                        }
-                                    }),
-                                ))
-                            })
-                            // Input text row
-                            .child(div().px_1().py(px(2.0)).child(input_line(
-                                &self.chat_input,
-                                &placeholder,
-                                input_active,
-                                self.reduce_motion,
-                                "chat",
-                                36,
-                            )))
-                            // Bottom action bar: paperclip attach on left, circular Stop / Send icon on right
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .justify_between()
-                                    .child(
-                                        div()
-                                            .id("chat-attach-btn")
-                                            .w(px(24.0))
-                                            .h(px(24.0))
-                                            .rounded(px(6.0))
-                                            .hover(|s| s.bg(theme::row_hover()))
-                                            .flex()
-                                            .items_center()
-                                            .justify_center()
-                                            .cursor_pointer()
-                                            .on_click(cx.listener(|this, _, _, cx| {
-                                                this.pick_chat_attachments(cx);
-                                            }))
-                                            .child(
-                                                svg()
-                                                    .path("icons/paperclip.svg")
-                                                    .size(px(14.0))
-                                                    .text_color(theme::text_muted()),
-                                            ),
-                                    )
-                                    .child(if self.streaming {
-                                        div()
-                                            .id("stop-stream")
-                                            .w(px(26.0))
-                                            .h(px(26.0))
-                                            .rounded(px(99.0))
-                                            .bg(theme::surface_active())
-                                            .border_1()
-                                            .border_color(theme::hairline_strong())
-                                            .hover(|s| s.bg(theme::rose_wash()))
-                                            .flex()
-                                            .items_center()
-                                            .justify_center()
-                                            .cursor_pointer()
-                                            .on_click(cx.listener(|this, _, _, cx| {
-                                                this.stop_stream(cx);
-                                            }))
-                                            .child(
-                                                svg()
-                                                    .path("icons/stop.svg")
-                                                    .size(px(10.0))
-                                                    .text_color(theme::text_primary()),
-                                            )
-                                            .into_any_element()
-                                    } else {
-                                        let ready = !self.chat_input.trim().is_empty()
-                                            || self.attached_role.is_some()
-                                            || !self.chat_attachments.is_empty();
-                                        div()
-                                            .id("chat-send-btn")
-                                            .w(px(26.0))
-                                            .h(px(26.0))
-                                            .rounded(px(99.0))
-                                            .bg(if ready {
-                                                theme::lavender()
-                                            } else {
-                                                theme::surface_active()
-                                            })
-                                            .flex()
-                                            .items_center()
-                                            .justify_center()
-                                            .cursor_pointer()
-                                            .on_click(cx.listener(|this, _, _, cx| {
-                                                this.submit_chat_input(cx);
-                                            }))
-                                            .child(
-                                                svg()
-                                                    .path("icons/arrow-up.svg")
-                                                    .size(px(13.0))
-                                                    .text_color(if ready {
-                                                        theme::ink_dark()
-                                                    } else {
-                                                        theme::text_muted()
-                                                    }),
-                                            )
-                                            .into_any_element()
-                                    }),
-                            ),
-                    ),
+                                            theme::surface_active()
+                                        })
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .cursor_pointer()
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.submit_chat_input(cx);
+                                        }))
+                                        .child(
+                                            svg()
+                                                .path("icons/arrow-up.svg")
+                                                .size(px(13.0))
+                                                .text_color(if ready {
+                                                    theme::ink_dark()
+                                                } else {
+                                                    theme::text_muted()
+                                                }),
+                                        )
+                                        .into_any_element()
+                                }),
+                        ),
+                ),
             )
     }
 
@@ -4287,25 +5218,18 @@ impl JobHarnessApp {
                                     .cursor_pointer()
                                     .text_xs()
                                     .text_color(theme::text_secondary())
+                                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                        cx.stop_propagation();
+                                    })
                                     .on_hover(cx.listener(|this, hovered, _, cx| {
-                                        if *hovered && this.active_popover != ActivePopover::Budget
-                                        {
-                                            this.active_popover = ActivePopover::Budget;
-                                            this.cmd_anim_epoch =
-                                                this.cmd_anim_epoch.wrapping_add(1);
-                                            cx.notify();
-                                        }
+                                        this.on_dock_trigger_hover(
+                                            ActivePopover::Budget,
+                                            *hovered,
+                                            cx,
+                                        );
                                     }))
                                     .on_click(cx.listener(|this, _, _, cx| {
-                                        this.active_popover =
-                                            if this.active_popover == ActivePopover::Budget {
-                                                ActivePopover::None
-                                            } else {
-                                                this.cmd_anim_epoch =
-                                                    this.cmd_anim_epoch.wrapping_add(1);
-                                                ActivePopover::Budget
-                                            };
-                                        cx.notify();
+                                        this.toggle_dock_popover_pin(ActivePopover::Budget, cx);
                                     }))
                                     .child(format!(
                                         "{} / {}",
@@ -4324,25 +5248,18 @@ impl JobHarnessApp {
                                     .items_center()
                                     .justify_center()
                                     .cursor_pointer()
+                                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                        cx.stop_propagation();
+                                    })
                                     .on_hover(cx.listener(|this, hovered, _, cx| {
-                                        if *hovered && this.active_popover != ActivePopover::Health
-                                        {
-                                            this.active_popover = ActivePopover::Health;
-                                            this.cmd_anim_epoch =
-                                                this.cmd_anim_epoch.wrapping_add(1);
-                                            cx.notify();
-                                        }
+                                        this.on_dock_trigger_hover(
+                                            ActivePopover::Health,
+                                            *hovered,
+                                            cx,
+                                        );
                                     }))
                                     .on_click(cx.listener(|this, _, _, cx| {
-                                        this.active_popover =
-                                            if this.active_popover == ActivePopover::Health {
-                                                ActivePopover::None
-                                            } else {
-                                                this.cmd_anim_epoch =
-                                                    this.cmd_anim_epoch.wrapping_add(1);
-                                                ActivePopover::Health
-                                            };
-                                        cx.notify();
+                                        this.toggle_dock_popover_pin(ActivePopover::Health, cx);
                                     }))
                                     .child(
                                         div()
@@ -4371,7 +5288,7 @@ impl JobHarnessApp {
                 Some(
                     div()
                         .id("role-drawer")
-                        .w(px(360.0))
+                        .w_full()
                         .flex_shrink_0()
                         .h_full()
                         .p_5()
@@ -4380,11 +5297,12 @@ impl JobHarnessApp {
                         .border_color(theme::hairline())
                         .flex()
                         .flex_col()
-                        .gap_4()
-                        .overflow_y_scroll()
-                        // Spacious header block (stage sits cleanly under title so it never collides with ✕)
+                        .gap_3()
+                        .overflow_hidden()
+                        // PINNED non-scrolling header (zero vertical shift across tabs!)
                         .child(
                             div()
+                                .flex_shrink_0()
                                 .flex()
                                 .items_start()
                                 .justify_between()
@@ -4426,9 +5344,10 @@ impl JobHarnessApp {
                                         .child("✕"),
                                 ),
                         )
-                        // Clean underline tabs with proper breathing room above & below
+                        // PINNED 3-tab strip (Overview · Brief · Record) — zero bounce, keyboard 1/2/3 or [/]
                         .child(
                             div()
+                                .flex_shrink_0()
                                 .pt_1()
                                 .flex()
                                 .gap_5()
@@ -4437,9 +5356,8 @@ impl JobHarnessApp {
                                 .children(
                                     [
                                         (DrawerTab::Overview, "Overview"),
-                                        (DrawerTab::Packet, "Submission"),
                                         (DrawerTab::Brief, "Brief"),
-                                        (DrawerTab::Notes, "Notes"),
+                                        (DrawerTab::Notes, "Record"),
                                     ]
                                     .into_iter()
                                     .map(|(tab, label)| {
@@ -4458,78 +5376,96 @@ impl JobHarnessApp {
                                             })
                                             .cursor_pointer()
                                             .on_click(cx.listener(move |this, _, _, cx| {
-                                                this.drawer_tab = tab;
-                                                this.drawer_tab_epoch =
-                                                    this.drawer_tab_epoch.wrapping_add(1);
-                                                if tab == DrawerTab::Brief {
-                                                    this.load_selected_brief_async(cx);
-                                                } else if tab == DrawerTab::Notes
-                                                    && let Some(r) = &this.selected_role
-                                                {
-                                                    let p = r.record_path.clone();
-                                                    this.citation_title = Some(p.clone());
-                                                    if let Some(d) = &this.role_details {
-                                                        this.citation_body =
-                                                            Some(d.full_text.clone());
-                                                    } else {
-                                                        this.citation_body =
-                                                            Some("Loading…".into());
-                                                        this.read_citation_async(p, cx);
-                                                    }
-                                                }
-                                                cx.notify();
+                                                this.switch_role_tab(tab, cx);
                                             }))
                                             .child(label)
                                     }),
                                 ),
                         )
-                        // Tab-specific focused body with identical top spacing & smooth cross-fade
+                        // SCROLLABLE tab content ONLY (header & bottom CTA stay rock-solid pinned!)
                         .child({
                             let tab_epoch = self.drawer_tab_epoch;
                             let tab_body: AnyElement = match self.drawer_tab {
-                            DrawerTab::Overview => {
-                                let det = self.role_details.as_ref();
-                                let salary_val = det
-                                    .and_then(|d| d.salary.clone())
-                                    .unwrap_or_else(|| "Not listed".into());
-                                let loc_val = det
-                                    .and_then(|d| d.location_mode.clone())
-                                    .unwrap_or_else(|| "Not listed".into());
-                                let channel_opt = det.and_then(|d| d.source_channel.clone());
-                                let contact_opt = det.and_then(|d| d.contact.clone());
-                                let fit_opt = det.and_then(|d| d.fit_summary.clone());
-                                let rec_short = role
-                                    .record_path
-                                    .rsplit('/')
-                                    .next()
-                                    .unwrap_or(&role.record_path);
-                                let rec_display = truncate_label(rec_short, 24);
-                                div()
-                                    .flex()
-                                    .flex_col()
-                                    .gap_5()
-                                    // At-a-glance snapshot (Location · Comp · Channel · Checked)
-                                    .child(
-                                        div()
-                                            .flex()
-                                            .flex_col()
-                                            .gap_2()
-                                            .child(kv_row("Location", loc_val))
-                                            .child(kv_row("Comp", salary_val))
-                                            .when_some(channel_opt, |d, ch| {
-                                                d.child(kv_row("Sent via", ch))
-                                            })
-                                            .when_some(contact_opt, |d, ct| {
-                                                d.child(kv_row("Contact", ct))
-                                            })
-                                            .child(kv_row("Last checked", role.checked.clone()))
-                                            .when_some(role.scheduled_start.clone(), |d, s| {
-                                                d.child(kv_row("Scheduled", s))
-                                            }),
-                                    )
-                                    // Fit & role summary (from ## Vacancy and fit)
-                                    .when_some(fit_opt, |d, fit| {
-                                        d.child(
+                                DrawerTab::Overview => {
+                                    let det = self.role_details.as_ref();
+                                    let salary_val = det
+                                        .and_then(|d| d.salary.clone())
+                                        .unwrap_or_else(|| "Not listed".into());
+                                    let loc_val = det
+                                        .and_then(|d| d.location_mode.clone())
+                                        .unwrap_or_else(|| "Not listed".into());
+                                    let channel_opt = det.and_then(|d| d.source_channel.clone());
+                                    let contact_opt = det.and_then(|d| d.contact.clone());
+                                    let fit_opt = det.and_then(|d| d.fit_summary.clone());
+                                    let sent_opt = det.and_then(|d| d.submitted_at.clone());
+                                    let cv_opt = det
+                                        .and_then(|d| d.packet_cv.clone())
+                                        .or_else(|| role.cv_track.clone());
+                                    let answers_opt = det.and_then(|d| d.packet_answers.clone());
+                                    let sha_opt = det
+                                        .and_then(|d| d.packet_sha.clone())
+                                        .or_else(|| role.packet_hash.clone())
+                                        .map(|h| h.chars().take(12).collect::<String>());
+                                    let has_receipt = sent_opt.is_some()
+                                        || cv_opt.is_some()
+                                        || answers_opt.is_some()
+                                        || sha_opt.is_some();
+                                    let rec_short = role
+                                        .record_path
+                                        .rsplit('/')
+                                        .next()
+                                        .unwrap_or(&role.record_path);
+                                    let rec_display = truncate_label(rec_short, 24);
+                                    div()
+                                        .flex()
+                                        .flex_col()
+                                        .gap_5()
+                                        // 1. At-a-glance snapshot
+                                        .child(
+                                            div()
+                                                .flex()
+                                                .flex_col()
+                                                .gap_2()
+                                                .child(kv_row("Location", loc_val))
+                                                .child(kv_row("Comp", salary_val))
+                                                .when_some(channel_opt, |d, ch| {
+                                                    d.child(kv_row("Channel", ch))
+                                                })
+                                                .when_some(contact_opt, |d, ct| {
+                                                    d.child(kv_row("Contact", ct))
+                                                })
+                                                .child(kv_row("Last checked", role.checked.clone()))
+                                                .when_some(role.scheduled_start.clone(), |d, s| {
+                                                    d.child(kv_row("Scheduled", s))
+                                                }),
+                                        )
+                                        // 2. Fit & role summary
+                                        .when_some(fit_opt, |d, fit| {
+                                            d.child(
+                                                div()
+                                                    .pt_4()
+                                                    .border_t_1()
+                                                    .border_color(theme::hairline())
+                                                    .flex()
+                                                    .flex_col()
+                                                    .gap_2()
+                                                    .child(
+                                                        div()
+                                                            .text_xs()
+                                                            .text_color(theme::text_muted())
+                                                            .child("Summary"),
+                                                    )
+                                                    .child(
+                                                        div()
+                                                            .text_xs()
+                                                            .line_height(px(18.0))
+                                                            .text_color(theme::text_secondary())
+                                                            .child(fit),
+                                                    ),
+                                            )
+                                        })
+                                        // 3. Next step
+                                        .child(
                                             div()
                                                 .pt_4()
                                                 .border_t_1()
@@ -4541,151 +5477,149 @@ impl JobHarnessApp {
                                                     div()
                                                         .text_xs()
                                                         .text_color(theme::text_muted())
-                                                        .child("Summary"),
+                                                        .child("Next step"),
                                                 )
                                                 .child(
                                                     div()
                                                         .text_xs()
-                                                        .text_color(theme::text_secondary())
-                                                        .child(fit),
+                                                        .line_height(px(18.0))
+                                                        .text_color(theme::text_primary())
+                                                        .child(if !role.urgency_reason.is_empty() {
+                                                            format!(
+                                                                "{}\n{}",
+                                                                role.urgency_reason,
+                                                                role.next_action
+                                                            )
+                                                        } else if !role.next_action.is_empty() {
+                                                            role.next_action.clone()
+                                                        } else {
+                                                            "No pending action recorded.".into()
+                                                        }),
                                                 ),
                                         )
-                                    })
-                                    // Next step (no duplicate status_detail paragraph)
-                                    .child(
-                                        div()
-                                            .pt_4()
-                                            .border_t_1()
-                                            .border_color(theme::hairline())
-                                            .flex()
-                                            .flex_col()
-                                            .gap_2()
-                                            .child(
+                                        // 4. Compact Submission Receipt (replaces sparse separate tab!)
+                                        .when(has_receipt, |d| {
+                                            d.child(
                                                 div()
-                                                    .text_xs()
-                                                    .text_color(theme::text_muted())
-                                                    .child("Next step"),
-                                            )
-                                            .child(
-                                                div()
-                                                    .text_xs()
-                                                    .text_color(theme::text_primary())
-                                                    .child(if !role.urgency_reason.is_empty() {
-                                                        format!(
-                                                            "{}\n{}",
-                                                            role.urgency_reason, role.next_action
-                                                        )
-                                                    } else if !role.next_action.is_empty() {
-                                                        role.next_action.clone()
-                                                    } else {
-                                                        "No pending action recorded.".into()
-                                                    }),
-                                            ),
-                                    )
-                                    // Source links (clean spacing, never clips)
-                                    .child(
-                                        div()
-                                            .pt_4()
-                                            .border_t_1()
-                                            .border_color(theme::hairline())
-                                            .flex()
-                                            .flex_col()
-                                            .gap_2()
-                                            .when_some(source_opt, |d, url| {
-                                                let short = url
-                                                    .trim_start_matches("https://")
-                                                    .trim_start_matches("http://")
-                                                    .split('/')
-                                                    .next()
-                                                    .unwrap_or(&url)
-                                                    .to_owned();
-                                                d.child(
-                                                    div()
-                                                        .flex()
-                                                        .items_center()
-                                                        .justify_between()
-                                                        .gap_4()
-                                                        .text_xs()
-                                                        .child(
-                                                            div()
-                                                                .flex_shrink_0()
-                                                                .text_color(theme::text_muted())
-                                                                .child("Posting"),
-                                                        )
-                                                        .child(
-                                                            div()
-                                                                .id("open-role-url")
-                                                                .text_color(theme::text_secondary())
-                                                                .underline()
-                                                                .hover(|s| {
-                                                                    s.text_color(
-                                                                        theme::text_primary(),
-                                                                    )
-                                                                })
-                                                                .cursor_pointer()
-                                                                .on_click(cx.listener(
-                                                                    move |_, _, _, _| {
-                                                                        open_url(&url);
-                                                                    },
-                                                                ))
-                                                                .child(format!("{short} ↗")),
-                                                        ),
-                                                )
-                                            })
-                                            .child(
-                                                div()
+                                                    .pt_4()
+                                                    .border_t_1()
+                                                    .border_color(theme::hairline())
                                                     .flex()
-                                                    .items_center()
-                                                    .justify_between()
-                                                    .gap_4()
-                                                    .text_xs()
+                                                    .flex_col()
+                                                    .gap_2()
                                                     .child(
                                                         div()
-                                                            .flex_shrink_0()
+                                                            .text_xs()
                                                             .text_color(theme::text_muted())
-                                                            .child("Record"),
+                                                            .child("Submission receipt"),
                                                     )
-                                                    .child(
-                                                        div()
-                                                            .id("cite-record")
-                                                            .text_color(theme::lavender())
-                                                            .underline()
-                                                            .cursor_pointer()
-                                                            .on_click(cx.listener(
-                                                                move |this, _, _, cx| {
-                                                                    this.drawer_tab =
-                                                                        DrawerTab::Notes;
-                                                                    this.drawer_tab_epoch =
-                                                                        this.drawer_tab_epoch
-                                                                            .wrapping_add(1);
-                                                                    this.citation_title =
-                                                                        Some(role_path.clone());
-                                                                    if let Some(d) =
-                                                                        &this.role_details
-                                                                    {
-                                                                        this.citation_body = Some(
-                                                                            d.full_text.clone(),
-                                                                        );
-                                                                    } else {
-                                                                        this.citation_body =
-                                                                            Some("Loading…".into());
-                                                                        this.read_citation_async(
-                                                                            role_path.clone(),
-                                                                            cx,
-                                                                        );
-                                                                    }
-                                                                    cx.notify();
-                                                                },
-                                                            ))
-                                                            .child(rec_display),
-                                                    ),
+                                                    .when_some(sent_opt, |r, s| {
+                                                        r.child(kv_row("Submitted", s))
+                                                    })
+                                                    .when_some(cv_opt, |r, cv| {
+                                                        let short = truncate_label(
+                                                            cv.rsplit('/').next().unwrap_or(&cv),
+                                                            24,
+                                                        );
+                                                        r.child(kv_row("CV sent", short))
+                                                    })
+                                                    .when_some(answers_opt, |r, ans| {
+                                                        let short = truncate_label(
+                                                            ans.rsplit('/').next().unwrap_or(&ans),
+                                                            24,
+                                                        );
+                                                        r.child(
+                                                            div()
+                                                                .flex()
+                                                                .items_center()
+                                                                .justify_between()
+                                                                .gap_4()
+                                                                .text_xs()
+                                                                .child(
+                                                                    div()
+                                                                        .text_color(
+                                                                            theme::text_muted(),
+                                                                        )
+                                                                        .child("Answers"),
+                                                                )
+                                                                .child(
+                                                                    div()
+                                                                        .id("open-pkt-answers")
+                                                                        .text_color(
+                                                                            theme::lavender(),
+                                                                        )
+                                                                        .underline()
+                                                                        .cursor_pointer()
+                                                                        .on_click(cx.listener(
+                                                                            move |this, _, _, cx| {
+                                                                                this.open_file_in_reader_async(
+                                                                                    ans.clone(),
+                                                                                    cx,
+                                                                                );
+                                                                            },
+                                                                        ))
+                                                                        .child(short),
+                                                                ),
+                                                        )
+                                                    })
+                                                    .when_some(sha_opt, |r, sha| {
+                                                        r.child(kv_row("Receipt SHA", sha))
+                                                    }),
                                             )
-                                            .when_some(brief_opt, |d, bp| {
-                                                let short = truncate_label(
-                                                    bp.rsplit('/').next().unwrap_or(&bp),
-                                                    24,
-                                                );
-                                                d.child(
+                                        })
+                                        // 5. Links (external carries ↗, in-app lavender opens tab)
+                                        .child(
+                                            div()
+                                                .pt_4()
+                                                .border_t_1()
+                                                .border_color(theme::hairline())
+                                                .flex()
+                                                .flex_col()
+                                                .gap_2()
+                                                .when_some(source_opt, |d, url| {
+                                                    let short = url
+                                                        .trim_start_matches("https://")
+                                                        .trim_start_matches("http://")
+                                                        .split('/')
+                                                        .next()
+                                                        .unwrap_or(&url)
+                                                        .to_owned();
+                                                    d.child(
+                                                        div()
+                                                            .flex()
+                                                            .items_center()
+                                                            .justify_between()
+                                                            .gap_4()
+                                                            .text_xs()
+                                                            .child(
+                                                                div()
+                                                                    .flex_shrink_0()
+                                                                    .text_color(theme::text_muted())
+                                                                    .child("Posting"),
+                                                            )
+                                                            .child(
+                                                                div()
+                                                                    .id("open-role-url")
+                                                                    .text_color(
+                                                                        theme::text_secondary(),
+                                                                    )
+                                                                    .underline()
+                                                                    .hover(|s| {
+                                                                        s.text_color(
+                                                                            theme::text_primary(),
+                                                                        )
+                                                                    })
+                                                                    .cursor_pointer()
+                                                                    .on_click(cx.listener(
+                                                                        move |_, _, _, _| {
+                                                                            open_url(&url);
+                                                                        },
+                                                                    ))
+                                                                    .child(format!("{short} ↗")),
+                                                            ),
+                                                    )
+                                                })
+                                                .child(
                                                     div()
                                                         .flex()
                                                         .items_center()
@@ -4696,497 +5630,384 @@ impl JobHarnessApp {
                                                             div()
                                                                 .flex_shrink_0()
                                                                 .text_color(theme::text_muted())
-                                                                .child("Brief"),
+                                                                .child("Record"),
                                                         )
                                                         .child(
                                                             div()
-                                                                .id("cite-brief")
+                                                                .id("cite-record")
                                                                 .text_color(theme::lavender())
                                                                 .underline()
                                                                 .cursor_pointer()
                                                                 .on_click(cx.listener(
                                                                     move |this, _, _, cx| {
-                                                                        this.drawer_tab =
-                                                                            DrawerTab::Brief;
-                                                                        this.drawer_tab_epoch =
-                                                                            this.drawer_tab_epoch
-                                                                                .wrapping_add(1);
-                                                                        this.read_citation_async(
-                                                                            bp.clone(),
+                                                                        this.citation_title =
+                                                                            Some(role_path.clone());
+                                                                        this.switch_role_tab(
+                                                                            DrawerTab::Notes,
                                                                             cx,
                                                                         );
-                                                                        cx.notify();
                                                                     },
                                                                 ))
-                                                                .child(short),
+                                                                .child(rec_display),
                                                         ),
                                                 )
-                                            }),
-                                    )
-                                    .into_any_element()
-                            }
-                            DrawerTab::Packet => {
-                                let det = self.role_details.as_ref();
-                                let channel_val = det
-                                    .and_then(|d| d.source_channel.clone())
-                                    .unwrap_or_else(|| "Not recorded".into());
-                                let sent_val = det
-                                    .and_then(|d| d.submitted_at.clone())
-                                    .unwrap_or_else(|| role.checked.clone());
-                                let cv_opt = det
-                                    .and_then(|d| d.packet_cv.clone())
-                                    .or_else(|| role.cv_track.clone());
-                                let answers_opt = det.and_then(|d| d.packet_answers.clone());
-                                let status_opt = det.and_then(|d| d.status_detail.clone());
-                                let sha_val = det
-                                    .and_then(|d| d.packet_sha.clone())
-                                    .or_else(|| role.packet_hash.clone())
-                                    .map(|h| h.chars().take(12).collect())
-                                    .unwrap_or_else(|| "—".into());
-                                div()
-                                    .flex()
-                                    .flex_col()
-                                    .gap_3()
-                                    .child(
-                                        div()
-                                            .text_xs()
-                                            .text_color(theme::text_muted())
-                                            .child("Immutable receipt of what was sent for this role."),
-                                    )
-                                    .child(kv_row("Channel", channel_val))
-                                    .child(kv_row("Submitted", sent_val))
-                                    .child(kv_row(
-                                        "CV sent",
-                                        truncate_label(
-                                            cv_opt
-                                                .as_deref()
-                                                .and_then(|p| p.rsplit('/').next())
-                                                .unwrap_or("Not frozen yet"),
-                                            24,
-                                        ),
-                                    ))
-                                    .when_some(answers_opt, |d, ans| {
-                                        let short = truncate_label(
-                                            ans.rsplit('/').next().unwrap_or(&ans),
-                                            24,
-                                        );
-                                        d.child(
+                                                .when_some(brief_opt, |d, bp| {
+                                                    let short = truncate_label(
+                                                        bp.rsplit('/').next().unwrap_or(&bp),
+                                                        24,
+                                                    );
+                                                    d.child(
+                                                        div()
+                                                            .flex()
+                                                            .items_center()
+                                                            .justify_between()
+                                                            .gap_4()
+                                                            .text_xs()
+                                                            .child(
+                                                                div()
+                                                                    .flex_shrink_0()
+                                                                    .text_color(theme::text_muted())
+                                                                    .child("Brief"),
+                                                            )
+                                                            .child(
+                                                                div()
+                                                                    .id("cite-brief")
+                                                                    .text_color(theme::lavender())
+                                                                    .underline()
+                                                                    .cursor_pointer()
+                                                                    .on_click(cx.listener(
+                                                                        move |this, _, _, cx| {
+                                                                            this.drawer_tab =
+                                                                                DrawerTab::Brief;
+                                                                            this.drawer_tab_epoch =
+                                                                                this.drawer_tab_epoch
+                                                                                    .wrapping_add(1);
+                                                                            this.read_citation_async(
+                                                                                bp.clone(),
+                                                                                cx,
+                                                                            );
+                                                                            cx.notify();
+                                                                        },
+                                                                    ))
+                                                                    .child(short),
+                                                            ),
+                                                    )
+                                                }),
+                                        )
+                                        .into_any_element()
+                                }
+                                DrawerTab::Brief | DrawerTab::Notes => {
+                                    let title_path = self
+                                        .citation_title
+                                        .clone()
+                                        .unwrap_or_else(|| role.record_path.clone());
+                                    let body_text = self
+                                        .citation_body
+                                        .clone()
+                                        .unwrap_or_else(|| "Loading…".into());
+                                    let short_file = truncate_label(
+                                        title_path.rsplit('/').next().unwrap_or(&title_path),
+                                        26,
+                                    );
+                                    let local_open = self
+                                        .client
+                                        .target
+                                        .local_root()
+                                        .map(|r| r.join(&title_path));
+                                    let local_reveal = local_open.clone();
+                                    let reader_title = title_path.clone();
+                                    let reader_body = body_text.clone();
+                                    let reader_title_tap = title_path.clone();
+                                    let reader_body_tap = body_text.clone();
+
+                                    let sections = if self.drawer_tab == DrawerTab::Brief {
+                                        parse_brief_sections(&body_text)
+                                    } else {
+                                        Vec::new()
+                                    };
+                                    let active_sec =
+                                        self.brief_section.filter(|&i| i < sections.len());
+                                    let visible_md = match active_sec {
+                                        Some(i) => sections[i].body.clone(),
+                                        None => body_text.clone(),
+                                    };
+                                    let sec_epoch = self.brief_section_epoch;
+                                    let sec_count = sections.len();
+
+                                    let md_preview = div()
+                                        .id("md-tap-expand")
+                                        .p_2()
+                                        .mx(px(-8.0))
+                                        .rounded(px(8.0))
+                                        .hover(|s| s.bg(theme::row_hover()))
+                                        .cursor_pointer()
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            this.expanded_reader = Some((
+                                                reader_title_tap.clone(),
+                                                reader_body_tap.clone(),
+                                            ));
+                                            cx.notify();
+                                        }))
+                                        .child(markdown::render_markdown(
+                                            "drawer-md",
+                                            &visible_md,
+                                            false,
+                                            self.active_text_selection().as_ref(),
+                                            self.md_link_handler(cx),
+                                            self.md_select_handler(cx),
+                                        ));
+                                    let md_block = if self.reduce_motion {
+                                        md_preview.into_any_element()
+                                    } else {
+                                        md_preview
+                                            .with_animation(
+                                                SharedString::from(format!("bsec-{sec_epoch}")),
+                                                Animation::new(Duration::from_millis(120))
+                                                    .with_easing(ease_out_quint()),
+                                                |el, t| el.opacity(0.4 + 0.6 * t),
+                                            )
+                                            .into_any_element()
+                                    };
+
+                                    div()
+                                        .flex()
+                                        .flex_col()
+                                        .gap_3()
+                                        // Show, don't tell toolbar: underlined filename reveals in Finder + icon-only Editor & Expand!
+                                        .child(
                                             div()
                                                 .flex()
                                                 .items_center()
                                                 .justify_between()
-                                                .gap_4()
-                                                .text_xs()
+                                                .gap_2()
                                                 .child(
                                                     div()
-                                                        .flex_shrink_0()
+                                                        .id("md-reveal-file")
+                                                        .text_xs()
                                                         .text_color(theme::text_muted())
-                                                        .child("Answers"),
-                                                )
-                                                .child(
-                                                    div()
-                                                        .id("open-pkt-answers")
-                                                        .text_color(theme::lavender())
                                                         .underline()
+                                                        .hover(|s| {
+                                                            s.text_color(theme::text_primary())
+                                                        })
                                                         .cursor_pointer()
                                                         .on_click(cx.listener(
                                                             move |this, _, _, cx| {
-                                                                this.drawer_tab = DrawerTab::Notes;
-                                                                this.drawer_tab_epoch =
-                                                                    this.drawer_tab_epoch
-                                                                        .wrapping_add(1);
-                                                                this.read_citation_async(
-                                                                    ans.clone(),
-                                                                    cx,
-                                                                );
-                                                                cx.notify();
+                                                                if let Some(p) = &local_reveal {
+                                                                    reveal_in_file_manager(p);
+                                                                } else {
+                                                                    this.set_toast(
+                                                                        "Reveal requires local workspace",
+                                                                        cx,
+                                                                    );
+                                                                }
                                                             },
                                                         ))
-                                                        .child(short),
-                                                ),
-                                        )
-                                    })
-                                    .child(kv_row("Receipt SHA", sha_val))
-                                    .when_some(status_opt, |d, st| {
-                                        d.child(
-                                            div()
-                                                .pt_3()
-                                                .border_t_1()
-                                                .border_color(theme::hairline())
-                                                .text_xs()
-                                                .text_color(theme::text_secondary())
-                                                .child(st),
-                                        )
-                                    })
-                                    .into_any_element()
-                            }
-                            DrawerTab::Brief | DrawerTab::Notes => {
-                                let title_path = self
-                                    .citation_title
-                                    .clone()
-                                    .unwrap_or_else(|| role.record_path.clone());
-                                let body_text = self
-                                    .citation_body
-                                    .clone()
-                                    .unwrap_or_else(|| "Loading…".into());
-                                let short_file = truncate_label(
-                                    title_path.rsplit('/').next().unwrap_or(&title_path),
-                                    20,
-                                );
-                                let local_open = self
-                                    .client
-                                    .target
-                                    .local_root()
-                                    .map(|r| r.join(&title_path));
-                                let local_reveal = local_open.clone();
-                                let reader_title = title_path.clone();
-                                let reader_body = body_text.clone();
-                                let reader_title_tap = title_path.clone();
-                                let reader_body_tap = body_text.clone();
-
-                                // Layered Brief section switcher (Company / Round / Stage parts)
-                                let sections = if self.drawer_tab == DrawerTab::Brief {
-                                    parse_brief_sections(&body_text)
-                                } else {
-                                    Vec::new()
-                                };
-                                let active_sec = self
-                                    .brief_section
-                                    .filter(|&i| i < sections.len());
-                                let visible_md = match active_sec {
-                                    Some(i) => sections[i].body.clone(),
-                                    None => body_text.clone(),
-                                };
-                                let sec_epoch = self.brief_section_epoch;
-                                let sec_count = sections.len();
-
-                                let md_preview = div()
-                                    .id("md-tap-expand")
-                                    .p_2()
-                                    .mx(px(-8.0))
-                                    .rounded(px(8.0))
-                                    .hover(|s| s.bg(theme::row_hover()))
-                                    .cursor_pointer()
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.expanded_reader = Some((
-                                            reader_title_tap.clone(),
-                                            reader_body_tap.clone(),
-                                        ));
-                                        cx.notify();
-                                    }))
-                                    .child(markdown::render_markdown(
-                                        "drawer-md",
-                                        &visible_md,
-                                        false,
-                                        self.md_link_handler(cx),
-                                    ));
-                                let md_block = if self.reduce_motion {
-                                    md_preview.into_any_element()
-                                } else {
-                                    md_preview
-                                        .with_animation(
-                                            SharedString::from(format!("bsec-{sec_epoch}")),
-                                            Animation::new(Duration::from_millis(120))
-                                                .with_easing(ease_out_quint()),
-                                            |el, t| el.opacity(0.4 + 0.6 * t),
-                                        )
-                                        .into_any_element()
-                                };
-
-                                div()
-                                    .flex()
-                                    .flex_col()
-                                    .gap_3()
-                                    // Clean file toolbar: filename + Open + Reveal + Expand reader
-                                    .child(
-                                        div()
-                                            .flex()
-                                            .items_center()
-                                            .justify_between()
-                                            .gap_2()
-                                            .child(
-                                                div()
-                                                    .text_xs()
-                                                    .text_color(theme::text_muted())
-                                                    .child(short_file),
-                                            )
-                                            .child(
-                                                div()
-                                                    .flex()
-                                                    .items_center()
-                                                    .gap_3()
-                                                    .child(
-                                                        div()
-                                                            .id("md-open-file")
-                                                            .text_xs()
-                                                            .text_color(theme::lavender())
-                                                            .cursor_pointer()
-                                                            .on_click(cx.listener(
-                                                                move |this, _, _, cx| {
-                                                                    if let Some(p) = &local_open {
-                                                                        open_in_system(p);
-                                                                    } else {
-                                                                        this.set_toast(
-                                                                            "Open requires local workspace",
-                                                                            cx,
-                                                                        );
-                                                                    }
-                                                                },
-                                                            ))
-                                                            .child("Open"),
-                                                    )
-                                                    .child(
-                                                        div()
-                                                            .id("md-reveal-file")
-                                                            .text_xs()
-                                                            .text_color(theme::text_secondary())
-                                                            .cursor_pointer()
-                                                            .on_click(cx.listener(
-                                                                move |this, _, _, cx| {
-                                                                    if let Some(p) = &local_reveal {
-                                                                        reveal_in_file_manager(p);
-                                                                    } else {
-                                                                        this.set_toast(
-                                                                            "Reveal requires local workspace",
-                                                                            cx,
-                                                                        );
-                                                                    }
-                                                                },
-                                                            ))
-                                                            .child("Reveal"),
-                                                    )
-                                                    .child(
-                                                        div()
-                                                            .id("md-expand-reader")
-                                                            .text_xs()
-                                                            .text_color(theme::text_secondary())
-                                                            .hover(|s| {
-                                                                s.text_color(theme::text_primary())
-                                                            })
-                                                            .cursor_pointer()
-                                                            .on_click(cx.listener(
-                                                                move |this, _, _, cx| {
-                                                                    this.expanded_reader = Some((
-                                                                        reader_title.clone(),
-                                                                        reader_body.clone(),
-                                                                    ));
-                                                                    cx.notify();
-                                                                },
-                                                            ))
-                                                            .child("Expand ⤢"),
-                                                    ),
-                                            ),
-                                    )
-                                    // Brief layer / stage slide switcher when multiple parts exist
-                                    .when(sec_count >= 2, |d| {
-                                        d.child(
-                                            div()
-                                                .flex()
-                                                .flex_col()
-                                                .gap_2()
-                                                .pb_2()
-                                                .border_b_1()
-                                                .border_color(theme::hairline())
-                                                .child(
-                                                    div()
-                                                        .flex()
-                                                        .flex_wrap()
-                                                        .gap_1()
-                                                        .child(
-                                                            div()
-                                                                .id("bsec-all")
-                                                                .px_2()
-                                                                .py(px(2.0))
-                                                                .rounded(px(6.0))
-                                                                .bg(if active_sec.is_none() {
-                                                                    theme::surface_active()
-                                                                } else {
-                                                                    gpui::rgba(0x00000000)
-                                                                })
-                                                                .text_xs()
-                                                                .text_color(if active_sec.is_none() {
-                                                                    theme::text_primary()
-                                                                } else {
-                                                                    theme::text_muted()
-                                                                })
-                                                                .cursor_pointer()
-                                                                .on_click(cx.listener(
-                                                                    |this, _, _, cx| {
-                                                                        this.brief_section = None;
-                                                                        this.brief_section_epoch =
-                                                                            this.brief_section_epoch
-                                                                                .wrapping_add(1);
-                                                                        cx.notify();
-                                                                    },
-                                                                ))
-                                                                .child("All"),
-                                                        )
-                                                        .children(
-                                                            sections.iter().enumerate().map(
-                                                                |(idx, sec)| {
-                                                                    let on = active_sec == Some(idx);
-                                                                    div()
-                                                                        .id(SharedString::from(
-                                                                            format!("bsec-{idx}"),
-                                                                        ))
-                                                                        .px_2()
-                                                                        .py(px(2.0))
-                                                                        .rounded(px(6.0))
-                                                                        .bg(if on {
-                                                                            theme::surface_active()
-                                                                        } else {
-                                                                            gpui::rgba(0x00000000)
-                                                                        })
-                                                                        .hover(|s| {
-                                                                            s.bg(theme::row_hover())
-                                                                        })
-                                                                        .text_xs()
-                                                                        .text_color(if on {
-                                                                            theme::lavender()
-                                                                        } else {
-                                                                            theme::text_muted()
-                                                                        })
-                                                                        .cursor_pointer()
-                                                                        .on_click(cx.listener(
-                                                                            move |this, _, _, cx| {
-                                                                                this.brief_section =
-                                                                                    Some(idx);
-                                                                                this.brief_section_epoch =
-                                                                                    this.brief_section_epoch
-                                                                                        .wrapping_add(1);
-                                                                                cx.notify();
-                                                                            },
-                                                                        ))
-                                                                        .child(sec.label.clone())
-                                                                },
-                                                            ),
-                                                        ),
+                                                        .child(short_file),
                                                 )
                                                 .child(
                                                     div()
                                                         .flex()
                                                         .items_center()
-                                                        .justify_between()
-                                                        .text_xs()
-                                                        .text_color(theme::text_muted())
-                                                        .child(match active_sec {
-                                                            Some(i) => format!(
-                                                                "Part {} of {} · click text to expand",
-                                                                i + 1,
-                                                                sec_count
-                                                            ),
-                                                            None => format!(
-                                                                "{sec_count} parts · click text to expand"
-                                                            ),
-                                                        })
+                                                        .gap_1()
                                                         .child(
                                                             div()
-                                                                .flex()
-                                                                .items_center()
-                                                                .gap_2()
+                                                                .id("md-open-file")
+                                                                .p(px(5.0))
+                                                                .rounded(px(6.0))
+                                                                .hover(|s| {
+                                                                    s.bg(theme::row_hover())
+                                                                })
+                                                                .cursor_pointer()
+                                                                .on_click(cx.listener(
+                                                                    move |this, _, _, cx| {
+                                                                        if let Some(p) = &local_open
+                                                                        {
+                                                                            open_in_system(p);
+                                                                        } else {
+                                                                            this.set_toast(
+                                                                                "Open requires local workspace",
+                                                                                cx,
+                                                                            );
+                                                                        }
+                                                                    },
+                                                                ))
                                                                 .child(
-                                                                    div()
-                                                                        .id("bsec-prev")
-                                                                        .px(px(5.0))
-                                                                        .rounded(px(4.0))
-                                                                        .hover(|s| {
-                                                                            s.bg(theme::row_hover())
-                                                                        })
-                                                                        .cursor_pointer()
-                                                                        .on_click(cx.listener(
-                                                                            move |this, _, _, cx| {
-                                                                                let next = match this
-                                                                                    .brief_section
-                                                                                {
-                                                                                    None | Some(0) => {
-                                                                                        Some(
-                                                                                            sec_count
-                                                                                                .saturating_sub(
-                                                                                                    1,
-                                                                                                ),
-                                                                                        )
-                                                                                    }
-                                                                                    Some(i) => {
-                                                                                        Some(i - 1)
-                                                                                    }
-                                                                                };
-                                                                                this.brief_section =
-                                                                                    next;
-                                                                                this.brief_section_epoch =
-                                                                                    this.brief_section_epoch
-                                                                                        .wrapping_add(1);
-                                                                                cx.notify();
-                                                                            },
-                                                                        ))
-                                                                        .child("‹ Prev"),
-                                                                )
+                                                                    svg()
+                                                                        .path(
+                                                                            "icons/external-link.svg",
+                                                                        )
+                                                                        .size(px(13.5))
+                                                                        .text_color(
+                                                                            theme::text_muted(),
+                                                                        ),
+                                                                ),
+                                                        )
+                                                        .child(
+                                                            div()
+                                                                .id("md-expand-reader")
+                                                                .p(px(5.0))
+                                                                .rounded(px(6.0))
+                                                                .hover(|s| {
+                                                                    s.bg(theme::row_hover())
+                                                                })
+                                                                .cursor_pointer()
+                                                                .on_click(cx.listener(
+                                                                    move |this, _, _, cx| {
+                                                                        this.expanded_reader =
+                                                                            Some((
+                                                                                reader_title
+                                                                                    .clone(),
+                                                                                reader_body.clone(),
+                                                                            ));
+                                                                        cx.notify();
+                                                                    },
+                                                                ))
                                                                 .child(
-                                                                    div()
-                                                                        .id("bsec-next")
-                                                                        .px(px(5.0))
-                                                                        .rounded(px(4.0))
-                                                                        .hover(|s| {
-                                                                            s.bg(theme::row_hover())
-                                                                        })
-                                                                        .cursor_pointer()
-                                                                        .on_click(cx.listener(
-                                                                            move |this, _, _, cx| {
-                                                                                let next = match this
-                                                                                    .brief_section
-                                                                                {
-                                                                                    None => Some(0),
-                                                                                    Some(i)
-                                                                                        if i + 1
-                                                                                            < sec_count =>
-                                                                                    {
-                                                                                        Some(i + 1)
-                                                                                    }
-                                                                                    Some(_) => None,
-                                                                                };
-                                                                                this.brief_section =
-                                                                                    next;
-                                                                                this.brief_section_epoch =
-                                                                                    this.brief_section_epoch
-                                                                                        .wrapping_add(1);
-                                                                                cx.notify();
-                                                                            },
-                                                                        ))
-                                                                        .child("Next ›"),
+                                                                    svg()
+                                                                        .path("icons/expand.svg")
+                                                                        .size(px(13.5))
+                                                                        .text_color(
+                                                                            theme::text_muted(),
+                                                                        ),
                                                                 ),
                                                         ),
                                                 ),
                                         )
-                                    })
-                                    .child(md_block)
-                                    .into_any_element()
-                            }
+                                        // Brief layer / stage slide switcher when multiple parts exist
+                                        .when(sec_count >= 2, |d| {
+                                            d.child(
+                                                div()
+                                                    .flex()
+                                                    .flex_col()
+                                                    .gap_2()
+                                                    .pb_2()
+                                                    .border_b_1()
+                                                    .border_color(theme::hairline())
+                                                    .child(
+                                                        div()
+                                                            .flex()
+                                                            .flex_wrap()
+                                                            .gap_1()
+                                                            .child(
+                                                                div()
+                                                                    .id("bsec-all")
+                                                                    .px_2()
+                                                                    .py(px(2.0))
+                                                                    .rounded(px(6.0))
+                                                                    .bg(if active_sec.is_none() {
+                                                                        theme::surface_active()
+                                                                    } else {
+                                                                        gpui::rgba(0x00000000)
+                                                                    })
+                                                                    .text_xs()
+                                                                    .text_color(
+                                                                        if active_sec.is_none() {
+                                                                            theme::text_primary()
+                                                                        } else {
+                                                                            theme::text_muted()
+                                                                        },
+                                                                    )
+                                                                    .cursor_pointer()
+                                                                    .on_click(cx.listener(
+                                                                        |this, _, _, cx| {
+                                                                            this.brief_section =
+                                                                                None;
+                                                                            this.brief_section_epoch =
+                                                                                this.brief_section_epoch
+                                                                                    .wrapping_add(1);
+                                                                            cx.notify();
+                                                                        },
+                                                                    ))
+                                                                    .child("All"),
+                                                            )
+                                                            .children(
+                                                                sections.iter().enumerate().map(
+                                                                    |(idx, sec)| {
+                                                                        let on =
+                                                                            active_sec == Some(idx);
+                                                                        div()
+                                                                            .id(SharedString::from(
+                                                                                format!(
+                                                                                    "bsec-{idx}"
+                                                                                ),
+                                                                            ))
+                                                                            .px_2()
+                                                                            .py(px(2.0))
+                                                                            .rounded(px(6.0))
+                                                                            .bg(if on {
+                                                                                theme::surface_active()
+                                                                            } else {
+                                                                                gpui::rgba(0x00000000)
+                                                                            })
+                                                                            .hover(|s| {
+                                                                                s.bg(
+                                                                                    theme::row_hover(),
+                                                                                )
+                                                                            })
+                                                                            .text_xs()
+                                                                            .text_color(if on {
+                                                                                theme::lavender()
+                                                                            } else {
+                                                                                theme::text_muted()
+                                                                            })
+                                                                            .cursor_pointer()
+                                                                            .on_click(cx.listener(
+                                                                                move |this,
+                                                                                      _,
+                                                                                      _,
+                                                                                      cx| {
+                                                                                    this.brief_section =
+                                                                                        Some(idx);
+                                                                                    this.brief_section_epoch =
+                                                                                        this.brief_section_epoch
+                                                                                            .wrapping_add(1);
+                                                                                    cx.notify();
+                                                                                },
+                                                                            ))
+                                                                            .child(sec.label.clone())
+                                                                    },
+                                                                ),
+                                                            ),
+                                                    ),
+                                            )
+                                        })
+                                        .child(md_block)
+                                        .into_any_element()
+                                }
                             };
-                            let wrapped = div().pt_2().child(tab_body);
+                            let scroll_body = div()
+                                .id("role-drawer-scroll")
+                                .flex_1()
+                                .min_h_0()
+                                .overflow_y_scroll()
+                                .pt_1()
+                                .pr_1()
+                                .child(tab_body);
                             if self.reduce_motion {
-                                wrapped.into_any_element()
+                                scroll_body.into_any_element()
                             } else {
-                                wrapped
+                                scroll_body
                                     .with_animation(
                                         SharedString::from(format!("dtab-fade-{tab_epoch}")),
                                         Animation::new(Duration::from_millis(130))
                                             .with_easing(ease_out_quint()),
-                                        |el, t| el.opacity(t).mt(px(4.0 * (1.0 - t))),
+                                        |el, t| el.opacity(t),
                                     )
                                     .into_any_element()
                             }
                         })
-                        // Refined subtle bottom CTA that attaches the role chip cleanly in Chat
+                        // Upgraded high-craft pinned bottom CTA
                         .child(
                             div()
                                 .id("ask-role-chat")
-                                .mt_auto()
-                                .py_2()
+                                .flex_shrink_0()
+                                .py(px(9.0))
                                 .px_3()
-                                .rounded(px(8.0))
-                                .bg(theme::surface_active())
+                                .rounded(px(9.0))
+                                .bg(theme::lavender_wash())
                                 .border_1()
-                                .border_color(theme::hairline_strong())
-                                .hover(|s| s.bg(theme::row_hover()))
+                                .border_color(theme::lavender_border())
+                                .hover(|s| s.bg(theme::surface_active()))
                                 .flex()
                                 .items_center()
                                 .justify_between()
@@ -5198,7 +6019,6 @@ impl JobHarnessApp {
                                     this.chat_open = true;
                                     this.attached_role =
                                         Some((role_company.clone(), role_path_for_chat.clone()));
-                                    this.chat_input.clear();
                                     this.active_input = ActiveInput::Chat;
                                     cx.notify();
                                 }))
@@ -5208,12 +6028,329 @@ impl JobHarnessApp {
                                         .text_color(theme::text_primary())
                                         .child("Ask in Chat about this role"),
                                 )
+                                .child(div().text_xs().text_color(theme::lavender()).child("→")),
+                        )
+                        .into_any_element(),
+                )
+            }
+            RightDrawer::Profile => {
+                let groups = [
+                    "Defaults & screening",
+                    "Career context",
+                    "Projects & evidence",
+                ];
+                let ws_path = self
+                    .client
+                    .target
+                    .local_root()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|| self.client.target.label());
+                Some(
+                    div()
+                        .id("profile-drawer")
+                        .w_full()
+                        .flex_shrink_0()
+                        .h_full()
+                        .p_4()
+                        .bg(theme::panel_glass())
+                        .border_l_1()
+                        .border_color(theme::hairline())
+                        .flex()
+                        .flex_col()
+                        .gap_3()
+                        .overflow_hidden()
+                        .child(drawer_header(
+                            "Profile & Career Context",
+                            Some(
+                                "Canonical facts & defaults shared across every connected agent."
+                                    .into(),
+                            ),
+                            cx,
+                        ))
+                        .child(
+                            div()
+                                .id("profile-scroll")
+                                .flex_1()
+                                .min_h_0()
+                                .overflow_y_scroll()
+                                .flex()
+                                .flex_col()
+                                .gap_4()
+                                // Inline editable personal defaults (canonical config/career-ledger.json shared by all agents)
+                                .child({
+                                    let ps = &self.snapshot.profile_settings;
+                                    let cur = if ps.currency.is_empty() {
+                                        "GBP"
+                                    } else {
+                                        ps.currency.as_str()
+                                    };
+                                    div()
+                                        .pb_3()
+                                        .border_b_1()
+                                        .border_color(theme::hairline())
+                                        .flex()
+                                        .flex_col()
+                                        .gap_2()
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .text_color(theme::text_muted())
+                                                .child("Personal defaults (click to edit)"),
+                                        )
+                                        .child(self.render_editable_kv(
+                                            "sender_email",
+                                            "Email",
+                                            if ps.sender_email.is_empty() {
+                                                "Set email".into()
+                                            } else {
+                                                truncate_label(&ps.sender_email, 26)
+                                            },
+                                            ps.sender_email.clone(),
+                                            "you@domain.com",
+                                            cx,
+                                        ))
+                                        .child(self.render_editable_kv(
+                                            "timezone",
+                                            "Timezone",
+                                            ps.timezone.clone(),
+                                            ps.timezone.clone(),
+                                            "Europe/London",
+                                            cx,
+                                        ))
+                                        .child(self.render_editable_kv(
+                                            "min_base_salary",
+                                            "Min salary",
+                                            format!("{cur} {}", ps.min_base_salary),
+                                            ps.min_base_salary.to_string(),
+                                            "80000",
+                                            cx,
+                                        ))
+                                        .child(self.render_editable_kv(
+                                            "target_base_salary",
+                                            "Target salary",
+                                            format!("{cur} {}", ps.target_base_salary),
+                                            ps.target_base_salary.to_string(),
+                                            "100000",
+                                            cx,
+                                        ))
+                                        .child(self.render_editable_kv(
+                                            "location_preferences",
+                                            "Location",
+                                            truncate_end(
+                                                if ps.location_preferences.is_empty() {
+                                                    "Set preference"
+                                                } else {
+                                                    &ps.location_preferences
+                                                },
+                                                26,
+                                            ),
+                                            ps.location_preferences.clone(),
+                                            "UK remote, London hybrid",
+                                            cx,
+                                        ))
+                                        .child(self.render_editable_kv(
+                                            "target_roles",
+                                            "Target roles",
+                                            truncate_end(
+                                                if ps.target_roles.is_empty() {
+                                                    "Set target roles"
+                                                } else {
+                                                    &ps.target_roles
+                                                },
+                                                26,
+                                            ),
+                                            ps.target_roles.clone(),
+                                            "Senior Backend, Product, AI",
+                                            cx,
+                                        ))
+                                        .child(self.render_editable_kv(
+                                            "tone",
+                                            "Voice & tone",
+                                            truncate_end(
+                                                if ps.tone.is_empty() {
+                                                    "Set writing voice"
+                                                } else {
+                                                    &ps.tone
+                                                },
+                                                26,
+                                            ),
+                                            ps.tone.clone(),
+                                            "direct, concise, plain-language",
+                                            cx,
+                                        ))
+                                })
+                                .children(groups.into_iter().filter_map(|grp| {
+                                    let items: Vec<_> = self
+                                        .snapshot
+                                        .profile_docs
+                                        .iter()
+                                        .filter(|d| d.group == grp)
+                                        .cloned()
+                                        .collect();
+                                    if items.is_empty() {
+                                        return None;
+                                    }
+                                    Some(
+                                        div()
+                                            .flex()
+                                            .flex_col()
+                                            .gap_1()
+                                            .child(
+                                                div()
+                                                    .pb_1()
+                                                    .text_xs()
+                                                    .text_color(theme::text_muted())
+                                                    .child(grp),
+                                            )
+                                            .children(items.into_iter().enumerate().map(
+                                                |(idx, doc)| {
+                                                    let rel = doc.relative_path.clone();
+                                                    let full_open = doc.full_path.clone();
+                                                    div()
+                                                        .id(SharedString::from(format!(
+                                                            "prof-{grp}-{idx}"
+                                                        )))
+                                                        .px_2()
+                                                        .py(px(6.0))
+                                                        .mx(px(-8.0))
+                                                        .rounded(px(7.0))
+                                                        .hover(|s| s.bg(theme::row_hover()))
+                                                        .flex()
+                                                        .items_center()
+                                                        .justify_between()
+                                                        .gap_2()
+                                                        .child(
+                                                            div()
+                                                                .id(SharedString::from(format!(
+                                                                    "prof-read-{grp}-{idx}"
+                                                                )))
+                                                                .flex_1()
+                                                                .min_w_0()
+                                                                .cursor_pointer()
+                                                                .flex()
+                                                                .flex_col()
+                                                                .on_click(cx.listener(
+                                                                    move |this, _, _, cx| {
+                                                                        this.open_file_in_reader_async(
+                                                                            rel.clone(),
+                                                                            cx,
+                                                                        );
+                                                                    },
+                                                                ))
+                                                                .child(
+                                                                    div()
+                                                                        .text_xs()
+                                                                        .text_color(
+                                                                            theme::text_primary(),
+                                                                        )
+                                                                        .child(doc.label),
+                                                                )
+                                                                .child(
+                                                                    div()
+                                                                        .text_size(px(11.0))
+                                                                        .text_color(
+                                                                            theme::text_muted(),
+                                                                        )
+                                                                        .child(truncate_label(
+                                                                            &doc.relative_path,
+                                                                            36,
+                                                                        )),
+                                                                ),
+                                                        )
+                                                        .when_some(full_open, |r, p| {
+                                                            r.child(
+                                                                div()
+                                                                    .id(SharedString::from(format!(
+                                                                        "prof-edit-{grp}-{idx}"
+                                                                    )))
+                                                                    .p(px(5.0))
+                                                                    .rounded(px(6.0))
+                                                                    .hover(|s| {
+                                                                        s.bg(theme::surface_active())
+                                                                    })
+                                                                    .cursor_pointer()
+                                                                    .on_click(cx.listener(
+                                                                        move |_, _, _, _| {
+                                                                            open_in_system(&p);
+                                                                        },
+                                                                    ))
+                                                                    .child(
+                                                                        svg()
+                                                                            .path(
+                                                                                "icons/external-link.svg",
+                                                                            )
+                                                                            .size(px(13.0))
+                                                                            .text_color(
+                                                                                theme::text_muted(),
+                                                                            ),
+                                                                    ),
+                                                            )
+                                                        })
+                                                },
+                                            )),
+                                    )
+                                }))
+                                .child(
+                                    div()
+                                        .pt_3()
+                                        .border_t_1()
+                                        .border_color(theme::hairline())
+                                        .flex()
+                                        .flex_col()
+                                        .gap_2()
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .text_color(theme::text_muted())
+                                                .child("Connected agents & ledger"),
+                                        )
+                                        .child(kv_row("Workspace", truncate_label(&ws_path, 26)))
+                                        .child(kv_row(
+                                            "Active agent",
+                                            self.runtime.label(),
+                                        ))
+                                        .child(kv_row(
+                                            "Detected CLIs",
+                                            self.available_runtimes
+                                                .iter()
+                                                .map(|r| r.short_name())
+                                                .collect::<Vec<_>>()
+                                                .join(" · "),
+                                        )),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .id("profile-ask-chat")
+                                .flex_shrink_0()
+                                .py(px(9.0))
+                                .px_3()
+                                .rounded(px(9.0))
+                                .bg(theme::lavender_wash())
+                                .border_1()
+                                .border_color(theme::lavender_border())
+                                .hover(|s| s.bg(theme::surface_active()))
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .cursor_pointer()
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    if !this.chat_open {
+                                        this.chat_anim_epoch = this.chat_anim_epoch.wrapping_add(1);
+                                    }
+                                    this.chat_open = true;
+                                    this.chat_input =
+                                        "Update my screening defaults or profile context: ".into();
+                                    this.active_input = ActiveInput::Chat;
+                                    cx.notify();
+                                }))
                                 .child(
                                     div()
                                         .text_xs()
-                                        .text_color(theme::lavender())
-                                        .child("→"),
-                                ),
+                                        .text_color(theme::text_primary())
+                                        .child("Update profile via Chat"),
+                                )
+                                .child(div().text_xs().text_color(theme::lavender()).child("→")),
                         )
                         .into_any_element(),
                 )
@@ -5221,7 +6358,7 @@ impl JobHarnessApp {
             RightDrawer::Cvs => Some(
                 div()
                     .id("cv-drawer")
-                    .w(px(340.0))
+                    .w_full()
                     .flex_shrink_0()
                     .h_full()
                     .p_4()
@@ -5299,23 +6436,53 @@ impl JobHarnessApp {
                                             }),
                                     ),
                             )
-                            // Clickable underlined path reveals the PDF in Finder
+                            // Clickable underlined path reveals the PDF in Finder + inline Copy icon
                             .child(
                                 div()
-                                    .id(SharedString::from(format!("cv-path-{i}")))
-                                    .text_xs()
-                                    .text_color(theme::text_muted())
-                                    .underline()
-                                    .hover(|s| s.text_color(theme::text_primary()))
-                                    .cursor_pointer()
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        if let Some(p) = &full_reveal {
-                                            reveal_in_file_manager(p);
-                                        } else {
-                                            this.set_toast("Reveal requires local workspace", cx);
-                                        }
-                                    }))
-                                    .child(node.relative_path.clone()),
+                                    .flex()
+                                    .items_center()
+                                    .justify_between()
+                                    .gap_2()
+                                    .child(
+                                        div()
+                                            .id(SharedString::from(format!("cv-path-{i}")))
+                                            .flex_1()
+                                            .min_w_0()
+                                            .overflow_hidden()
+                                            .text_xs()
+                                            .text_color(theme::text_muted())
+                                            .underline()
+                                            .hover(|s| s.text_color(theme::text_primary()))
+                                            .cursor_pointer()
+                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                if let Some(p) = &full_reveal {
+                                                    reveal_in_file_manager(p);
+                                                } else {
+                                                    this.set_toast("Reveal requires local workspace", cx);
+                                                }
+                                            }))
+                                            .child(truncate_label(&node.relative_path, 34)),
+                                    )
+                                    .child(
+                                        div()
+                                            .id(SharedString::from(format!("cv-copy-{i}")))
+                                            .p(px(4.0))
+                                            .rounded(px(5.0))
+                                            .hover(|s| s.bg(theme::row_hover()))
+                                            .cursor_pointer()
+                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                cx.write_to_clipboard(ClipboardItem::new_string(
+                                                    copy_str.clone(),
+                                                ));
+                                                this.set_toast("Copied CV path", cx);
+                                            }))
+                                            .child(
+                                                svg()
+                                                    .path("icons/copy.svg")
+                                                    .size(px(13.0))
+                                                    .text_color(theme::text_muted()),
+                                            ),
+                                    ),
                             )
                             .child(
                                 div()
@@ -5335,21 +6502,7 @@ impl JobHarnessApp {
                                                     this.set_toast("Remote PDF open unavailable", cx);
                                                 }
                                             }))
-                                            .child("Open"),
-                                    )
-                                    .child(
-                                        div()
-                                            .id(SharedString::from(format!("cv-copy-{i}")))
-                                            .text_xs()
-                                            .text_color(theme::text_secondary())
-                                            .cursor_pointer()
-                                            .on_click(cx.listener(move |this, _, _, cx| {
-                                                cx.write_to_clipboard(ClipboardItem::new_string(
-                                                    copy_str.clone(),
-                                                ));
-                                                this.set_toast("Copied CV path", cx);
-                                            }))
-                                            .child("Copy path"),
+                                            .child("Open PDF ↗"),
                                     )
                                     .when(!is_master, |d| {
                                         d.child(
@@ -5453,7 +6606,7 @@ impl JobHarnessApp {
                 Some(
                     div()
                         .id("notifications-drawer")
-                        .w(px(360.0))
+                        .w_full()
                         .flex_shrink_0()
                         .h_full()
                         .p_4()
@@ -5723,7 +6876,7 @@ impl JobHarnessApp {
                 Some(
                     div()
                         .id("settings-drawer")
-                        .w(px(360.0))
+                        .w_full()
                         .flex_shrink_0()
                         .h_full()
                         .p_4()
@@ -5883,9 +7036,21 @@ impl JobHarnessApp {
                                 .flex()
                                 .flex_col()
                                 .gap_2()
-                                .child(kv_row(
+                                .child(self.render_editable_kv(
+                                    "prep_reminder_minutes",
                                     "Prep reminder",
                                     format!("{} min prior", p.brief_lead_time_minutes),
+                                    p.brief_lead_time_minutes.to_string(),
+                                    "Minutes (e.g. 90, 1440)",
+                                    cx,
+                                ))
+                                .child(self.render_editable_kv(
+                                    "applied_ghost_days",
+                                    "Ghost archive",
+                                    format!("{} days", self.snapshot.profile_settings.applied_ghost_days),
+                                    self.snapshot.profile_settings.applied_ghost_days.to_string(),
+                                    "Days (e.g. 30)",
+                                    cx,
                                 ))
                                 .child(kv_row("Storage", self.snapshot.status_note.clone()))
                                 .child(
@@ -5905,7 +7070,7 @@ impl JobHarnessApp {
                 Some(
                     div()
                         .id("tidy-drawer")
-                        .w(px(360.0))
+                        .w_full()
                         .flex_shrink_0()
                         .h_full()
                         .p_4()
@@ -6103,11 +7268,7 @@ impl JobHarnessApp {
     fn bottom_popover_right_offset(&self) -> f32 {
         match self.right_drawer {
             RightDrawer::Closed => 16.0,
-            RightDrawer::Cvs => 340.0 + 16.0,
-            RightDrawer::Role
-            | RightDrawer::Tidy
-            | RightDrawer::Notifications
-            | RightDrawer::Settings => 360.0 + 16.0,
+            _ => self.drawer_width + 20.0,
         }
     }
 
@@ -6302,6 +7463,12 @@ impl JobHarnessApp {
                 let right_off = self.bottom_popover_right_offset();
                 let epoch = self.cmd_anim_epoch;
                 let card = popover_shell(true, 330.0, right_off)
+                    .id("budget-popover-card")
+                    .occlude()
+                    .on_hover(cx.listener(|this, hovered, _, cx| {
+                        this.on_dock_panel_hover(*hovered, cx);
+                    }))
+                    .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .child(popover_header("Daily Submission Cap", cx))
                     .child(stepper_row(
@@ -6325,38 +7492,27 @@ impl JobHarnessApp {
                         "recruiter_outreach",
                         cx,
                     ));
-                Some(
-                    div()
-                        .id("budget-backdrop")
-                        .occlude()
-                        .absolute()
-                        .inset_0()
-                        .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(|this, _, _, cx| {
-                                this.active_popover = ActivePopover::None;
-                                cx.notify();
-                            }),
-                        )
-                        .child(if self.reduce_motion {
-                            card.into_any_element()
-                        } else {
-                            card.with_animation(
-                                SharedString::from(format!("pop-budget-{epoch}")),
-                                Animation::new(Duration::from_millis(140))
-                                    .with_easing(ease_out_quint()),
-                                |el, t| el.opacity(t).mb(px(-6.0 * (1.0 - t))),
-                            )
-                            .into_any_element()
-                        })
-                        .into_any_element(),
-                )
+                Some(if self.reduce_motion {
+                    card.into_any_element()
+                } else {
+                    card.with_animation(
+                        SharedString::from(format!("pop-budget-{epoch}")),
+                        Animation::new(Duration::from_millis(130)).with_easing(ease_out_quint()),
+                        |el, t| el.opacity(t).mb(px(-6.0 * (1.0 - t))),
+                    )
+                    .into_any_element()
+                })
             }
             ActivePopover::Health => {
                 let right_off = self.bottom_popover_right_offset();
                 let epoch = self.cmd_anim_epoch;
                 let card = popover_shell(true, 330.0, right_off)
+                    .id("health-popover-card")
+                    .occlude()
+                    .on_hover(cx.listener(|this, hovered, _, cx| {
+                        this.on_dock_panel_hover(*hovered, cx);
+                    }))
+                    .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .child(popover_header("Workspace Status", cx))
                     .child(kv_row("Storage", self.snapshot.status_note.clone()))
@@ -6380,33 +7536,16 @@ impl JobHarnessApp {
                         "Unknown guards",
                         self.snapshot.unresolved_attempts.to_string(),
                     ));
-                Some(
-                    div()
-                        .id("health-backdrop")
-                        .occlude()
-                        .absolute()
-                        .inset_0()
-                        .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(|this, _, _, cx| {
-                                this.active_popover = ActivePopover::None;
-                                cx.notify();
-                            }),
-                        )
-                        .child(if self.reduce_motion {
-                            card.into_any_element()
-                        } else {
-                            card.with_animation(
-                                SharedString::from(format!("pop-health-{epoch}")),
-                                Animation::new(Duration::from_millis(140))
-                                    .with_easing(ease_out_quint()),
-                                |el, t| el.opacity(t).mb(px(-6.0 * (1.0 - t))),
-                            )
-                            .into_any_element()
-                        })
-                        .into_any_element(),
-                )
+                Some(if self.reduce_motion {
+                    card.into_any_element()
+                } else {
+                    card.with_animation(
+                        SharedString::from(format!("pop-health-{epoch}")),
+                        Animation::new(Duration::from_millis(130)).with_easing(ease_out_quint()),
+                        |el, t| el.opacity(t).mb(px(-6.0 * (1.0 - t))),
+                    )
+                    .into_any_element()
+                })
             }
         }
     }
@@ -6420,8 +7559,49 @@ impl Render for JobHarnessApp {
             .on_key_down(cx.listener(Self::handle_key_down))
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(|this, _, window, _| {
+                cx.listener(|this, _, window, cx| {
                     window.focus(&this.focus_handle);
+                    if matches!(
+                        this.active_popover,
+                        ActivePopover::Budget | ActivePopover::Health
+                    ) {
+                        this.active_popover = ActivePopover::None;
+                        this.popover_pinned = false;
+                        cx.notify();
+                    }
+                }),
+            )
+            .on_mouse_move(cx.listener(|this, ev: &MouseMoveEvent, window, cx| {
+                let Some(rail) = this.resizing_rail else {
+                    return;
+                };
+                let mx: f32 = ev.position.x.into();
+                let win_w: f32 = window.viewport_size().width.into();
+                match rail {
+                    ResizeRail::Chat => {
+                        let raw = mx.clamp(260.0, (win_w * 0.44).clamp(280.0, 540.0));
+                        let snapped = snap_width(raw, &[300.0, 380.0, 480.0], 12.0);
+                        if (this.chat_width - snapped).abs() > 0.5 {
+                            this.chat_width = snapped;
+                            cx.notify();
+                        }
+                    }
+                    ResizeRail::RightDrawer => {
+                        let raw = (win_w - mx).clamp(300.0, (win_w * 0.48).clamp(320.0, 620.0));
+                        let snapped = snap_width(raw, &[360.0, 440.0, 540.0], 12.0);
+                        if (this.drawer_width - snapped).abs() > 0.5 {
+                            this.drawer_width = snapped;
+                            cx.notify();
+                        }
+                    }
+                }
+            }))
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _ev: &MouseUpEvent, _, cx| {
+                    if this.resizing_rail.take().is_some() {
+                        cx.notify();
+                    }
                 }),
             )
             .size_full()
@@ -6442,36 +7622,105 @@ impl Render for JobHarnessApp {
                     .overflow_hidden()
                     .when(self.chat_open, |d| {
                         let epoch = self.chat_anim_epoch;
+                        let target_w = self.chat_width;
+                        let dragging = self.resizing_rail == Some(ResizeRail::Chat);
                         let rail = div()
                             .h_full()
                             .flex_shrink_0()
                             .overflow_hidden()
                             .child(self.render_chat_rail(cx));
-                        d.child(if self.reduce_motion {
-                            rail.w(px(300.0)).into_any_element()
+                        let rail_el = if self.reduce_motion || dragging {
+                            rail.w(px(target_w)).into_any_element()
                         } else {
                             rail.with_animation(
                                 SharedString::from(format!("chat-slide-{epoch}")),
                                 Animation::new(Duration::from_millis(170))
                                     .with_easing(ease_out_quint()),
-                                |el, t| el.w(px(300.0 * t)).opacity(t),
+                                move |el, t| el.w(px(target_w * t)).opacity(t),
                             )
                             .into_any_element()
-                        })
+                        };
+                        let handle = div()
+                            .id("resize-chat-rail")
+                            .w(px(5.0))
+                            .ml(px(-2.0))
+                            .mr(px(-3.0))
+                            .h_full()
+                            .flex_shrink_0()
+                            .cursor_col_resize()
+                            .flex()
+                            .justify_center()
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|this, ev: &gpui::MouseDownEvent, _, cx| {
+                                    cx.stop_propagation();
+                                    if ev.click_count >= 2 {
+                                        this.chat_width = 300.0;
+                                        this.resizing_rail = None;
+                                    } else {
+                                        this.resizing_rail = Some(ResizeRail::Chat);
+                                    }
+                                    cx.notify();
+                                }),
+                            )
+                            .child(
+                                div()
+                                    .w(px(2.0))
+                                    .h_full()
+                                    .bg(if dragging {
+                                        theme::lavender()
+                                    } else {
+                                        gpui::rgba(0x00000000)
+                                    })
+                                    .hover(|s| s.bg(theme::lavender_border())),
+                            );
+                        d.child(rail_el).child(handle)
                     })
                     .child(self.render_board(cx))
                     .when_some(self.render_right_drawer(cx), |d, drawer| {
                         let epoch = self.drawer_anim_epoch;
-                        let target_w = match self.right_drawer {
-                            RightDrawer::Cvs => 340.0,
-                            _ => 360.0,
-                        };
+                        let target_w = self.drawer_width;
+                        let dragging = self.resizing_rail == Some(ResizeRail::RightDrawer);
+                        let handle = div()
+                            .id("resize-right-drawer")
+                            .w(px(5.0))
+                            .ml(px(-3.0))
+                            .mr(px(-2.0))
+                            .h_full()
+                            .flex_shrink_0()
+                            .cursor_col_resize()
+                            .flex()
+                            .justify_center()
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|this, ev: &gpui::MouseDownEvent, _, cx| {
+                                    cx.stop_propagation();
+                                    if ev.click_count >= 2 {
+                                        this.drawer_width = 360.0;
+                                        this.resizing_rail = None;
+                                    } else {
+                                        this.resizing_rail = Some(ResizeRail::RightDrawer);
+                                    }
+                                    cx.notify();
+                                }),
+                            )
+                            .child(
+                                div()
+                                    .w(px(2.0))
+                                    .h_full()
+                                    .bg(if dragging {
+                                        theme::lavender()
+                                    } else {
+                                        gpui::rgba(0x00000000)
+                                    })
+                                    .hover(|s| s.bg(theme::lavender_border())),
+                            );
                         let box_el = div()
                             .h_full()
                             .flex_shrink_0()
                             .overflow_hidden()
                             .child(drawer);
-                        d.child(if self.reduce_motion {
+                        let drawer_el = if self.reduce_motion || dragging {
                             box_el.w(px(target_w)).into_any_element()
                         } else {
                             box_el
@@ -6482,7 +7731,8 @@ impl Render for JobHarnessApp {
                                     move |el, t| el.w(px(target_w * t)).opacity(t),
                                 )
                                 .into_any_element()
-                        })
+                        };
+                        d.child(handle).child(drawer_el)
                     }),
             )
             .when_some(self.expanded_reader.clone(), |d, (title, body)| {
@@ -6508,7 +7758,7 @@ impl Render for JobHarnessApp {
                         cx.stop_propagation();
                     })
                     .w(px(760.0))
-                    .max_h(px(680.0))
+                    .h(px(620.0))
                     .p_6()
                     .rounded(px(14.0))
                     .bg(theme::popover_glass())
@@ -6531,22 +7781,34 @@ impl Render for JobHarnessApp {
                                 div()
                                     .flex_1()
                                     .min_w_0()
-                                    .text_sm()
-                                    .text_color(theme::text_primary())
-                                    .child(truncate_label(&title, 54)),
-                            )
-                            .child(
-                                div()
-                                    .flex_shrink_0()
                                     .flex()
                                     .items_center()
-                                    .gap_4()
+                                    .gap_2()
+                                    .child({
+                                        let has_file = local_reveal.is_some();
+                                        div()
+                                            .id("reader-title-reveal")
+                                            .min_w_0()
+                                            .overflow_hidden()
+                                            .text_sm()
+                                            .text_color(theme::text_primary())
+                                            .when(has_file, |d| {
+                                                let p = local_reveal.unwrap();
+                                                d.underline()
+                                                    .cursor_pointer()
+                                                    .hover(|s| s.text_color(theme::lavender()))
+                                                    .on_click(cx.listener(move |_, _, _, _| {
+                                                        reveal_in_file_manager(&p);
+                                                    }))
+                                            })
+                                            .child(truncate_label(&title, 50))
+                                    })
                                     .child(
                                         div()
                                             .id("reader-copy-all")
-                                            .text_xs()
-                                            .text_color(theme::text_secondary())
-                                            .hover(|s| s.text_color(theme::text_primary()))
+                                            .p(px(4.0))
+                                            .rounded(px(5.0))
+                                            .hover(|s| s.bg(theme::row_hover()))
                                             .cursor_pointer()
                                             .on_click(cx.listener(move |this, _, _, cx| {
                                                 cx.write_to_clipboard(ClipboardItem::new_string(
@@ -6554,22 +7816,20 @@ impl Render for JobHarnessApp {
                                                 ));
                                                 this.set_toast("Copied text", cx);
                                             }))
-                                            .child("Copy"),
-                                    )
-                                    .when_some(local_reveal, |r, p| {
-                                        r.child(
-                                            div()
-                                                .id("reader-reveal-ext")
-                                                .text_xs()
-                                                .text_color(theme::text_secondary())
-                                                .hover(|s| s.text_color(theme::text_primary()))
-                                                .cursor_pointer()
-                                                .on_click(cx.listener(move |_, _, _, _| {
-                                                    reveal_in_file_manager(&p);
-                                                }))
-                                                .child("Reveal in Finder"),
-                                        )
-                                    })
+                                            .child(
+                                                svg()
+                                                    .path("icons/copy.svg")
+                                                    .size(px(13.5))
+                                                    .text_color(theme::text_muted()),
+                                            ),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .flex_shrink_0()
+                                    .flex()
+                                    .items_center()
+                                    .gap_3()
                                     .when_some(local_open, |r, p| {
                                         r.child(
                                             div()
@@ -6736,7 +7996,9 @@ impl Render for JobHarnessApp {
                                 "reader-md",
                                 &visible_md,
                                 true,
+                                self.active_text_selection().as_ref(),
                                 self.md_link_handler(cx),
+                                self.md_select_handler(cx),
                             ));
                         if self.reduce_motion {
                             body_view.into_any_element()
@@ -6851,6 +8113,15 @@ fn truncate_end(text: &str, max_chars: usize) -> String {
 }
 
 /// Truncates file names in the middle (`cambridge-ap…41638.md`) so both slug and extension stay legible.
+fn snap_width(raw: f32, stops: &[f32], threshold: f32) -> f32 {
+    for &s in stops {
+        if (raw - s).abs() <= threshold {
+            return s;
+        }
+    }
+    raw
+}
+
 fn truncate_label(text: &str, max_chars: usize) -> String {
     let count = text.chars().count();
     if count <= max_chars || max_chars < 6 {
@@ -6914,6 +8185,13 @@ fn parse_brief_sections(text: &str) -> Vec<BriefSection> {
 }
 
 fn short_section_pill(heading: &str) -> String {
+    if let Some((left, right)) = heading.split_once('—') {
+        let l = left.trim();
+        let r = right.trim();
+        if l.eq_ignore_ascii_case("Recorded update") && !r.is_empty() {
+            return format!("Update · {}", truncate_end(r, 12));
+        }
+    }
     let head = heading
         .split('—')
         .next()
@@ -6922,12 +8200,7 @@ fn short_section_pill(heading: &str) -> String {
         .next()
         .unwrap_or(heading)
         .trim();
-    if head.chars().count() <= 18 {
-        head.to_owned()
-    } else {
-        let cut: String = head.chars().take(17).collect();
-        format!("{}…", cut.trim_end())
-    }
+    truncate_end(head, 18)
 }
 
 fn format_tokens(total: u64) -> String {
@@ -7194,6 +8467,92 @@ fn stepper_row(
                         .child("+"),
                 ),
         )
+}
+
+/// Multi-line auto-growing Chat composer text with ⌘A selection highlight and breathing caret.
+fn chat_multiline_input(
+    text: &str,
+    placeholder: &str,
+    active: bool,
+    all_selected: bool,
+    reduce_motion: bool,
+) -> impl IntoElement {
+    let has_text = !text.is_empty();
+    let caret_base = div()
+        .w(px(1.5))
+        .h(px(14.0))
+        .rounded(px(1.0))
+        .bg(theme::lavender());
+    let caret = if reduce_motion {
+        caret_base.into_any_element()
+    } else {
+        caret_base
+            .with_animation(
+                "caret-chat-multi",
+                Animation::new(Duration::from_millis(1060)).repeat(),
+                |el, t| {
+                    let vis = if t < 0.55 { 1.0 } else { 0.12 };
+                    el.opacity(vis)
+                },
+            )
+            .into_any_element()
+    };
+
+    if !has_text {
+        return div()
+            .flex()
+            .items_center()
+            .gap(px(1.0))
+            .text_size(px(12.5))
+            .line_height(px(19.0))
+            .when(active, |d| d.child(caret))
+            .child(
+                div()
+                    .text_color(theme::text_muted())
+                    .child(placeholder.to_owned()),
+            )
+            .into_any_element();
+    }
+
+    let lines: Vec<&str> = text.split('\n').collect();
+    let last_ix = lines.len().saturating_sub(1);
+    div()
+        .w_full()
+        .flex()
+        .flex_col()
+        .text_size(px(12.5))
+        .line_height(px(19.0))
+        .children(lines.into_iter().enumerate().map(move |(i, line)| {
+            let is_last = i == last_ix;
+            div()
+                .w_full()
+                .flex()
+                .items_center()
+                .flex_wrap()
+                .child(
+                    div()
+                        .when(all_selected, |d| {
+                            d.rounded(px(3.0)).bg(theme::lavender_wash())
+                        })
+                        .text_color(theme::text_primary())
+                        .child(if line.is_empty() {
+                            " ".to_owned()
+                        } else {
+                            line.to_owned()
+                        }),
+                )
+                .when(active && is_last && !all_selected, |d| {
+                    d.child(
+                        div()
+                            .ml(px(1.0))
+                            .w(px(1.5))
+                            .h(px(14.0))
+                            .rounded(px(1.0))
+                            .bg(theme::lavender()),
+                    )
+                })
+        }))
+        .into_any_element()
 }
 
 /// Clean single-line input text + breathing caret that NEVER shifts placeholder position on click.

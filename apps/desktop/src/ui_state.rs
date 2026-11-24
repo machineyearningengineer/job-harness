@@ -15,6 +15,8 @@ pub struct UiState {
     pub interviews_expanded: bool,
     pub collapsed_cols: Vec<String>,
     pub chat_open: bool,
+    pub chat_width: Option<u32>,
+    pub drawer_width: Option<u32>,
     pub agent_kind: Option<String>,
     pub agent: AgentOptions,
     pub last_seen_activity_at: Option<String>,

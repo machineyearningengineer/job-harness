@@ -647,25 +647,67 @@ fn extract_tool_output(val: Option<&Value>) -> String {
     let Some(v) = val else {
         return String::new();
     };
-    let raw = if let Some(s) = v.as_str() {
-        // Hermes wraps terminal stdout in JSON string `{"output": "...", "exit_code": 0}`
-        if let Ok(inner) = serde_json::from_str::<Value>(s)
-            && let Some(out) = inner.get("output").and_then(Value::as_str)
-        {
-            out.to_owned()
+    // Unwrap Hermes JSON-encoded terminal wrapper: `{"output": "...", "exit_code": 0}`
+    let mut unwrapped = if let Some(s) = v.as_str() {
+        if let Ok(inner) = serde_json::from_str::<Value>(s) {
+            if let Some(out) = inner.get("output").and_then(Value::as_str) {
+                out.to_owned()
+            } else {
+                s.to_owned()
+            }
         } else {
             s.to_owned()
         }
     } else {
         v.to_string()
     };
-    let trimmed = raw.trim();
-    if trimmed.chars().count() <= 1600 {
+
+    // Unwrap a second JSON layer if the command itself printed a job-harness v2 envelope
+    if let Ok(parsed) = serde_json::from_str::<Value>(unwrapped.trim()) {
+        if let Some(summary) = summarize_json_tool_result(&parsed) {
+            return summary;
+        }
+        if let Ok(pretty) = serde_json::to_string_pretty(&parsed) {
+            unwrapped = pretty;
+        }
+    }
+
+    let trimmed = unwrapped.trim();
+    if trimmed.chars().count() <= 1200 {
         trimmed.to_owned()
     } else {
-        let head: String = trimmed.chars().take(1600).collect();
+        let head: String = trimmed.chars().take(1200).collect();
         format!("{head}\n…")
     }
+}
+
+fn summarize_json_tool_result(v: &Value) -> Option<String> {
+    // Job Harness v2 query_batch / execute_batch response
+    if let Some(results) = v.pointer("/data/results").and_then(Value::as_array) {
+        let mut lines = Vec::new();
+        for step in results {
+            let tool = step["tool"].as_str().unwrap_or("step");
+            let ok = step["result"]["ok"].as_bool().unwrap_or(true);
+            let mark = if ok { "✓" } else { "✕" };
+            let extra = if let Some(items) = step["result"]["data"]["items"].as_array() {
+                format!(" ({} items)", items.len())
+            } else if let Some(total) = step["result"]["data"]["health"]["record_count"].as_u64() {
+                format!(" ({total} roles)")
+            } else if let Some(msg) = step["result"]["error"]["message"].as_str() {
+                format!(" — {msg}")
+            } else {
+                String::new()
+            };
+            lines.push(format!("{mark} {tool}{extra}"));
+        }
+        if !lines.is_empty() {
+            return Some(lines.join("\n"));
+        }
+    }
+    if let Some(err) = v.pointer("/error/message").and_then(Value::as_str) {
+        return Some(format!("Error: {err}"));
+    }
+    None
 }
 
 fn extract_total_tokens(v: &Value) -> Option<u64> {
@@ -703,7 +745,7 @@ fn summarize_tool_input(tool_name: &str, input: Option<&Value>) -> String {
         if let Some(s) = val.get(key).and_then(Value::as_str) {
             let one_line = s.lines().next().unwrap_or(s).trim();
             if !one_line.is_empty() {
-                return one_line.to_owned();
+                return humanize_command(one_line);
             }
         }
     }
@@ -719,6 +761,30 @@ fn summarize_tool_input(tool_name: &str, input: Option<&Value>) -> String {
         }
     }
     String::new()
+}
+
+fn humanize_command(cmd: &str) -> String {
+    if let Some(pos) = cmd.find("jh ") {
+        let rest = &cmd[pos..];
+        let parts: Vec<&str> = rest.split_whitespace().collect();
+        // Skip `jh --root <path>` to highlight the actual subcommand
+        let mut i = 1;
+        while i < parts.len() {
+            if parts[i] == "--root" {
+                i += 2;
+            } else {
+                return format!("jh {}", parts[i]);
+            }
+        }
+        return "jh".into();
+    }
+    if cmd.contains("gmailUsers") {
+        return "Gmail check".into();
+    }
+    if cmd.contains("calendarEvents") {
+        return "Calendar check".into();
+    }
+    cmd.to_owned()
 }
 
 /// Automatically extracts canonical workspace citations referenced inside any agent reply.
