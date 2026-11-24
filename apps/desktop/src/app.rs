@@ -284,6 +284,7 @@ pub struct JobHarnessApp {
     stream_cancel: Option<Arc<AtomicBool>>,
     stream_turn_id: u64,
     chat_follow: bool,
+    chat_ruler_hover: Option<usize>,
 
     // Feedback toast + animated bottom-dock sync/save pill + 5s Undo on drag/archive
     sync_state: SyncIndicator,
@@ -433,6 +434,7 @@ impl JobHarnessApp {
             stream_cancel: None,
             stream_turn_id: 0,
             chat_follow: true,
+            chat_ruler_hover: None,
             sync_state: SyncIndicator::Idle,
             sync_epoch: 1,
             toast: None,
@@ -3057,7 +3059,14 @@ impl JobHarnessApp {
                             .flex_1()
                             .min_h_0()
                             .overflow_y_scroll()
-                            .px_4()
+                            .pl(px(
+                                if self.chat_messages.iter().filter(|m| m.is_user).count() >= 2 {
+                                    22.0
+                                } else {
+                                    16.0
+                                },
+                            ))
+                            .pr_4()
                             .py_3()
                             .flex()
                             .flex_col()
@@ -3492,16 +3501,20 @@ impl JobHarnessApp {
                                     block = block.child(trace_box);
                                 }
 
-                                // Message content body (inline thumbnails + floating hover toolbar on user bubbles -> zero dead gap!)
+                                // Message content body: subtle right-aligned user prompt vs left-aligned assistant prose (T3 Code rhythm!)
                                 if msg.is_user {
                                     let copy_u = copy_text.clone();
                                     let reply_u = reply_text.clone();
+                                    let user_max_w = (self.chat_width - 52.0).max(170.0);
                                     let mut bubble = div()
                                         .relative()
+                                        .max_w(px(user_max_w))
                                         .px_3()
                                         .py_2()
-                                        .rounded(px(10.0))
+                                        .rounded(px(11.0))
                                         .bg(theme::surface_subtle())
+                                        .border_1()
+                                        .border_color(theme::hairline())
                                         .flex()
                                         .flex_col()
                                         .gap_2();
@@ -3619,7 +3632,8 @@ impl JobHarnessApp {
                                                         ),
                                                 ),
                                         );
-                                    block = block.child(bubble);
+                                    block = block
+                                        .child(div().w_full().flex().justify_end().child(bubble));
                                 } else if !shown.is_empty() {
                                     let display_str = if actively_writing {
                                         format!("{shown} ▋")
@@ -3844,6 +3858,134 @@ impl JobHarnessApp {
 
                                 block
                             })),
+                    )
+                    // T3 Code left-edge Prompt Ruler / Minimap (appears when 2+ prompts exist — hover to preview, click to jump!)
+                    .when(
+                        self.chat_messages.iter().filter(|m| m.is_user).count() >= 2,
+                        |d| {
+                            let turns: Vec<(usize, String, String)> = self
+                                .chat_messages
+                                .iter()
+                                .enumerate()
+                                .filter(|(_, m)| m.is_user)
+                                .map(|(mi, m)| {
+                                    let reply = self
+                                        .chat_messages
+                                        .get(mi + 1)
+                                        .filter(|r| !r.is_user)
+                                        .map(|r| r.text.clone())
+                                        .unwrap_or_default();
+                                    (mi, m.text.clone(), reply)
+                                })
+                                .collect();
+                            let hovered_ix = self.chat_ruler_hover;
+                            let hovered_turn = hovered_ix
+                                .and_then(|hi| turns.iter().find(|(mi, _, _)| *mi == hi).cloned());
+                            let total_msgs = self.chat_messages.len();
+                            let preview_w = (self.chat_width - 30.0).clamp(180.0, 260.0);
+                            d.child(
+                                div()
+                                    .id("chat-prompt-ruler")
+                                    .absolute()
+                                    .left(px(3.0))
+                                    .top_4()
+                                    .bottom_4()
+                                    .w(px(14.0))
+                                    .flex()
+                                    .flex_col()
+                                    .justify_center()
+                                    .gap(px(5.0))
+                                    .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+                                        if !*hovered && this.chat_ruler_hover.is_some() {
+                                            this.chat_ruler_hover = None;
+                                            cx.notify();
+                                        }
+                                    }))
+                                    .children(turns.into_iter().enumerate().map(
+                                        |(ti, (msg_idx, _, _))| {
+                                            let is_hov = hovered_ix == Some(msg_idx);
+                                            div()
+                                                .id(SharedString::from(format!("ruler-tick-{ti}")))
+                                                .w(px(14.0))
+                                                .py(px(3.0))
+                                                .flex()
+                                                .items_center()
+                                                .cursor_pointer()
+                                                .on_hover(cx.listener(
+                                                    move |this, h: &bool, _, cx| {
+                                                        if *h {
+                                                            this.chat_ruler_hover = Some(msg_idx);
+                                                            cx.notify();
+                                                        }
+                                                    },
+                                                ))
+                                                .on_click(cx.listener(move |this, _, _, cx| {
+                                                    this.chat_follow = msg_idx + 2 >= total_msgs;
+                                                    this.chat_scroll.scroll_to_item(msg_idx);
+                                                    this.chat_ruler_hover = None;
+                                                    cx.notify();
+                                                }))
+                                                .child(
+                                                    div()
+                                                        .h(px(if is_hov { 2.0 } else { 1.5 }))
+                                                        .w(px(if is_hov { 12.0 } else { 6.0 }))
+                                                        .rounded(px(1.0))
+                                                        .bg(if is_hov {
+                                                            theme::lavender()
+                                                        } else {
+                                                            theme::hairline_strong()
+                                                        }),
+                                                )
+                                        },
+                                    )),
+                            )
+                            .when_some(
+                                hovered_turn,
+                                |d2, (_, prompt_txt, reply_txt)| {
+                                    d2.child(
+                                        div()
+                                            .absolute()
+                                            .left(px(18.0))
+                                            .top(px(28.0))
+                                            .w(px(preview_w))
+                                            .p_3()
+                                            .rounded(px(10.0))
+                                            .bg(theme::popover_glass())
+                                            .border_1()
+                                            .border_color(theme::hairline_strong())
+                                            .shadow_lg()
+                                            .flex()
+                                            .flex_col()
+                                            .gap_1()
+                                            .child(
+                                                div()
+                                                    .text_xs()
+                                                    .font_weight(FontWeight::SEMIBOLD)
+                                                    .text_color(theme::text_primary())
+                                                    .child(truncate_end(
+                                                        prompt_txt
+                                                            .lines()
+                                                            .next()
+                                                            .unwrap_or(&prompt_txt),
+                                                        44,
+                                                    )),
+                                            )
+                                            .when(!reply_txt.is_empty(), |c| {
+                                                c.child(
+                                                    div()
+                                                        .text_size(px(11.0))
+                                                        .line_height(px(15.5))
+                                                        .text_color(theme::text_muted())
+                                                        .child(truncate_end(
+                                                            &reply_txt.replace('\n', " "),
+                                                            92,
+                                                        )),
+                                                )
+                                            }),
+                                    )
+                                },
+                            )
+                        },
                     )
                     // Emma-style floating jump-to-bottom button anchored cleanly inside the scroll pane
                     .when(!self.chat_follow && !self.chat_messages.is_empty(), |d| {
