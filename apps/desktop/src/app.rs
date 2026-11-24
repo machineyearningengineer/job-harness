@@ -274,6 +274,7 @@ pub struct JobHarnessApp {
     editing_config_key: Option<&'static str>,
     config_draft: String,
     config_error: Option<String>,
+    scrub_config: Option<(&'static str, f32, i64, i64, bool)>,
     quick_input: String,
     quick_popover_open: bool,
     quick_reply_preview: String,
@@ -422,6 +423,7 @@ impl JobHarnessApp {
             editing_config_key: None,
             config_draft: String::new(),
             config_error: None,
+            scrub_config: None,
             quick_input: String::new(),
             quick_popover_open: false,
             quick_reply_preview: String::new(),
@@ -1442,14 +1444,13 @@ impl JobHarnessApp {
                             .child(label.to_owned()),
                     )
                     .child(if is_editing {
-                        // Seamless borderless inline text editor: expands smoothly in-place with NO box/Save-button shift!
+                        // Seamless borderless inline text editor: hugs text width (no 200px line on short numbers!)
                         let editor = div()
                             .id(SharedString::from(format!("cfg-edit-{key}")))
-                            .flex_1()
-                            .min_w_0()
+                            .max_w_full()
                             .max_h(px(96.0))
                             .overflow_y_scroll()
-                            .pb(px(2.0))
+                            .pb(px(1.0))
                             .border_b_1()
                             .border_color(if err.is_some() {
                                 theme::rose_text()
@@ -1472,10 +1473,11 @@ impl JobHarnessApp {
                                 self.reduce_motion,
                                 key,
                             ));
+                        let wrapped = div().flex_1().min_w_0().flex().justify_end().child(editor);
                         if self.reduce_motion {
-                            editor.into_any_element()
+                            wrapped.into_any_element()
                         } else {
-                            editor
+                            wrapped
                                 .with_animation(
                                     SharedString::from(format!("cfg-expand-{key}")),
                                     Animation::new(Duration::from_millis(120))
@@ -1485,7 +1487,13 @@ impl JobHarnessApp {
                                 .into_any_element()
                         }
                     } else {
-                        // Subtle dashed underline signifies clickable/editable value cleanly!
+                        let scrub_spec = numeric_scrub_spec(key);
+                        let is_scrubbing = self
+                            .scrub_config
+                            .is_some_and(|(k, _, _, _, dragged)| k == key && dragged);
+                        let init_for_down = edit_initial.clone();
+                        let init_for_click = edit_initial;
+                        // Subtle dashed underline signifies clickable/editable (+ vertical drag scrub on numbers!)
                         div()
                             .id(SharedString::from(format!("cfg-val-{key}")))
                             .min_w_0()
@@ -1493,21 +1501,46 @@ impl JobHarnessApp {
                             .pb(px(1.0))
                             .border_b_1()
                             .border_dashed()
-                            .border_color(theme::lavender_border())
+                            .border_color(if is_scrubbing {
+                                theme::lavender()
+                            } else {
+                                theme::lavender_border()
+                            })
                             .hover(|s| {
                                 s.border_color(theme::lavender())
                                     .text_color(theme::lavender())
                             })
-                            .cursor_pointer()
-                            .text_color(theme::text_primary())
-                            .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                                cx.stop_propagation();
+                            .when(scrub_spec.is_some(), |d| d.cursor_row_resize())
+                            .when(scrub_spec.is_none(), |d| d.cursor_pointer())
+                            .text_color(if is_scrubbing {
+                                theme::lavender()
+                            } else {
+                                theme::text_primary()
                             })
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |this, ev: &gpui::MouseDownEvent, _, cx| {
+                                    cx.stop_propagation();
+                                    if scrub_spec.is_some()
+                                        && let Ok(v) = init_for_down.trim().parse::<i64>()
+                                    {
+                                        if this.editing_config_key.is_some() {
+                                            this.cancel_inline_config(cx);
+                                        }
+                                        let sy: f32 = ev.position.y.into();
+                                        this.scrub_config = Some((key, sy, v, v, false));
+                                        cx.notify();
+                                    }
+                                }),
+                            )
                             .on_click(cx.listener(move |this, _, _, cx| {
+                                if scrub_spec.is_some() {
+                                    return;
+                                }
                                 if this.editing_config_key.is_some() {
                                     this.cancel_inline_config(cx);
                                 }
-                                this.start_inline_config(key, edit_initial.clone(), cx);
+                                this.start_inline_config(key, init_for_click.clone(), cx);
                             }))
                             .child(display_value)
                             .into_any_element()
@@ -2394,6 +2427,24 @@ impl JobHarnessApp {
         };
         if let Some(buf) = target_buf {
             match key {
+                "up" | "down" if active_in == ActiveInput::InlineConfig => {
+                    if let Some(k) = self.editing_config_key
+                        && let Some((step, min_v, _max_v)) = numeric_scrub_spec(k)
+                        && let Ok(cur) = self.config_draft.trim().parse::<i64>()
+                    {
+                        let mult = if shift { 5 } else { 1 };
+                        let delta = if key == "up" {
+                            step * mult
+                        } else {
+                            -step * mult
+                        };
+                        let next = (cur + delta).max(min_v);
+                        self.config_draft = next.to_string();
+                        self.input_all_selected = false;
+                        self.config_error = None;
+                        cx.notify();
+                    }
+                }
                 "backspace" => {
                     if cmd || all_sel {
                         buf.clear();
@@ -8378,6 +8429,78 @@ impl Render for JobHarnessApp {
                         d.child(handle).child(drawer_el)
                     }),
             )
+            // Transparent full-window capture shield while scrubbing a numeric config (Figma/Blender pattern)
+            .when(self.scrub_config.is_some(), |d| {
+                d.child(
+                    div()
+                        .id("config-scrub-shield")
+                        .occlude()
+                        .absolute()
+                        .inset_0()
+                        .cursor_row_resize()
+                        .on_mouse_move(cx.listener(|this, ev: &MouseMoveEvent, _, cx| {
+                            let Some((key, start_y, start_val, cur_val, did_drag)) =
+                                this.scrub_config
+                            else {
+                                return;
+                            };
+                            let Some((step, min_v, max_v)) = numeric_scrub_spec(key) else {
+                                return;
+                            };
+                            let cy: f32 = ev.position.y.into();
+                            let dy = start_y - cy; // drag up = increase, drag down = decrease
+                            if !did_drag && dy.abs() < 4.0 {
+                                return;
+                            }
+                            let mult = if ev.modifiers.shift { 5 } else { 1 };
+                            let steps = (dy / 6.0).round() as i64;
+                            let next = (start_val + steps * step * mult).clamp(min_v, max_v);
+                            this.scrub_config = Some((key, start_y, start_val, next, true));
+                            if next != cur_val {
+                                match key {
+                                    "prep_reminder_minutes" => {
+                                        this.snapshot.permissions.brief_lead_time_minutes = next;
+                                    }
+                                    "applied_ghost_days" => {
+                                        this.snapshot.profile_settings.applied_ghost_days =
+                                            next.max(1) as u64;
+                                    }
+                                    "min_base_salary" => {
+                                        this.snapshot.profile_settings.min_base_salary =
+                                            next.max(0) as u64;
+                                    }
+                                    "target_base_salary" => {
+                                        this.snapshot.profile_settings.target_base_salary =
+                                            next.max(0) as u64;
+                                    }
+                                    _ => {}
+                                }
+                                cx.notify();
+                            }
+                        }))
+                        .on_mouse_up(
+                            MouseButton::Left,
+                            cx.listener(|this, _ev: &MouseUpEvent, _, cx| {
+                                if let Some((key, _, start_val, cur_val, did_drag)) =
+                                    this.scrub_config.take()
+                                {
+                                    if did_drag {
+                                        if cur_val != start_val {
+                                            this.editing_config_key = Some(key);
+                                            this.config_draft = cur_val.to_string();
+                                            this.commit_inline_config(cx);
+                                        } else {
+                                            cx.notify();
+                                        }
+                                    } else {
+                                        // Clean click (<4px drag) opens borderless inline typing!
+                                        this.start_inline_config(key, start_val.to_string(), cx);
+                                    }
+                                }
+                            }),
+                        ),
+                )
+            })
             // Transparent full-window capture shield while dragging a side-rail divider (Zed GPUI pattern)
             .when(self.resizing_rail.is_some(), |d| {
                 d.child(
@@ -8908,6 +9031,15 @@ fn truncate_end(text: &str, max_chars: usize) -> String {
 }
 
 /// Truncates file names in the middle (`cambridge-ap…41638.md`) so both slug and extension stay legible.
+fn numeric_scrub_spec(key: &str) -> Option<(i64, i64, i64)> {
+    match key {
+        "prep_reminder_minutes" => Some((5, 5, 1440)),
+        "applied_ghost_days" => Some((1, 1, 180)),
+        "min_base_salary" | "target_base_salary" => Some((1000, 0, 500_000)),
+        _ => None,
+    }
+}
+
 fn snap_width(raw: f32, stops: &[f32], threshold: f32) -> f32 {
     for &s in stops {
         if (raw - s).abs() <= threshold {
