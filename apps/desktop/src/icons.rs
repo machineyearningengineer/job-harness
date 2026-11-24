@@ -34,6 +34,14 @@ const USER: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="16" height=
 
 const EXTERNAL_LINK: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M15 3h6v6"/><path d="M10 14 21 3"/><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/></svg>"#;
 
+const TERMINAL: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 17 10 11 4 5"/><line x1="12" x2="20" y1="19" y2="19"/></svg>"#;
+
+const EYE: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M2.062 12.348a1 1 0 0 1 0-.696 10.75 10.75 0 0 1 19.876 0 1 1 0 0 1 0 .696 10.75 10.75 0 0 1-19.876 0"/><circle cx="12" cy="12" r="3"/></svg>"#;
+
+const EDIT: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.375 2.625a1 1 0 0 1 3 3l-9.013 9.014a2 2 0 0 1-.853.505l-2.873.84a.5.5 0 0 1-.62-.62l.84-2.873a2 2 0 0 1 .506-.852z"/></svg>"#;
+
+const BRAIN: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18Z"/><path d="M12 5a3 3 0 1 1 5.997.125 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18Z"/><path d="M15 13a4.5 4.5 0 0 1-3-4 4.5 4.5 0 0 1-3 4"/></svg>"#;
+
 impl AssetSource for EmbeddedIcons {
     fn load(&self, path: &str) -> Result<Option<Cow<'static, [u8]>>> {
         let bytes = match path {
@@ -52,6 +60,10 @@ impl AssetSource for EmbeddedIcons {
             "icons/check.svg" => Some(CHECK.as_bytes()),
             "icons/user.svg" => Some(USER.as_bytes()),
             "icons/external-link.svg" => Some(EXTERNAL_LINK.as_bytes()),
+            "icons/terminal.svg" => Some(TERMINAL.as_bytes()),
+            "icons/eye.svg" => Some(EYE.as_bytes()),
+            "icons/edit.svg" => Some(EDIT.as_bytes()),
+            "icons/brain.svg" => Some(BRAIN.as_bytes()),
             _ => None,
         };
         Ok(bytes.map(Cow::Borrowed))
@@ -74,6 +86,10 @@ impl AssetSource for EmbeddedIcons {
             "icons/check.svg".into(),
             "icons/user.svg".into(),
             "icons/external-link.svg".into(),
+            "icons/terminal.svg".into(),
+            "icons/eye.svg".into(),
+            "icons/edit.svg".into(),
+            "icons/brain.svg".into(),
         ])
     }
 }
