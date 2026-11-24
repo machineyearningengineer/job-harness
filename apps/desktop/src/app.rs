@@ -134,6 +134,13 @@ enum CommandAction {
     AskAgent(String),
 }
 
+struct ChatPickerItem {
+    label: String,
+    meta: String,
+    insert_text: String,
+    role_attach: Option<(String, String)>,
+}
+
 struct CommandEntry {
     label: String,
     meta: String,
@@ -286,6 +293,7 @@ pub struct JobHarnessApp {
     stream_turn_id: u64,
     chat_follow: bool,
     chat_ruler_hover: Option<usize>,
+    chat_picker_idx: usize,
 
     // Feedback toast + animated bottom-dock sync/save pill + 5s Undo on drag/archive
     sync_state: SyncIndicator,
@@ -437,6 +445,7 @@ impl JobHarnessApp {
             stream_turn_id: 0,
             chat_follow: true,
             chat_ruler_hover: None,
+            chat_picker_idx: 0,
             sync_state: SyncIndicator::Idle,
             sync_epoch: 1,
             toast: None,
@@ -1869,8 +1878,7 @@ impl JobHarnessApp {
             if !attachments.is_empty() {
                 self.chat_attachments.extend(attachments);
             }
-            let n = self.queued_prompts.len();
-            self.set_toast(format!("Queued ({n}) · ⌘⏎ to Steer immediately"), cx);
+            cx.notify();
             return;
         }
         let now = Instant::now();
@@ -2439,6 +2447,23 @@ impl JobHarnessApp {
         };
         if let Some(buf) = target_buf {
             match key {
+                "up" | "down" if active_in == ActiveInput::Chat => {
+                    let items = self.chat_picker_items();
+                    if !items.is_empty() {
+                        self.chat_picker_idx = if key == "down" {
+                            (self.chat_picker_idx + 1) % items.len()
+                        } else {
+                            (self.chat_picker_idx + items.len() - 1) % items.len()
+                        };
+                        cx.notify();
+                    }
+                }
+                "tab" if active_in == ActiveInput::Chat => {
+                    let items = self.chat_picker_items();
+                    if let Some(item) = items.into_iter().nth(self.chat_picker_idx) {
+                        self.apply_chat_picker_item(item.insert_text, item.role_attach, cx);
+                    }
+                }
                 "up" | "down" if active_in == ActiveInput::InlineConfig => {
                     if let Some(k) = self.editing_config_key
                         && let Some((step, min_v, _max_v)) = numeric_scrub_spec(k)
@@ -2488,8 +2513,20 @@ impl JobHarnessApp {
                                 self.submit_prompt(q, true, cx);
                             }
                             ActiveInput::Chat => {
-                                let steer = (cmd || alt) && self.streaming;
-                                self.submit_chat_input(steer, cx);
+                                let picker = self.chat_picker_items();
+                                if !picker.is_empty()
+                                    && let Some(item) = picker.into_iter().nth(self.chat_picker_idx)
+                                {
+                                    self.apply_chat_picker_item(
+                                        item.insert_text,
+                                        item.role_attach,
+                                        cx,
+                                    );
+                                } else {
+                                    // Steer is default on Enter while streaming; ⌘⏎ / ⌥⏎ queues for later!
+                                    let steer = !(cmd || alt) && self.streaming;
+                                    self.submit_chat_input(steer, cx);
+                                }
                             }
                             ActiveInput::ModelField => {
                                 self.apply_model_draft(cx);
@@ -2913,16 +2950,148 @@ impl JobHarnessApp {
         out
     }
 
+    fn chat_picker_items(&self) -> Vec<ChatPickerItem> {
+        let raw = self.chat_input.as_str();
+        // 1. Slash commands when input starts with `/` (before first space)
+        if let Some(after_slash) = raw.strip_prefix('/')
+            && !after_slash.contains(' ')
+            && !after_slash.contains('\n')
+        {
+            let q = after_slash.to_ascii_lowercase();
+            let cmds: [(&str, &str, &str); 6] = [
+                (
+                    "/digest",
+                    "Inbox, calendar & what needs attention today",
+                    "What needs attention today? Check recent inbox & calendar changes.",
+                ),
+                (
+                    "/brief",
+                    "Prepare a 2-layer interview brief",
+                    "Prepare a 2-layer brief for my next interview.",
+                ),
+                (
+                    "/drill",
+                    "1-question-at-a-time mock interview drill",
+                    "Run a 1-question-at-a-time mock prep drill for my next interview.",
+                ),
+                (
+                    "/draft",
+                    "Draft a reply in your voice (save to Drafts)",
+                    "Draft a short reply email in my voice (check Gmail Sent first; save as draft only): ",
+                ),
+                (
+                    "/reconcile",
+                    "Check unconfirmed submission guards",
+                    "Reconcile unknown submission outcomes against Gmail Sent.",
+                ),
+                ("/new", "Start a fresh chat", "__CLEAR__"),
+            ];
+            return cmds
+                .into_iter()
+                .filter(|(k, d, _)| {
+                    q.is_empty()
+                        || k.to_ascii_lowercase().contains(&q)
+                        || d.to_ascii_lowercase().contains(&q)
+                })
+                .map(|(k, d, p)| ChatPickerItem {
+                    label: k.to_owned(),
+                    meta: d.to_owned(),
+                    insert_text: p.to_owned(),
+                    role_attach: None,
+                })
+                .collect();
+        }
+        // 2. `@` mentions for active Roles & canonical Profile/Context docs
+        let last_tok = raw.rsplit([' ', '\n']).next().unwrap_or("");
+        if let Some(after_at) = last_tok.strip_prefix('@') {
+            let q = after_at.to_ascii_lowercase();
+            let mut items = Vec::new();
+            for card in &self.snapshot.active_cards {
+                if q.is_empty()
+                    || card.company.to_ascii_lowercase().contains(&q)
+                    || card.title.to_ascii_lowercase().contains(&q)
+                {
+                    items.push(ChatPickerItem {
+                        label: format!("@{}", card.company),
+                        meta: truncate_end(&card.title, 34),
+                        insert_text: String::new(),
+                        role_attach: Some((card.company.clone(), card.record_path.clone())),
+                    });
+                    if items.len() >= 5 {
+                        break;
+                    }
+                }
+            }
+            for doc in &self.snapshot.profile_docs {
+                if items.len() >= 7 {
+                    break;
+                }
+                if q.is_empty()
+                    || doc.label.to_ascii_lowercase().contains(&q)
+                    || doc.relative_path.to_ascii_lowercase().contains(&q)
+                {
+                    items.push(ChatPickerItem {
+                        label: format!("@{}", doc.label),
+                        meta: truncate_label(&doc.relative_path, 26),
+                        insert_text: format!("`{}` ", doc.relative_path),
+                        role_attach: None,
+                    });
+                }
+            }
+            return items;
+        }
+        Vec::new()
+    }
+
+    fn apply_chat_picker_item(
+        &mut self,
+        insert_text: String,
+        role_attach: Option<(String, String)>,
+        cx: &mut Context<Self>,
+    ) {
+        self.chat_picker_idx = 0;
+        if insert_text == "__CLEAR__" {
+            self.chat_input.clear();
+            self.chat_messages.clear();
+            self.quoted_reply = None;
+            self.chat_attachments.clear();
+            self.pasted_snippets.clear();
+            self.text_selection = None;
+            self.chat_ruler_hover = None;
+            self.chat_follow = true;
+            cx.notify();
+            return;
+        }
+        if self.chat_input.starts_with('/') {
+            if insert_text.ends_with(' ') {
+                self.chat_input = insert_text;
+            } else {
+                self.chat_input.clear();
+                self.submit_prompt(insert_text, false, cx);
+                return;
+            }
+        } else if let Some(at_pos) = self.chat_input.rfind('@') {
+            self.chat_input.truncate(at_pos);
+            if let Some(role) = role_attach {
+                self.attached_role = Some(role);
+            } else {
+                self.chat_input.push_str(&insert_text);
+            }
+        }
+        self.active_input = ActiveInput::Chat;
+        cx.notify();
+    }
+
     fn render_chat_rail(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let input_active = self.active_input == ActiveInput::Chat;
         let agent_pop_open = self.active_popover == ActivePopover::Agent;
         let model_badge = self.active_model_badge();
         let placeholder = if self.streaming {
-            "⏎ Queue  ·  ⌘⏎ Steer…".to_owned()
+            "Send a follow-up…".to_owned()
         } else if let Some((company, _)) = &self.attached_role {
-            format!("Ask about {company} or press ⏎…")
+            format!("Ask about {company}…")
         } else {
-            "Message your agent…".to_owned()
+            "Ask anything (@ roles, / commands)".to_owned()
         };
         let on_link = self.md_link_handler(cx);
         let on_select = self.md_select_handler(cx);
@@ -3610,94 +3779,76 @@ impl JobHarnessApp {
                                             ),
                                         );
                                     }
-                                    bubble = bubble
-                                        .child(markdown::render_markdown(
-                                            &format!("chat-user-{idx}"),
-                                            &msg.text,
-                                            false,
-                                            active_sel.as_ref(),
-                                            on_link.clone(),
-                                            on_select.clone(),
-                                        ))
+                                    bubble = bubble.child(markdown::render_markdown(
+                                        &format!("chat-user-{idx}"),
+                                        &msg.text,
+                                        false,
+                                        active_sel.as_ref(),
+                                        on_link.clone(),
+                                        on_select.clone(),
+                                    ));
+                                    let hover_tools = div()
+                                        .flex_shrink_0()
+                                        .flex()
+                                        .items_center()
+                                        .gap_1()
+                                        .opacity(0.0)
+                                        .group_hover(group_name.clone(), |s| s.opacity(1.0))
                                         .child(
                                             div()
-                                                .absolute()
-                                                .top(px(4.0))
-                                                .right(px(6.0))
-                                                .px(px(4.0))
-                                                .py(px(2.0))
-                                                .rounded(px(6.0))
-                                                .bg(theme::popover_glass())
-                                                .border_1()
-                                                .border_color(theme::hairline())
-                                                .flex()
-                                                .items_center()
-                                                .gap_1()
-                                                .opacity(0.0)
-                                                .group_hover(group_name.clone(), |s| s.opacity(1.0))
+                                                .text_size(px(10.5))
+                                                .text_color(theme::text_muted())
+                                                .child(msg.sent_label.clone()),
+                                        )
+                                        .child(
+                                            div()
+                                                .id(SharedString::from(format!("umsg-copy-{idx}")))
+                                                .p(px(3.0))
+                                                .rounded(px(4.0))
+                                                .cursor_pointer()
+                                                .hover(|s| s.bg(theme::row_hover()))
+                                                .on_click(cx.listener(move |this, _, _, cx| {
+                                                    cx.write_to_clipboard(
+                                                        ClipboardItem::new_string(copy_u.clone()),
+                                                    );
+                                                    this.set_toast("Copied message", cx);
+                                                }))
                                                 .child(
-                                                    div()
-                                                        .text_size(px(10.5))
-                                                        .text_color(theme::text_muted())
-                                                        .child(msg.sent_label.clone()),
-                                                )
+                                                    svg()
+                                                        .path("icons/copy.svg")
+                                                        .size(px(12.0))
+                                                        .text_color(theme::text_muted()),
+                                                ),
+                                        )
+                                        .child(
+                                            div()
+                                                .id(SharedString::from(format!("umsg-reply-{idx}")))
+                                                .p(px(3.0))
+                                                .rounded(px(4.0))
+                                                .cursor_pointer()
+                                                .hover(|s| s.bg(theme::row_hover()))
+                                                .on_click(cx.listener(move |this, _, _, cx| {
+                                                    this.quoted_reply = Some(reply_u.clone());
+                                                    this.active_input = ActiveInput::Chat;
+                                                    cx.notify();
+                                                }))
                                                 .child(
-                                                    div()
-                                                        .id(SharedString::from(format!(
-                                                            "umsg-copy-{idx}"
-                                                        )))
-                                                        .p(px(3.0))
-                                                        .rounded(px(4.0))
-                                                        .cursor_pointer()
-                                                        .hover(|s| s.bg(theme::row_hover()))
-                                                        .on_click(cx.listener(
-                                                            move |this, _, _, cx| {
-                                                                cx.write_to_clipboard(
-                                                                    ClipboardItem::new_string(
-                                                                        copy_u.clone(),
-                                                                    ),
-                                                                );
-                                                                this.set_toast(
-                                                                    "Copied message",
-                                                                    cx,
-                                                                );
-                                                            },
-                                                        ))
-                                                        .child(
-                                                            svg()
-                                                                .path("icons/copy.svg")
-                                                                .size(px(12.0))
-                                                                .text_color(theme::text_muted()),
-                                                        ),
-                                                )
-                                                .child(
-                                                    div()
-                                                        .id(SharedString::from(format!(
-                                                            "umsg-reply-{idx}"
-                                                        )))
-                                                        .p(px(3.0))
-                                                        .rounded(px(4.0))
-                                                        .cursor_pointer()
-                                                        .hover(|s| s.bg(theme::row_hover()))
-                                                        .on_click(cx.listener(
-                                                            move |this, _, _, cx| {
-                                                                this.quoted_reply =
-                                                                    Some(reply_u.clone());
-                                                                this.active_input =
-                                                                    ActiveInput::Chat;
-                                                                cx.notify();
-                                                            },
-                                                        ))
-                                                        .child(
-                                                            svg()
-                                                                .path("icons/reply.svg")
-                                                                .size(px(12.0))
-                                                                .text_color(theme::text_muted()),
-                                                        ),
+                                                    svg()
+                                                        .path("icons/reply.svg")
+                                                        .size(px(12.0))
+                                                        .text_color(theme::text_muted()),
                                                 ),
                                         );
-                                    block = block
-                                        .child(div().w_full().flex().justify_end().child(bubble));
+                                    block = block.child(
+                                        div()
+                                            .w_full()
+                                            .flex()
+                                            .items_center()
+                                            .justify_end()
+                                            .gap_2()
+                                            .child(hover_tools)
+                                            .child(bubble),
+                                    );
                                 } else if !shown.is_empty() {
                                     let display_str = if actively_writing {
                                         format!("{shown} ▋")
@@ -3923,134 +4074,137 @@ impl JobHarnessApp {
                                 block
                             })),
                     )
-                    // T3 Code left-edge Prompt Ruler / Minimap (appears when 2+ prompts exist — hover to preview, click to jump!)
-                    .when(
-                        self.chat_messages.iter().filter(|m| m.is_user).count() >= 2,
-                        |d| {
-                            let turns: Vec<(usize, String, String)> = self
-                                .chat_messages
-                                .iter()
-                                .enumerate()
-                                .filter(|(_, m)| m.is_user)
-                                .map(|(mi, m)| {
-                                    let reply = self
-                                        .chat_messages
-                                        .get(mi + 1)
-                                        .filter(|r| !r.is_user)
-                                        .map(|r| r.text.clone())
-                                        .unwrap_or_default();
-                                    (mi, m.text.clone(), reply)
-                                })
-                                .collect();
-                            let hovered_ix = self.chat_ruler_hover;
-                            let hovered_turn = hovered_ix
-                                .and_then(|hi| turns.iter().find(|(mi, _, _)| *mi == hi).cloned());
-                            let total_msgs = self.chat_messages.len();
-                            let preview_w = (self.chat_width - 30.0).clamp(180.0, 260.0);
-                            d.child(
-                                div()
-                                    .id("chat-prompt-ruler")
-                                    .absolute()
-                                    .left(px(3.0))
-                                    .top_4()
-                                    .bottom_4()
-                                    .w(px(14.0))
-                                    .flex()
-                                    .flex_col()
-                                    .justify_center()
-                                    .gap(px(5.0))
-                                    .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
-                                        if !*hovered && this.chat_ruler_hover.is_some() {
-                                            this.chat_ruler_hover = None;
-                                            cx.notify();
-                                        }
-                                    }))
-                                    .children(turns.into_iter().enumerate().map(
-                                        |(ti, (msg_idx, _, _))| {
-                                            let is_hov = hovered_ix == Some(msg_idx);
-                                            div()
-                                                .id(SharedString::from(format!("ruler-tick-{ti}")))
-                                                .w(px(14.0))
-                                                .py(px(3.0))
-                                                .flex()
-                                                .items_center()
-                                                .cursor_pointer()
-                                                .on_hover(cx.listener(
-                                                    move |this, h: &bool, _, cx| {
-                                                        if *h {
-                                                            this.chat_ruler_hover = Some(msg_idx);
-                                                            cx.notify();
-                                                        }
-                                                    },
-                                                ))
-                                                .on_click(cx.listener(move |this, _, _, cx| {
-                                                    this.chat_follow = msg_idx + 2 >= total_msgs;
-                                                    this.chat_scroll.scroll_to_item(msg_idx);
-                                                    this.chat_ruler_hover = None;
-                                                    cx.notify();
-                                                }))
-                                                .child(
-                                                    div()
-                                                        .h(px(if is_hov { 2.0 } else { 1.5 }))
-                                                        .w(px(if is_hov { 12.0 } else { 6.0 }))
-                                                        .rounded(px(1.0))
-                                                        .bg(if is_hov {
-                                                            theme::lavender()
-                                                        } else {
-                                                            theme::hairline_strong()
-                                                        }),
-                                                )
-                                        },
-                                    )),
-                            )
-                            .when_some(
-                                hovered_turn,
-                                |d2, (_, prompt_txt, reply_txt)| {
-                                    d2.child(
+                    // T3 Code left-edge Prompt Ruler / Minimap (only when Chat has breathing room: full-screen or rail >= 420px!)
+                    .when(show_ruler, |d| {
+                        let turns: Vec<(usize, String, String)> = self
+                            .chat_messages
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, m)| m.is_user)
+                            .map(|(mi, m)| {
+                                let reply = self
+                                    .chat_messages
+                                    .get(mi + 1)
+                                    .filter(|r| !r.is_user)
+                                    .map(|r| r.text.clone())
+                                    .unwrap_or_default();
+                                (mi, m.text.clone(), reply)
+                            })
+                            .collect();
+                        let hovered_ix = self.chat_ruler_hover;
+                        let hovered_turn = hovered_ix
+                            .and_then(|hi| turns.iter().find(|(mi, _, _)| *mi == hi).cloned());
+                        let total_msgs = self.chat_messages.len();
+                        let ruler_left = if is_full { 14.0 } else { 6.0 };
+                        let preview_left = ruler_left + 20.0;
+                        let preview_w = if is_full {
+                            270.0
+                        } else {
+                            (self.chat_width - 44.0).clamp(200.0, 270.0)
+                        };
+                        d.child(
+                            div()
+                                .id("chat-prompt-ruler")
+                                .absolute()
+                                .left(px(ruler_left))
+                                .top_4()
+                                .bottom_4()
+                                .w(px(16.0))
+                                .flex()
+                                .flex_col()
+                                .justify_center()
+                                .gap(px(5.0))
+                                .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+                                    if !*hovered && this.chat_ruler_hover.is_some() {
+                                        this.chat_ruler_hover = None;
+                                        cx.notify();
+                                    }
+                                }))
+                                .children(turns.into_iter().enumerate().map(
+                                    |(ti, (msg_idx, _, _))| {
+                                        let is_hov = hovered_ix == Some(msg_idx);
                                         div()
-                                            .absolute()
-                                            .left(px(18.0))
-                                            .top(px(28.0))
-                                            .w(px(preview_w))
-                                            .p_3()
-                                            .rounded(px(10.0))
-                                            .bg(theme::popover_glass())
-                                            .border_1()
-                                            .border_color(theme::hairline_strong())
-                                            .shadow_lg()
+                                            .id(SharedString::from(format!("ruler-tick-{ti}")))
+                                            .w(px(16.0))
+                                            .py(px(3.0))
                                             .flex()
-                                            .flex_col()
-                                            .gap_1()
+                                            .items_center()
+                                            .cursor_pointer()
+                                            .on_hover(cx.listener(move |this, h: &bool, _, cx| {
+                                                if *h {
+                                                    this.chat_ruler_hover = Some(msg_idx);
+                                                    cx.notify();
+                                                }
+                                            }))
+                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                this.chat_follow = msg_idx + 2 >= total_msgs;
+                                                this.chat_scroll.scroll_to_item(msg_idx);
+                                                this.chat_ruler_hover = None;
+                                                cx.notify();
+                                            }))
                                             .child(
                                                 div()
-                                                    .text_xs()
-                                                    .font_weight(FontWeight::SEMIBOLD)
-                                                    .text_color(theme::text_primary())
-                                                    .child(truncate_end(
-                                                        prompt_txt
-                                                            .lines()
-                                                            .next()
-                                                            .unwrap_or(&prompt_txt),
-                                                        44,
-                                                    )),
+                                                    .h(px(if is_hov { 2.0 } else { 1.5 }))
+                                                    .w(px(if is_hov { 14.0 } else { 7.0 }))
+                                                    .rounded(px(1.0))
+                                                    .bg(if is_hov {
+                                                        theme::lavender()
+                                                    } else {
+                                                        theme::hairline_strong()
+                                                    }),
                                             )
-                                            .when(!reply_txt.is_empty(), |c| {
-                                                c.child(
-                                                    div()
-                                                        .text_size(px(11.0))
-                                                        .line_height(px(15.5))
-                                                        .text_color(theme::text_muted())
-                                                        .child(truncate_end(
-                                                            &reply_txt.replace('\n', " "),
-                                                            92,
-                                                        )),
-                                                )
-                                            }),
-                                    )
-                                },
-                            )
-                        },
-                    )
+                                    },
+                                )),
+                        )
+                        .when_some(
+                            hovered_turn,
+                            |d2, (_, prompt_txt, reply_txt)| {
+                                let clean_reply = reply_txt
+                                    .replace("**", "")
+                                    .replace("__", "")
+                                    .replace('`', "")
+                                    .replace('\n', " ");
+                                d2.child(
+                                    div()
+                                        .absolute()
+                                        .left(px(preview_left))
+                                        .top(px(28.0))
+                                        .w(px(preview_w))
+                                        .p_3()
+                                        .rounded(px(10.0))
+                                        .bg(theme::popover_glass())
+                                        .border_1()
+                                        .border_color(theme::hairline_strong())
+                                        .shadow_lg()
+                                        .flex()
+                                        .flex_col()
+                                        .gap_1()
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .font_weight(FontWeight::SEMIBOLD)
+                                                .text_color(theme::text_primary())
+                                                .child(truncate_end(
+                                                    prompt_txt
+                                                        .lines()
+                                                        .next()
+                                                        .unwrap_or(&prompt_txt),
+                                                    44,
+                                                )),
+                                        )
+                                        .when(!clean_reply.trim().is_empty(), |c| {
+                                            c.child(
+                                                div()
+                                                    .text_size(px(11.0))
+                                                    .line_height(px(15.5))
+                                                    .text_color(theme::text_muted())
+                                                    .child(truncate_end(clean_reply.trim(), 96)),
+                                            )
+                                        }),
+                                )
+                            },
+                        )
+                    })
                     // Emma-style floating jump-to-bottom button anchored cleanly inside the scroll pane
                     .when(!self.chat_follow && !self.chat_messages.is_empty(), |d| {
                         let is_busy = self.streaming;
@@ -4124,7 +4278,7 @@ impl JobHarnessApp {
                                             .text_color(theme::text_secondary())
                                             .child(format!("Queued ({q_count})")),
                                     )
-                                    .child(div().text_color(theme::text_muted()).child("⌘⏎ Steer")),
+                                    .child(div().text_color(theme::text_muted()).child("⏎ Steer")),
                             )
                             .children(self.queued_prompts.iter().enumerate().map(|(qi, item)| {
                                 let steer_q = item.clone();
@@ -4218,6 +4372,76 @@ impl JobHarnessApp {
                     ),
                 )
             })
+            // Interactive `@` role/doc & `/` slash-command picker right above the composer (T3 Code pattern!)
+            .when_some(
+                {
+                    let items = self.chat_picker_items();
+                    (input_active && !items.is_empty()).then_some(items)
+                },
+                |d, items| {
+                    let sel = self.chat_picker_idx.min(items.len().saturating_sub(1));
+                    d.child(
+                        div().w_full().px_3().mb_1().flex().justify_center().child(
+                            div()
+                                .w(px(inner_composer_w))
+                                .p_1()
+                                .rounded(px(10.0))
+                                .bg(theme::popover_glass())
+                                .border_1()
+                                .border_color(theme::hairline_strong())
+                                .shadow_lg()
+                                .flex()
+                                .flex_col()
+                                .gap(px(1.0))
+                                .children(items.into_iter().enumerate().map(|(pi, item)| {
+                                    let active = pi == sel;
+                                    let insert_txt = item.insert_text;
+                                    let role_att = item.role_attach;
+                                    div()
+                                        .id(SharedString::from(format!("cpick-{pi}")))
+                                        .px_2()
+                                        .py(px(6.0))
+                                        .rounded(px(7.0))
+                                        .when(active, |r| r.bg(theme::lavender_wash()))
+                                        .hover(|s| s.bg(theme::row_hover()))
+                                        .flex()
+                                        .items_center()
+                                        .justify_between()
+                                        .gap_2()
+                                        .cursor_pointer()
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            this.apply_chat_picker_item(
+                                                insert_txt.clone(),
+                                                role_att.clone(),
+                                                cx,
+                                            );
+                                        }))
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .font_weight(if active {
+                                                    FontWeight::MEDIUM
+                                                } else {
+                                                    FontWeight::NORMAL
+                                                })
+                                                .text_color(if active {
+                                                    theme::lavender()
+                                                } else {
+                                                    theme::text_primary()
+                                                })
+                                                .child(item.label),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_size(px(11.0))
+                                                .text_color(theme::text_muted())
+                                                .child(item.meta),
+                                        )
+                                })),
+                        ),
+                    )
+                },
+            )
             // T3 Code-grade unified composer card (mathematically locked to rail width or centered 728px in full-screen!)
             .child(
                 div()
@@ -4485,23 +4709,86 @@ impl JobHarnessApp {
                                     .justify_between()
                                     .child(
                                         div()
-                                            .id("chat-attach-btn")
-                                            .w(px(24.0))
-                                            .h(px(24.0))
-                                            .rounded(px(6.0))
-                                            .hover(|s| s.bg(theme::row_hover()))
                                             .flex()
                                             .items_center()
-                                            .justify_center()
-                                            .cursor_pointer()
-                                            .on_click(cx.listener(|this, _, _, cx| {
-                                                this.pick_chat_attachments(cx);
-                                            }))
+                                            .gap_2()
                                             .child(
-                                                svg()
-                                                    .path("icons/paperclip.svg")
-                                                    .size(px(14.0))
-                                                    .text_color(theme::text_muted()),
+                                                div()
+                                                    .id("chat-attach-btn")
+                                                    .w(px(24.0))
+                                                    .h(px(24.0))
+                                                    .rounded(px(6.0))
+                                                    .hover(|s| s.bg(theme::row_hover()))
+                                                    .flex()
+                                                    .items_center()
+                                                    .justify_center()
+                                                    .cursor_pointer()
+                                                    .on_click(cx.listener(|this, _, _, cx| {
+                                                        this.pick_chat_attachments(cx);
+                                                    }))
+                                                    .child(
+                                                        svg()
+                                                            .path("icons/paperclip.svg")
+                                                            .size(px(14.0))
+                                                            .text_color(theme::text_muted()),
+                                                    ),
+                                            )
+                                            .when(
+                                                self.streaming && self.chat_input.trim().is_empty(),
+                                                |r| {
+                                                    r.child(
+                                                        div()
+                                                            .flex()
+                                                            .items_center()
+                                                            .gap_2()
+                                                            .text_size(px(10.5))
+                                                            .text_color(theme::text_muted())
+                                                            .child(
+                                                                div()
+                                                                    .flex()
+                                                                    .items_center()
+                                                                    .gap(px(4.0))
+                                                                    .child(
+                                                                        div()
+                                                                            .px(px(4.0))
+                                                                            .py(px(1.0))
+                                                                            .rounded(px(4.0))
+                                                                            .bg(
+                                                                                theme::window_glass(
+                                                                                ),
+                                                                            )
+                                                                            .border_1()
+                                                                            .border_color(
+                                                                                theme::hairline(),
+                                                                            )
+                                                                            .child("⏎"),
+                                                                    )
+                                                                    .child("Steer"),
+                                                            )
+                                                            .child(
+                                                                div()
+                                                                    .flex()
+                                                                    .items_center()
+                                                                    .gap(px(4.0))
+                                                                    .child(
+                                                                        div()
+                                                                            .px(px(4.0))
+                                                                            .py(px(1.0))
+                                                                            .rounded(px(4.0))
+                                                                            .bg(
+                                                                                theme::window_glass(
+                                                                                ),
+                                                                            )
+                                                                            .border_1()
+                                                                            .border_color(
+                                                                                theme::hairline(),
+                                                                            )
+                                                                            .child("⌘⏎"),
+                                                                    )
+                                                                    .child("Queue"),
+                                                            ),
+                                                    )
+                                                },
                                             ),
                                     )
                                     .child(if self.streaming {
@@ -4529,7 +4816,7 @@ impl JobHarnessApp {
                                                         .on_click(cx.listener(|this, _, _, cx| {
                                                             this.submit_chat_input(false, cx);
                                                         }))
-                                                        .child("Queue ⏎"),
+                                                        .child("Queue ⌘⏎"),
                                                 )
                                                 .child(
                                                     div()
@@ -4547,7 +4834,7 @@ impl JobHarnessApp {
                                                         .on_click(cx.listener(|this, _, _, cx| {
                                                             this.submit_chat_input(true, cx);
                                                         }))
-                                                        .child("Steer ⌘⏎"),
+                                                        .child("Steer ⏎"),
                                                 )
                                             })
                                             .child(
