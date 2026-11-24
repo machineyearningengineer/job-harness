@@ -42,6 +42,12 @@ const EDIT: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="14" height=
 
 const BRAIN: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18Z"/><path d="M12 5a3 3 0 1 1 5.997.125 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18Z"/><path d="M15 13a4.5 4.5 0 0 1-3-4 4.5 4.5 0 0 1-3 4"/></svg>"#;
 
+const MINIMIZE: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 14 10 14 10 20"/><polyline points="20 10 14 10 14 4"/><line x1="14" x2="21" y1="10" y2="3"/><line x1="3" x2="10" y1="21" y2="14"/></svg>"#;
+
+const SQUARE_PEN: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.375 2.625a1 1 0 0 1 3 3l-9.013 9.014a2 2 0 0 1-.853.505l-2.873.84a.5.5 0 0 1-.62-.62l.84-2.873a2 2 0 0 1 .506-.852z"/></svg>"#;
+
+const MESSAGE_SQUARE: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>"#;
+
 impl AssetSource for EmbeddedIcons {
     fn load(&self, path: &str) -> Result<Option<Cow<'static, [u8]>>> {
         let bytes = match path {
@@ -64,6 +70,9 @@ impl AssetSource for EmbeddedIcons {
             "icons/eye.svg" => Some(EYE.as_bytes()),
             "icons/edit.svg" => Some(EDIT.as_bytes()),
             "icons/brain.svg" => Some(BRAIN.as_bytes()),
+            "icons/minimize.svg" => Some(MINIMIZE.as_bytes()),
+            "icons/square-pen.svg" => Some(SQUARE_PEN.as_bytes()),
+            "icons/message-square.svg" => Some(MESSAGE_SQUARE.as_bytes()),
             _ => None,
         };
         Ok(bytes.map(Cow::Borrowed))
@@ -90,6 +99,9 @@ impl AssetSource for EmbeddedIcons {
             "icons/eye.svg".into(),
             "icons/edit.svg".into(),
             "icons/brain.svg".into(),
+            "icons/minimize.svg".into(),
+            "icons/square-pen.svg".into(),
+            "icons/message-square.svg".into(),
         ])
     }
 }

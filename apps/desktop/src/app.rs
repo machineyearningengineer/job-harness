@@ -205,6 +205,7 @@ pub struct JobHarnessApp {
 
     // Layout & rails
     chat_open: bool,
+    chat_fullscreen: bool,
     chat_scroll: ScrollHandle,
     board_scroll_x: ScrollHandle,
     col_scrolls: HashMap<&'static str, ScrollHandle>,
@@ -345,6 +346,7 @@ impl JobHarnessApp {
             _watcher: watcher,
             focus_handle: cx.focus_handle(),
             chat_open: saved.chat_open,
+            chat_fullscreen: false,
             chat_scroll: ScrollHandle::new(),
             board_scroll_x: ScrollHandle::new(),
             col_scrolls: [
@@ -817,6 +819,9 @@ impl JobHarnessApp {
 
     fn toggle_chat_rail(&mut self, cx: &mut Context<Self>) {
         self.chat_open = !self.chat_open;
+        if !self.chat_open {
+            self.chat_fullscreen = false;
+        }
         if self.chat_open {
             self.chat_resized = false;
             self.chat_anim_epoch = self.chat_anim_epoch.wrapping_add(1);
@@ -2297,6 +2302,11 @@ impl JobHarnessApp {
                 cx.notify();
                 return;
             }
+            if self.chat_fullscreen {
+                self.chat_fullscreen = false;
+                cx.notify();
+                return;
+            }
             self.right_drawer = RightDrawer::Closed;
             self.active_input = ActiveInput::None;
             cx.notify();
@@ -2918,7 +2928,12 @@ impl JobHarnessApp {
         let on_select = self.md_select_handler(cx);
         let active_sel = self.active_text_selection();
 
-        let inner_composer_w = (self.chat_width - 24.0).max(200.0);
+        let is_full = self.chat_fullscreen;
+        let inner_composer_w = if is_full {
+            728.0
+        } else {
+            (self.chat_width - 24.0).max(200.0)
+        };
         div()
             .id("chat-rail-drop")
             .drag_over::<ExternalPaths>(|s, _, _, _| {
@@ -2939,14 +2954,14 @@ impl JobHarnessApp {
                 }
             }))
             .relative()
-            .w(px(self.chat_width))
+            .when(is_full, |d| d.w_full())
+            .when(!is_full, |d| d.w(px(self.chat_width)))
             .h_full()
             .flex_shrink_0()
             .flex()
             .flex_col()
             .bg(theme::panel_glass())
-            .border_r_1()
-            .border_color(theme::hairline())
+            .when(!is_full, |d| d.border_r_1().border_color(theme::hairline()))
             .overflow_hidden()
             // Clean borderless header: clickable Agent & Model pill + subtle Clear (NO permanent ↓)
             .child(
@@ -3005,29 +3020,74 @@ impl JobHarnessApp {
                                     .child(format!("· {model_badge} ▾")),
                             ),
                     )
-                    .when(!self.chat_messages.is_empty() && !self.streaming, |d| {
-                        d.child(
-                            div()
-                                .id("chat-clear")
-                                .px(px(6.0))
-                                .py(px(2.0))
-                                .rounded(px(5.0))
-                                .cursor_pointer()
-                                .hover(|s| s.bg(theme::row_hover()))
-                                .text_xs()
-                                .text_color(theme::text_muted())
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.chat_messages.clear();
-                                    this.quoted_reply = None;
-                                    this.chat_attachments.clear();
-                                    this.pasted_snippets.clear();
-                                    this.text_selection = None;
-                                    this.chat_follow = true;
-                                    cx.notify();
-                                }))
-                                .child("Clear"),
-                        )
-                    }),
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .when(!self.chat_messages.is_empty() && !self.streaming, |d| {
+                                d.child(
+                                    div()
+                                        .id("chat-clear")
+                                        .w(px(26.0))
+                                        .h(px(26.0))
+                                        .rounded(px(6.0))
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .cursor_pointer()
+                                        .hover(|s| s.bg(theme::row_hover()))
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.chat_messages.clear();
+                                            this.quoted_reply = None;
+                                            this.chat_attachments.clear();
+                                            this.pasted_snippets.clear();
+                                            this.text_selection = None;
+                                            this.chat_ruler_hover = None;
+                                            this.chat_follow = true;
+                                            cx.notify();
+                                        }))
+                                        .child(
+                                            svg()
+                                                .path("icons/square-pen.svg")
+                                                .size(px(13.5))
+                                                .text_color(theme::text_muted()),
+                                        ),
+                                )
+                            })
+                            .child(
+                                div()
+                                    .id("chat-expand-fullscreen")
+                                    .w(px(26.0))
+                                    .h(px(26.0))
+                                    .rounded(px(6.0))
+                                    .when(is_full, |d| d.bg(theme::surface_active()))
+                                    .hover(|s| s.bg(theme::row_hover()))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .cursor_pointer()
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.chat_fullscreen = !this.chat_fullscreen;
+                                        this.chat_resized = true;
+                                        cx.notify();
+                                    }))
+                                    .child(
+                                        svg()
+                                            .path(if is_full {
+                                                "icons/minimize.svg"
+                                            } else {
+                                                "icons/expand.svg"
+                                            })
+                                            .size(px(13.5))
+                                            .text_color(if is_full {
+                                                theme::text_primary()
+                                            } else {
+                                                theme::text_muted()
+                                            }),
+                                    ),
+                            ),
+                    ),
             )
             // Scrollable message stream wrapped in `.relative()` so jump-to-bottom floats cleanly above the composer
             .child(
@@ -3074,6 +3134,7 @@ impl JobHarnessApp {
                             .when(self.chat_messages.is_empty(), |d| {
                                 d.child(
                                     div()
+                                        .when(is_full, |x| x.w(px(728.0)).mx_auto())
                                         .pt_2()
                                         .flex()
                                         .flex_col()
@@ -3170,6 +3231,8 @@ impl JobHarnessApp {
 
                                 let mut block = div()
                                     .group(group_name.clone())
+                                    .when(is_full, |d| d.w(px(728.0)).mx_auto())
+                                    .when(!is_full, |d| d.w_full())
                                     .when(msg.is_user && idx > 0, |d| d.pt_3())
                                     .flex()
                                     .flex_col()
@@ -3505,7 +3568,11 @@ impl JobHarnessApp {
                                 if msg.is_user {
                                     let copy_u = copy_text.clone();
                                     let reply_u = reply_text.clone();
-                                    let user_max_w = (self.chat_width - 52.0).max(170.0);
+                                    let user_max_w = if is_full {
+                                        580.0
+                                    } else {
+                                        (self.chat_width - 52.0).max(170.0)
+                                    };
                                     let mut bubble = div()
                                         .relative()
                                         .max_w(px(user_max_w))
@@ -4034,131 +4101,136 @@ impl JobHarnessApp {
             .when(!self.queued_prompts.is_empty(), |d| {
                 let q_count = self.queued_prompts.len();
                 d.child(
-                    div()
-                        .w(px(inner_composer_w))
-                        .mx_3()
-                        .mb_1()
-                        .rounded(px(10.0))
-                        .bg(theme::window_glass())
-                        .border_1()
-                        .border_color(theme::hairline())
-                        .flex()
-                        .flex_col()
-                        .overflow_hidden()
-                        .child(
-                            div()
-                                .px_3()
-                                .py(px(4.0))
-                                .bg(theme::surface_subtle())
-                                .border_b_1()
-                                .border_color(theme::hairline())
-                                .flex()
-                                .items_center()
-                                .justify_between()
-                                .text_size(px(10.5))
-                                .child(
-                                    div()
-                                        .text_color(theme::text_secondary())
-                                        .child(format!("Queued ({q_count})")),
-                                )
-                                .child(div().text_color(theme::text_muted()).child("⌘⏎ Steer")),
-                        )
-                        .children(self.queued_prompts.iter().enumerate().map(|(qi, item)| {
-                            let steer_q = item.clone();
-                            let edit_q = item.clone();
-                            div()
-                                .px_3()
-                                .py(px(5.0))
-                                .when(qi > 0, |r| r.border_t_1().border_color(theme::hairline()))
-                                .flex()
-                                .items_center()
-                                .justify_between()
-                                .gap_2()
-                                .text_xs()
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .min_w_0()
-                                        .overflow_hidden()
-                                        .text_color(theme::text_secondary())
-                                        .child(truncate_end(item, 28)),
-                                )
-                                .child(
-                                    div()
-                                        .flex_shrink_0()
-                                        .flex()
-                                        .items_center()
-                                        .gap_2()
-                                        .child(
-                                            div()
-                                                .id(SharedString::from(format!("steer-q-{qi}")))
-                                                .px(px(5.0))
-                                                .py(px(1.0))
-                                                .rounded(px(4.0))
-                                                .hover(|s| s.bg(theme::lavender_wash()))
-                                                .cursor_pointer()
-                                                .text_size(px(11.0))
-                                                .text_color(theme::lavender())
-                                                .on_click(cx.listener(move |this, _, _, cx| {
-                                                    if qi < this.queued_prompts.len() {
-                                                        this.queued_prompts.remove(qi);
-                                                    }
-                                                    this.stop_stream(cx);
-                                                    let atts =
-                                                        std::mem::take(&mut this.chat_attachments);
-                                                    this.submit_prompt_with_attachments(
-                                                        steer_q.clone(),
-                                                        atts,
-                                                        false,
-                                                        cx,
-                                                    );
-                                                }))
-                                                .child("↪ Steer"),
-                                        )
-                                        .child(
-                                            div()
-                                                .id(SharedString::from(format!("edit-q-{qi}")))
-                                                .cursor_pointer()
-                                                .text_size(px(11.0))
-                                                .text_color(theme::text_muted())
-                                                .hover(|s| s.text_color(theme::text_primary()))
-                                                .on_click(cx.listener(move |this, _, _, cx| {
-                                                    if qi < this.queued_prompts.len() {
-                                                        this.queued_prompts.remove(qi);
-                                                    }
-                                                    this.chat_input = edit_q.clone();
-                                                    this.active_input = ActiveInput::Chat;
-                                                    cx.notify();
-                                                }))
-                                                .child("↑"),
-                                        )
-                                        .child(
-                                            div()
-                                                .id(SharedString::from(format!("rm-q-{qi}")))
-                                                .cursor_pointer()
-                                                .text_size(px(11.0))
-                                                .text_color(theme::text_muted())
-                                                .hover(|s| s.text_color(theme::text_primary()))
-                                                .on_click(cx.listener(move |this, _, _, cx| {
-                                                    if qi < this.queued_prompts.len() {
-                                                        this.queued_prompts.remove(qi);
+                    div().w_full().px_3().mb_1().flex().justify_center().child(
+                        div()
+                            .w(px(inner_composer_w))
+                            .rounded(px(10.0))
+                            .bg(theme::window_glass())
+                            .border_1()
+                            .border_color(theme::hairline())
+                            .flex()
+                            .flex_col()
+                            .overflow_hidden()
+                            .child(
+                                div()
+                                    .px_3()
+                                    .py(px(4.0))
+                                    .bg(theme::surface_subtle())
+                                    .border_b_1()
+                                    .border_color(theme::hairline())
+                                    .flex()
+                                    .items_center()
+                                    .justify_between()
+                                    .text_size(px(10.5))
+                                    .child(
+                                        div()
+                                            .text_color(theme::text_secondary())
+                                            .child(format!("Queued ({q_count})")),
+                                    )
+                                    .child(div().text_color(theme::text_muted()).child("⌘⏎ Steer")),
+                            )
+                            .children(self.queued_prompts.iter().enumerate().map(|(qi, item)| {
+                                let steer_q = item.clone();
+                                let edit_q = item.clone();
+                                div()
+                                    .px_3()
+                                    .py(px(5.0))
+                                    .when(qi > 0, |r| {
+                                        r.border_t_1().border_color(theme::hairline())
+                                    })
+                                    .flex()
+                                    .items_center()
+                                    .justify_between()
+                                    .gap_2()
+                                    .text_xs()
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .overflow_hidden()
+                                            .text_color(theme::text_secondary())
+                                            .child(truncate_end(item, 28)),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex_shrink_0()
+                                            .flex()
+                                            .items_center()
+                                            .gap_2()
+                                            .child(
+                                                div()
+                                                    .id(SharedString::from(format!("steer-q-{qi}")))
+                                                    .px(px(5.0))
+                                                    .py(px(1.0))
+                                                    .rounded(px(4.0))
+                                                    .hover(|s| s.bg(theme::lavender_wash()))
+                                                    .cursor_pointer()
+                                                    .text_size(px(11.0))
+                                                    .text_color(theme::lavender())
+                                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                                        if qi < this.queued_prompts.len() {
+                                                            this.queued_prompts.remove(qi);
+                                                        }
+                                                        this.stop_stream(cx);
+                                                        let atts = std::mem::take(
+                                                            &mut this.chat_attachments,
+                                                        );
+                                                        this.submit_prompt_with_attachments(
+                                                            steer_q.clone(),
+                                                            atts,
+                                                            false,
+                                                            cx,
+                                                        );
+                                                    }))
+                                                    .child("↪ Steer"),
+                                            )
+                                            .child(
+                                                div()
+                                                    .id(SharedString::from(format!("edit-q-{qi}")))
+                                                    .cursor_pointer()
+                                                    .text_size(px(11.0))
+                                                    .text_color(theme::text_muted())
+                                                    .hover(|s| s.text_color(theme::text_primary()))
+                                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                                        if qi < this.queued_prompts.len() {
+                                                            this.queued_prompts.remove(qi);
+                                                        }
+                                                        this.chat_input = edit_q.clone();
+                                                        this.active_input = ActiveInput::Chat;
                                                         cx.notify();
-                                                    }
-                                                }))
-                                                .child("✕"),
-                                        ),
-                                )
-                        })),
+                                                    }))
+                                                    .child("↑"),
+                                            )
+                                            .child(
+                                                div()
+                                                    .id(SharedString::from(format!("rm-q-{qi}")))
+                                                    .cursor_pointer()
+                                                    .text_size(px(11.0))
+                                                    .text_color(theme::text_muted())
+                                                    .hover(|s| s.text_color(theme::text_primary()))
+                                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                                        if qi < this.queued_prompts.len() {
+                                                            this.queued_prompts.remove(qi);
+                                                            cx.notify();
+                                                        }
+                                                    }))
+                                                    .child("✕"),
+                                            ),
+                                    )
+                            })),
+                    ),
                 )
             })
-            // T3 Code-grade unified composer card (mathematically locked to rail width — zero shrinkage!)
+            // T3 Code-grade unified composer card (mathematically locked to rail width or centered 728px in full-screen!)
             .child(
                 div()
-                    .w(px(self.chat_width))
+                    .w_full()
                     .flex_shrink_0()
                     .px_3()
                     .pb_3()
                     .pt_1()
+                    .flex()
+                    .justify_center()
                     .child(
                         div()
                             .id("chat-input-box")
@@ -5689,8 +5761,8 @@ impl JobHarnessApp {
                             }))
                             .child(
                                 svg()
-                                    .path("icons/search.svg")
-                                    .size(px(13.0))
+                                    .path("icons/message-square.svg")
+                                    .size(px(13.5))
                                     .flex_shrink_0()
                                     .text_color(theme::lavender()),
                             )
@@ -5728,28 +5800,25 @@ impl JobHarnessApp {
                                 "quick-expand-open",
                                 Animation::new(Duration::from_millis(140))
                                     .with_easing(ease_out_quint()),
-                                |el, t| el.w(px(76.0 + 224.0 * t)).opacity(0.6 + 0.4 * t),
+                                |el, t| el.w(px(34.0 + 266.0 * t)).opacity(0.6 + 0.4 * t),
                             )
                             .into_any_element()
                         }
                     } else {
-                        // Whisper-quiet compact Ask button on bottom-left (expands smoothly on click!)
+                        // Bespoke circular lavender-accented Quick Chat button on bottom-left (expands cleanly on click!)
                         div()
                             .id("quick-ask-trigger")
-                            .px_3()
-                            .py(px(6.0))
+                            .w(px(34.0))
+                            .h(px(34.0))
                             .rounded(px(99.0))
-                            .bg(theme::dock_glass())
+                            .bg(theme::popover_glass())
                             .border_1()
-                            .border_color(theme::hairline())
-                            .hover(|s| {
-                                s.bg(theme::row_hover())
-                                    .border_color(theme::hairline_strong())
-                            })
-                            .shadow_sm()
+                            .border_color(theme::lavender_border())
+                            .hover(|s| s.bg(theme::lavender_wash()).border_color(theme::lavender()))
+                            .shadow_md()
                             .flex()
                             .items_center()
-                            .gap_2()
+                            .justify_center()
                             .cursor_pointer()
                             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                             .on_click(cx.listener(|this, _, _, cx| {
@@ -5758,15 +5827,9 @@ impl JobHarnessApp {
                             }))
                             .child(
                                 svg()
-                                    .path("icons/search.svg")
-                                    .size(px(13.0))
-                                    .text_color(theme::text_muted()),
-                            )
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(theme::text_secondary())
-                                    .child("Ask"),
+                                    .path("icons/message-square.svg")
+                                    .size(px(15.0))
+                                    .text_color(theme::lavender()),
                             )
                             .into_any_element()
                     })
@@ -8448,7 +8511,17 @@ impl Render for JobHarnessApp {
                     .w_full()
                     .flex()
                     .overflow_hidden()
-                    .when(self.chat_open, |d| {
+                    .when(self.chat_open && self.chat_fullscreen, |d| {
+                        d.child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .h_full()
+                                .overflow_hidden()
+                                .child(self.render_chat_rail(cx)),
+                        )
+                    })
+                    .when(self.chat_open && !self.chat_fullscreen, |d| {
                         let epoch = self.chat_anim_epoch;
                         let target_w = self.chat_width;
                         let dragging = matches!(self.resizing_rail, Some((ResizeRail::Chat, _, _)));
@@ -8508,7 +8581,9 @@ impl Render for JobHarnessApp {
                             );
                         d.child(rail_el).child(handle)
                     })
-                    .child(self.render_board(cx))
+                    .when(!(self.chat_open && self.chat_fullscreen), |d| {
+                        d.child(self.render_board(cx))
+                    })
                     .when_some(self.render_right_drawer(cx), |d, drawer| {
                         let epoch = self.drawer_anim_epoch;
                         let target_w = self.drawer_width;
