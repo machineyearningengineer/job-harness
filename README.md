@@ -120,9 +120,11 @@ jh --root "$HOME/Career/workspace" connect mcp
 
 *(Windows PowerShell: `irm https://raw.githubusercontent.com/machineyearningengineer/job-harness/main/scripts/get.ps1 | iex`)*
 
-### 3. Open the Desktop App
+### 3. Open the Desktop App *(no terminal required)*
 
-Download the latest macOS app from [GitHub Releases](https://github.com/machineyearningengineer/job-harness/releases), or launch it locally with synthetic demo data in one command:
+Download **Job Harness.app** from [GitHub Releases](https://github.com/machineyearningengineer/job-harness/releases) *(Apple Silicon macOS verified; Intel macOS, Linux & Windows previews)*, drag to **Applications**, right-click → **Open** *(unsigned open-source build — or run `xattr -cr "/Applications/Job Harness.app"` once)*, and click **Try with sample data** to explore a live workspace immediately.
+
+Or run from a local checkout in one command:
 
 ```sh
 make desktop-demo

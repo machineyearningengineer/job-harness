@@ -16,11 +16,24 @@ use std::{
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AgentRuntime {
-    Hermes { binary: PathBuf, profile: String },
-    ClaudeCode { binary: PathBuf },
-    Codex { binary: PathBuf },
-    Pi { binary: PathBuf },
-    Custom { name: String, command: String },
+    Hermes {
+        binary: PathBuf,
+        profile: String,
+    },
+    ClaudeCode {
+        binary: PathBuf,
+    },
+    Codex {
+        binary: PathBuf,
+    },
+    Pi {
+        binary: PathBuf,
+    },
+    Custom {
+        name: String,
+        command: String,
+        models: Vec<String>,
+    },
     Unconfigured,
 }
 
@@ -342,6 +355,28 @@ impl AgentRuntime {
         if let Some(binary) = which_in_path("pi") {
             out.push(Self::Pi { binary });
         }
+        if let Some(binary) = which_in_path("opencode") {
+            out.push(Self::Custom {
+                name: "OpenCode".into(),
+                command: format!("{} run", binary.display()),
+                models: Vec::new(),
+            });
+        }
+        if let Some(binary) = which_in_path("agy") {
+            out.push(Self::Custom {
+                name: "Antigravity".into(),
+                command: format!("{} chat", binary.display()),
+                models: Vec::new(),
+            });
+        }
+        for rt in load_registered_custom_runtimes() {
+            if !out
+                .iter()
+                .any(|existing| existing.short_name().eq_ignore_ascii_case(rt.short_name()))
+            {
+                out.push(rt);
+            }
+        }
         if let Ok(cmd) = std::env::var("JOB_HARNESS_AGENT_CMD")
             && !cmd.trim().is_empty()
         {
@@ -352,6 +387,7 @@ impl AgentRuntime {
             out.push(Self::Custom {
                 name,
                 command: cmd.trim().to_owned(),
+                models: Vec::new(),
             });
         }
         out
@@ -477,7 +513,7 @@ impl AgentRuntime {
         }
     }
 
-    /// Model presets read from the runtime's own config (Hermes profile) or CLI aliases.
+    /// Model presets read from the runtime's own config (Hermes, Codex, Pi, Custom) or CLI aliases.
     pub fn model_presets(&self) -> Vec<ModelPreset> {
         match self {
             Self::Hermes { profile, .. } => hermes_presets(profile),
@@ -490,19 +526,27 @@ impl AgentRuntime {
                     provider_label: Some("Anthropic".into()),
                 })
                 .collect(),
-            _ => Vec::new(),
+            Self::Codex { .. } => codex_presets(),
+            Self::Pi { .. } => pi_presets(),
+            Self::Custom { name, models, .. } => models
+                .iter()
+                .map(|m| ModelPreset {
+                    label: m.clone(),
+                    model: Some(m.clone()),
+                    provider: None,
+                    provider_label: Some(name.clone()),
+                })
+                .collect(),
+            Self::Unconfigured => Vec::new(),
         }
     }
 
     /// The model the runtime uses when no override is set (if discoverable).
     pub fn default_model(&self) -> Option<String> {
-        match self {
-            Self::Hermes { profile, .. } => hermes_presets(profile)
-                .into_iter()
-                .next()
-                .and_then(|p| p.model),
-            _ => None,
-        }
+        self.model_presets()
+            .into_iter()
+            .next()
+            .and_then(|p| p.model)
     }
 
     pub fn label(&self) -> String {
@@ -719,6 +763,9 @@ fn run_streaming(
             c.args(["-lc", command]);
             if let Some(dir) = workspace {
                 c.current_dir(dir);
+            }
+            if let Some(m) = opts.model.as_deref().filter(|m| !m.is_empty()) {
+                c.env("JOB_HARNESS_MODEL", m);
             }
             if !attachments.is_empty() {
                 let joined = attachments
@@ -1505,6 +1552,134 @@ fn hermes_presets(profile: &str) -> Vec<ModelPreset> {
         return Vec::new();
     };
     parse_hermes_presets(&text)
+}
+
+/// Discovers Codex CLI configured models from `~/.codex/config.toml` plus standard aliases.
+fn codex_presets() -> Vec<ModelPreset> {
+    let mut out: Vec<ModelPreset> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut push = |m: &str, prov: &str| {
+        let clean = m.trim().trim_matches('"').trim_matches('\'');
+        if !clean.is_empty() && seen.insert(clean.to_ascii_lowercase()) {
+            out.push(ModelPreset {
+                label: clean.to_owned(),
+                model: Some(clean.to_owned()),
+                provider: None,
+                provider_label: Some(prov.to_owned()),
+            });
+        }
+    };
+    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from)
+        && let Ok(text) = std::fs::read_to_string(home.join(".codex/config.toml"))
+    {
+        for line in text.lines() {
+            let t = line.trim();
+            if t.starts_with('#') {
+                continue;
+            }
+            for key in ["model =", "review_model ="] {
+                if let Some(rest) = t.strip_prefix(key) {
+                    push(rest, "Codex");
+                }
+            }
+        }
+    }
+    for fallback in ["o3", "gpt-4.1", "codex-mini-latest"] {
+        push(fallback, "OpenAI");
+    }
+    out
+}
+
+/// Discovers Pi agent models from `~/.pi/agent/settings.json` and `~/.pi/agent/models.json`.
+fn pi_presets() -> Vec<ModelPreset> {
+    let mut out: Vec<ModelPreset> = Vec::new();
+    let mut seen: std::collections::HashSet<(String, String)> = std::collections::HashSet::new();
+    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+        return out;
+    };
+    let mut push = |model: &str, provider: Option<&str>| {
+        let m = model.trim();
+        let p = provider.unwrap_or("").trim();
+        if !m.is_empty() && seen.insert((m.to_ascii_lowercase(), p.to_ascii_lowercase())) {
+            out.push(ModelPreset {
+                label: m.to_owned(),
+                model: Some(m.to_owned()),
+                provider: (!p.is_empty()).then(|| p.to_owned()),
+                provider_label: if p.is_empty() {
+                    Some("Pi".into())
+                } else {
+                    Some(p.to_owned())
+                },
+            });
+        }
+    };
+    if let Ok(bytes) = std::fs::read(home.join(".pi/agent/settings.json"))
+        && let Ok(val) = serde_json::from_slice::<Value>(&bytes)
+        && let Some(dm) = val["defaultModel"].as_str()
+    {
+        push(dm, val["defaultProvider"].as_str());
+    }
+    if let Ok(bytes) = std::fs::read(home.join(".pi/agent/models.json"))
+        && let Ok(val) = serde_json::from_slice::<Value>(&bytes)
+        && let Some(providers) = val["providers"].as_object()
+    {
+        for (prov_name, prov_cfg) in providers {
+            if let Some(models) = prov_cfg["models"].as_array() {
+                for m in models {
+                    let id = m["id"]
+                        .as_str()
+                        .or_else(|| m["name"].as_str())
+                        .or_else(|| m.as_str());
+                    if let Some(id) = id {
+                        push(id, Some(prov_name));
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Loads user- or agent-registered custom runtimes from `~/.config/job-harness/runtimes.json`.
+/// Format: `[{"name": "MyAgent", "command": "my-agent --prompt-stdin", "models": ["model-a"]}]`
+fn load_registered_custom_runtimes() -> Vec<AgentRuntime> {
+    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+        return Vec::new();
+    };
+    let path = home.join(".config/job-harness/runtimes.json");
+    let Ok(bytes) = std::fs::read(path) else {
+        return Vec::new();
+    };
+    let Ok(val) = serde_json::from_slice::<Value>(&bytes) else {
+        return Vec::new();
+    };
+    let Some(arr) = val.as_array() else {
+        return Vec::new();
+    };
+    arr.iter()
+        .filter_map(|item| {
+            let name = item["name"].as_str()?.trim();
+            let command = item["command"].as_str()?.trim();
+            if name.is_empty() || command.is_empty() {
+                return None;
+            }
+            let models = item["models"]
+                .as_array()
+                .map(|m| {
+                    m.iter()
+                        .filter_map(Value::as_str)
+                        .map(|s| s.trim().to_owned())
+                        .filter(|s| !s.is_empty())
+                        .collect()
+                })
+                .unwrap_or_default();
+            Some(AgentRuntime::Custom {
+                name: name.to_owned(),
+                command: command.to_owned(),
+                models,
+            })
+        })
+        .collect()
 }
 
 fn yaml_value(line: &str, key: &str) -> Option<String> {

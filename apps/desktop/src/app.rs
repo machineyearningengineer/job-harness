@@ -230,6 +230,8 @@ pub struct JobHarnessApp {
     notified_keys: HashSet<String>,
     setup_step: usize,
     tour_step: usize,
+    tour_prev_step: usize,
+    tour_anim_epoch: u64,
     copied_flash: Option<(SharedString, u64)>,
     copied_flash_epoch: u64,
     agent_opts: AgentOptions,
@@ -237,6 +239,8 @@ pub struct JobHarnessApp {
     last_seen_activity_at: Option<String>,
     last_saved_ui: Option<UiState>,
     snapshot: WorkspaceSnapshot,
+    needs_first_run: bool,
+    is_sample_workspace: bool,
     loading: bool,
     refresh_in_flight: bool,
     _watcher: Option<RecommendedWatcher>,
@@ -246,6 +250,7 @@ pub struct JobHarnessApp {
     chat_open: bool,
     chat_fullscreen: bool,
     chat_scroll: ScrollHandle,
+    settings_scroll: ScrollHandle,
     board_scroll_x: ScrollHandle,
     col_scrolls: HashMap<&'static str, ScrollHandle>,
     scroll_axis_lock: Option<ScrollAxis>,
@@ -286,6 +291,7 @@ pub struct JobHarnessApp {
     flow_anim_epoch: u64,
     sankey_zoom: Option<SankeyBucket>,
     sankey_expand_all: bool,
+    sankey_all_time: bool,
     sankey_scale: f32,
     sankey_bucket: Option<SankeyBucket>,
     sankey_filter: String,
@@ -394,6 +400,16 @@ impl JobHarnessApp {
         let watcher = spawn_change_listener(target, tx);
         Self::start_watcher_loop(rx, cx);
 
+        let missing_local_ws = client
+            .target
+            .local_root()
+            .is_some_and(|r| !r.join("config/career-ledger.json").is_file());
+        let is_sample_ws = client
+            .target
+            .local_root()
+            .zip(crate::demo_seed::sample_workspace_dir().as_deref())
+            .is_some_and(|(a, b)| a == b);
+
         let mut app = Self {
             client,
             runtime,
@@ -409,6 +425,8 @@ impl JobHarnessApp {
             notified_keys: HashSet::new(),
             setup_step: 0,
             tour_step: 0,
+            tour_prev_step: 0,
+            tour_anim_epoch: 1,
             copied_flash: None,
             copied_flash_epoch: 0,
             agent_opts,
@@ -417,16 +435,23 @@ impl JobHarnessApp {
             last_saved_ui: Some(saved.clone()),
             snapshot: WorkspaceSnapshot {
                 healthy: true,
-                status_note: "Loading workspace…".into(),
+                status_note: if missing_local_ws {
+                    "Choose or create a workspace".into()
+                } else {
+                    "Loading workspace…".into()
+                },
                 ..Default::default()
             },
-            loading: true,
+            needs_first_run: missing_local_ws,
+            is_sample_workspace: is_sample_ws,
+            loading: !missing_local_ws,
             refresh_in_flight: false,
             _watcher: watcher,
             focus_handle: cx.focus_handle(),
             chat_open: saved.chat_open,
             chat_fullscreen: false,
             chat_scroll: ScrollHandle::new(),
+            settings_scroll: ScrollHandle::new(),
             board_scroll_x: ScrollHandle::new(),
             col_scrolls: [
                 "Saved",
@@ -475,6 +500,7 @@ impl JobHarnessApp {
             flow_anim_epoch: 1,
             sankey_zoom: None,
             sankey_expand_all: false,
+            sankey_all_time: false,
             sankey_scale: 1.0,
             sankey_bucket: None,
             sankey_filter: String::new(),
@@ -540,7 +566,9 @@ impl JobHarnessApp {
             known_ready_secrets: HashMap::new(),
         };
         crate::macos_notify::init();
-        app.refresh_snapshot_async(false, cx);
+        if !app.needs_first_run {
+            app.refresh_snapshot_async(false, cx);
+        }
         // Background ephemeral secret vault + macOS notification click watcher:
         // auto-opens Secret Modal on agent requests, updates live TTL countdown,
         // and opens the linked role's Brief when the user clicks a macOS notification.
@@ -1024,6 +1052,146 @@ impl JobHarnessApp {
                     cx.notify();
                 });
             }
+        })
+        .detach();
+    }
+
+    fn switch_workspace_to(
+        &mut self,
+        root: PathBuf,
+        is_sample: bool,
+        open_wizard: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let target = WorkspaceTarget::Local(root.clone());
+        let (tx, rx) = mpsc::channel();
+        self._watcher = spawn_change_listener(target.clone(), tx);
+        Self::start_watcher_loop(rx, cx);
+        self.client = WorkspaceClient::new(target);
+        self.needs_first_run = false;
+        self.is_sample_workspace = is_sample;
+        self.selected_role = None;
+        self.role_details = None;
+        self.right_drawer = RightDrawer::Closed;
+        self.sankey_zoom = None;
+        self.sankey_bucket = None;
+        self.loading = true;
+        if open_wizard {
+            self.setup_step = 0;
+            self.active_popover = ActivePopover::SetupWizard;
+            self.cmd_anim_epoch = self.cmd_anim_epoch.wrapping_add(1);
+        }
+        self.refresh_snapshot_async(true, cx);
+    }
+
+    fn launch_sample_workspace(&mut self, cx: &mut Context<Self>) {
+        self.mark_sync_working("Preparing sample…", cx);
+        cx.spawn(async move |this, cx| {
+            let res = cx
+                .background_executor()
+                .spawn(async move { crate::demo_seed::ensure_sample_workspace() })
+                .await;
+            let _ = this.update(cx, |app, cx| match res {
+                Ok(dir) => {
+                    app.switch_workspace_to(dir, true, false, cx);
+                    app.set_toast("Loaded 10-role sample workspace", cx);
+                }
+                Err(err) => {
+                    app.mark_sync_failed("Sample failed", cx);
+                    app.set_toast(format!("Sample workspace error: {err}"), cx);
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn create_workspace_dialog(&mut self, cx: &mut Context<Self>) {
+        let default_dir = std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .map(|h| h.join("Career/workspace"));
+        cx.spawn(async move |this, cx| {
+            let picked = cx
+                .background_executor()
+                .spawn(async move {
+                    let mut dlg = rfd::FileDialog::new()
+                        .set_title("Choose empty folder for your new Job Harness workspace");
+                    if let Some(parent) = default_dir.as_deref().and_then(|d| d.parent()) {
+                        let _ = std::fs::create_dir_all(parent);
+                        dlg = dlg.set_directory(parent);
+                    }
+                    dlg.pick_folder()
+                })
+                .await;
+            let Some(folder) = picked else {
+                return;
+            };
+            let target_dir = if folder.join("config/career-ledger.json").is_file() {
+                folder
+            } else if std::fs::read_dir(&folder)
+                .ok()
+                .and_then(|mut it| it.next())
+                .is_some()
+            {
+                folder.join("job-harness-workspace")
+            } else {
+                folder
+            };
+            let init_dir = target_dir.clone();
+            let res = cx
+                .background_executor()
+                .spawn(async move {
+                    if !init_dir.join("config/career-ledger.json").is_file() {
+                        job_harness_core::workspace::initialize(&init_dir)
+                            .map_err(|e| anyhow::anyhow!("{e}"))?;
+                    }
+                    crate::transport::save_default_workspace(&init_dir)?;
+                    Ok::<PathBuf, anyhow::Error>(init_dir)
+                })
+                .await;
+            let _ = this.update(cx, |app, cx| match res {
+                Ok(dir) => {
+                    app.switch_workspace_to(dir, false, true, cx);
+                    app.set_toast("Workspace ready — finish setup below", cx);
+                }
+                Err(err) => {
+                    app.set_toast(format!("Could not create workspace: {err}"), cx);
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn open_workspace_dialog(&mut self, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            let picked = cx
+                .background_executor()
+                .spawn(async move {
+                    rfd::FileDialog::new()
+                        .set_title("Open existing Job Harness workspace")
+                        .pick_folder()
+                })
+                .await;
+            let Some(folder) = picked else {
+                return;
+            };
+            if !folder.join("config/career-ledger.json").is_file() {
+                let _ = this.update(cx, |app, cx| {
+                    app.set_toast(
+                        "That folder has no config/career-ledger.json — use Create workspace instead",
+                        cx,
+                    );
+                });
+                return;
+            }
+            let save_dir = folder.clone();
+            let _ = cx
+                .background_executor()
+                .spawn(async move { crate::transport::save_default_workspace(&save_dir) })
+                .await;
+            let _ = this.update(cx, |app, cx| {
+                app.switch_workspace_to(folder, false, false, cx);
+                app.set_toast("Opened workspace", cx);
+            });
         })
         .detach();
     }
@@ -2021,75 +2189,6 @@ impl JobHarnessApp {
             None
         };
         let all_sel = is_editing && self.input_all_selected;
-        let is_long = self.config_draft.len() > 24
-            || matches!(
-                key,
-                "location_preferences"
-                    | "target_roles"
-                    | "avoid_list"
-                    | "tone"
-                    | "application_email"
-                    | "sender_email"
-            );
-        if is_editing && is_long {
-            // Full-width left-aligned wrapping editor so long lists/emails NEVER clip on the left!
-            return div()
-                .flex()
-                .flex_col()
-                .gap(px(4.0))
-                .py(px(2.0))
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(theme::text_secondary())
-                        .child(label.to_owned()),
-                )
-                .child(
-                    div()
-                        .id(SharedString::from(format!("cfg-edit-{key}")))
-                        .w_full()
-                        .min_w_0()
-                        .max_h(px(108.0))
-                        .overflow_y_scroll()
-                        .px_2()
-                        .py(px(5.0))
-                        .rounded(theme::r_sm())
-                        .bg(theme::surface_subtle())
-                        .border_1()
-                        .border_color(if err.is_some() {
-                            theme::rose_text()
-                        } else {
-                            theme::lavender()
-                        })
-                        .cursor_text()
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(|this, _, window, cx| {
-                                window.focus(&this.focus_handle);
-                                this.active_input = ActiveInput::InlineConfig;
-                                cx.stop_propagation();
-                            }),
-                        )
-                        .on_scroll_wheel(|_, _, cx| {
-                            cx.stop_propagation();
-                        })
-                        .child(inline_editable_text_left(
-                            &self.config_draft,
-                            placeholder,
-                            all_sel,
-                            self.reduce_motion,
-                            key,
-                        )),
-                )
-                .when_some(err, |d, msg| {
-                    d.child(
-                        div()
-                            .text_size(px(11.0))
-                            .text_color(theme::rose_text())
-                            .child(msg),
-                    )
-                });
-        }
         div()
             .flex()
             .flex_col()
@@ -2112,7 +2211,7 @@ impl JobHarnessApp {
                             .child(label.to_owned()),
                     )
                     .child(if is_editing {
-                        // Seamless borderless inline text editor for short values (numbers / timezone)
+                        // Seamless borderless inline editor across both Profile and Setup Wizard
                         let editor = div()
                             .id(SharedString::from(format!("cfg-edit-{key}")))
                             .max_w_full()
@@ -2134,6 +2233,9 @@ impl JobHarnessApp {
                                     cx.stop_propagation();
                                 }),
                             )
+                            .on_scroll_wheel(|_, _, cx| {
+                                cx.stop_propagation();
+                            })
                             .child(inline_editable_text(
                                 &self.config_draft,
                                 placeholder,
@@ -2142,18 +2244,7 @@ impl JobHarnessApp {
                                 key,
                             ));
                         let wrapped = div().flex_1().min_w_0().flex().justify_end().child(editor);
-                        if self.reduce_motion {
-                            wrapped.into_any_element()
-                        } else {
-                            wrapped
-                                .with_animation(
-                                    SharedString::from(format!("cfg-expand-{key}")),
-                                    Animation::new(Duration::from_millis(120))
-                                        .with_easing(ease_out_quint()),
-                                    |el, t| el.opacity(0.65 + 0.35 * t),
-                                )
-                                .into_any_element()
-                        }
+                        wrapped.into_any_element()
                     } else {
                         let scrub_spec = numeric_scrub_spec(key);
                         let is_scrubbing = self
@@ -2504,8 +2595,9 @@ impl JobHarnessApp {
             }
             CommandAction::StartTour => {
                 self.tour_step = 0;
+                self.tour_prev_step = 0;
+                self.tour_anim_epoch = self.tour_anim_epoch.wrapping_add(1);
                 self.active_popover = ActivePopover::Tour;
-                self.cmd_anim_epoch = self.cmd_anim_epoch.wrapping_add(1);
                 cx.notify();
             }
             CommandAction::AskAgent(prompt) => self.submit_prompt(prompt, false, cx),
@@ -6491,8 +6583,9 @@ impl JobHarnessApp {
             .flex()
             .flex_col()
             .gap_4()
-            // 1. Clean 1-row equal-width segmented Runtime switcher (never wraps onto 2 rows)
-            .child(
+            // 1. Scalable Runtime switcher: 1-row segmented bar up to 4 agents; clean wrapping grid for 5+
+            .child({
+                let many_runtimes = self.available_runtimes.len() > 4;
                 div()
                     .flex()
                     .flex_col()
@@ -6510,14 +6603,16 @@ impl JobHarnessApp {
                             .rounded(theme::r_sm())
                             .bg(theme::surface_subtle())
                             .flex()
-                            .items_center()
-                            .gap(px(2.0))
+                            .when(many_runtimes, |d| d.flex_wrap().gap(px(4.0)))
+                            .when(!many_runtimes, |d| d.items_center().gap(px(2.0)))
                             .children(self.available_runtimes.iter().enumerate().map(|(i, rt)| {
-                                let on = rt.kind() == self.runtime.kind();
+                                let on = rt.kind() == self.runtime.kind()
+                                    && rt.short_name() == self.runtime.short_name();
                                 let rt_clone = rt.clone();
                                 div()
                                     .id(SharedString::from(format!("{scope}-rt-{i}")))
-                                    .flex_1()
+                                    .when(!many_runtimes, |d| d.flex_1())
+                                    .when(many_runtimes, |d| d.px_2())
                                     .py(px(4.0))
                                     .rounded(theme::r_sm())
                                     .bg(if on {
@@ -6552,9 +6647,9 @@ impl JobHarnessApp {
                                     }))
                                     .child(rt.short_name().to_owned())
                             })),
-                    ),
-            )
-            // 2. Clean 2-column Model rows: readable prefix on left, muted provider badge on right
+                    )
+            })
+            // 2. Clean 2-column scrollable Model rows: readable prefix on left, muted provider badge on right
             .when(!presets.is_empty(), |d| {
                 d.child(
                     div()
@@ -6567,85 +6662,94 @@ impl JobHarnessApp {
                                 .text_color(theme::text_muted())
                                 .child("Model"),
                         )
-                        .child(div().flex().flex_col().gap(px(2.0)).children(
-                            presets.into_iter().enumerate().map(|(i, preset)| {
-                                let is_selected = match (&cur_model, &preset.model) {
-                                    (None, _) if i == 0 => true,
-                                    (Some(a), Some(b)) => a == b && cur_provider == preset.provider,
-                                    _ => false,
-                                };
-                                let m = preset.model.clone();
-                                let p = preset.provider.clone();
-                                let prov_tag = preset
-                                    .provider_label
-                                    .as_deref()
-                                    .map(|s| truncate_end(s, 14));
-                                div()
-                                    .id(SharedString::from(format!("{scope}-preset-{i}")))
-                                    .px_3()
-                                    .py(px(7.0))
-                                    .rounded(theme::r_sm())
-                                    .bg(if is_selected {
-                                        theme::surface_active()
-                                    } else {
-                                        gpui::rgba(0x00000000)
-                                    })
-                                    .hover(|s| s.bg(theme::row_hover()))
-                                    .cursor_pointer()
-                                    .flex()
-                                    .items_center()
-                                    .justify_between()
-                                    .gap_3()
-                                    .text_xs()
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        if i == 0 {
-                                            this.agent_opts.model = None;
-                                            this.agent_opts.provider = None;
-                                            this.model_draft.clear();
-                                        } else {
-                                            this.agent_opts.model = m.clone();
-                                            this.agent_opts.provider = p.clone();
-                                            this.model_draft = m.clone().unwrap_or_default();
+                        .child(
+                            div()
+                                .id(SharedString::from(format!("{scope}-model-scroll")))
+                                .max_h(px(184.0))
+                                .overflow_y_scroll()
+                                .flex()
+                                .flex_col()
+                                .gap(px(2.0))
+                                .children(presets.into_iter().enumerate().map(|(i, preset)| {
+                                    let is_selected = match (&cur_model, &preset.model) {
+                                        (None, _) if i == 0 => true,
+                                        (Some(a), Some(b)) => {
+                                            a == b && cur_provider == preset.provider
                                         }
-                                        cx.notify();
-                                    }))
-                                    .child(
-                                        div()
-                                            .flex_1()
-                                            .min_w_0()
-                                            .overflow_hidden()
-                                            .text_color(if is_selected {
-                                                theme::text_primary()
+                                        _ => false,
+                                    };
+                                    let m = preset.model.clone();
+                                    let p = preset.provider.clone();
+                                    let prov_tag = preset
+                                        .provider_label
+                                        .as_deref()
+                                        .map(|s| truncate_end(s, 14));
+                                    div()
+                                        .id(SharedString::from(format!("{scope}-preset-{i}")))
+                                        .px_3()
+                                        .py(px(7.0))
+                                        .rounded(theme::r_sm())
+                                        .bg(if is_selected {
+                                            theme::surface_active()
+                                        } else {
+                                            gpui::rgba(0x00000000)
+                                        })
+                                        .hover(|s| s.bg(theme::row_hover()))
+                                        .cursor_pointer()
+                                        .flex()
+                                        .items_center()
+                                        .justify_between()
+                                        .gap_3()
+                                        .text_xs()
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            if i == 0 {
+                                                this.agent_opts.model = None;
+                                                this.agent_opts.provider = None;
+                                                this.model_draft.clear();
                                             } else {
-                                                theme::text_secondary()
-                                            })
-                                            .child(truncate_end(&preset.label, 30)),
-                                    )
-                                    .child(
-                                        div()
-                                            .flex_shrink_0()
-                                            .flex()
-                                            .items_center()
-                                            .gap_2()
-                                            .when_some(prov_tag, |r, tag| {
-                                                r.child(
-                                                    div()
-                                                        .text_size(px(11.0))
-                                                        .text_color(theme::text_muted())
-                                                        .child(tag),
-                                                )
-                                            })
-                                            .when(is_selected, |r| {
-                                                r.child(
-                                                    svg()
-                                                        .path("icons/check.svg")
-                                                        .size(px(12.0))
-                                                        .text_color(theme::emerald()),
-                                                )
-                                            }),
-                                    )
-                            }),
-                        )),
+                                                this.agent_opts.model = m.clone();
+                                                this.agent_opts.provider = p.clone();
+                                                this.model_draft = m.clone().unwrap_or_default();
+                                            }
+                                            cx.notify();
+                                        }))
+                                        .child(
+                                            div()
+                                                .flex_1()
+                                                .min_w_0()
+                                                .overflow_hidden()
+                                                .text_color(if is_selected {
+                                                    theme::text_primary()
+                                                } else {
+                                                    theme::text_secondary()
+                                                })
+                                                .child(truncate_end(&preset.label, 30)),
+                                        )
+                                        .child(
+                                            div()
+                                                .flex_shrink_0()
+                                                .flex()
+                                                .items_center()
+                                                .gap_2()
+                                                .when_some(prov_tag, |r, tag| {
+                                                    r.child(
+                                                        div()
+                                                            .text_size(px(11.0))
+                                                            .text_color(theme::text_muted())
+                                                            .child(tag),
+                                                    )
+                                                })
+                                                .when(is_selected, |r| {
+                                                    r.child(
+                                                        svg()
+                                                            .path("icons/check.svg")
+                                                            .size(px(12.0))
+                                                            .text_color(theme::emerald()),
+                                                    )
+                                                }),
+                                        )
+                                })),
+                        ),
                 )
             })
             // 3. Single-row 5-segment Reasoning control (Auto · Low · Med · High · Max)
@@ -6839,6 +6943,19 @@ impl JobHarnessApp {
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.active_popover = ActivePopover::None;
                                     this.open_right_drawer(RightDrawer::Settings, cx);
+                                    this.settings_scroll
+                                        .set_offset(gpui::point(px(0.0), px(-360.0)));
+                                    cx.spawn(async move |this, cx| {
+                                        cx.background_executor()
+                                            .timer(Duration::from_millis(40))
+                                            .await;
+                                        let _ = this.update(cx, |app, cx| {
+                                            app.settings_scroll
+                                                .set_offset(gpui::point(px(0.0), px(-360.0)));
+                                            cx.notify();
+                                        });
+                                    })
+                                    .detach();
                                 }))
                                 .child("Delegation & tools →"),
                         ),
@@ -7293,8 +7410,69 @@ impl JobHarnessApp {
             .pt_2()
             .pb(px(56.0))
             .gap_2()
+            .when(self.is_sample_workspace && !self.needs_first_run, |root_d| {
+                root_d.child(
+                    div()
+                        .w_full()
+                        .px_3()
+                        .py(px(6.0))
+                        .rounded(theme::r_md())
+                        .bg(theme::surface_subtle())
+                        .border_1()
+                        .border_color(theme::hairline())
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .gap_3()
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(theme::text_secondary())
+                                .child("Exploring sample workspace (10 fictional roles — click any card to inspect CV & brief)"),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .child(
+                                    div()
+                                        .id("sample-bar-create")
+                                        .px_2()
+                                        .py(px(3.0))
+                                        .rounded(theme::r_sm())
+                                        .bg(theme::surface_active())
+                                        .hover(|s| s.bg(theme::row_hover()))
+                                        .cursor_pointer()
+                                        .text_xs()
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .text_color(theme::text_primary())
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.create_workspace_dialog(cx);
+                                        }))
+                                        .child("Start my workspace →"),
+                                )
+                                .child(
+                                    div()
+                                        .id("sample-bar-open")
+                                        .px_2()
+                                        .py(px(3.0))
+                                        .rounded(theme::r_sm())
+                                        .hover(|s| s.bg(theme::row_hover()))
+                                        .cursor_pointer()
+                                        .text_xs()
+                                        .text_color(theme::text_muted())
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.open_workspace_dialog(cx);
+                                        }))
+                                        .child("Open folder"),
+                                ),
+                        ),
+                )
+            })
             .when(
                 !self.loading
+                    && !self.needs_first_run
                     && !self.snapshot.healthy
                     && self.snapshot.total_records == 0
                     && !self.snapshot.status_note.is_empty(),
@@ -7405,51 +7583,128 @@ impl JobHarnessApp {
                                 .into_any_element()
                         } else {
                             let expanded = self.sankey_expand_all;
+                            let all_time = self.sankey_all_time;
                             div()
-                                .id("sk-toggle-expand")
-                                .px_2()
-                                .py(px(3.0))
-                                .rounded(theme::r_sm())
-                                .bg(if expanded {
-                                    theme::surface_active()
-                                } else {
-                                    theme::surface_subtle()
-                                })
-                                .hover(|s| s.bg(theme::row_hover()))
-                                .cursor_pointer()
                                 .flex()
                                 .items_center()
-                                .gap(px(5.0))
-                                .text_xs()
-                                .text_color(if expanded {
-                                    theme::text_primary()
-                                } else {
-                                    theme::text_secondary()
-                                })
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.sankey_expand_all = !this.sankey_expand_all;
-                                    this.sankey_zoom = None;
-                                    this.sankey_bucket = None;
-                                    this.sankey_filter.clear();
-                                    this.sankey_hover = None;
-                                    this.flow_anim_epoch = this.flow_anim_epoch.wrapping_add(1);
-                                    cx.notify();
-                                }))
+                                .gap_2()
                                 .child(
-                                    svg()
-                                        .path(if expanded {
-                                            "icons/minimize.svg"
+                                    div()
+                                        .p(px(2.0))
+                                        .rounded(theme::r_sm())
+                                        .bg(theme::surface_subtle())
+                                        .flex()
+                                        .items_center()
+                                        .gap(px(2.0))
+                                        .child(
+                                            div()
+                                                .id("sk-mode-current")
+                                                .px_2()
+                                                .py(px(2.0))
+                                                .rounded(theme::r_xs())
+                                                .bg(if !all_time {
+                                                    theme::surface_active()
+                                                } else {
+                                                    gpui::rgba(0x00000000)
+                                                })
+                                                .hover(|s| s.bg(theme::row_hover()))
+                                                .cursor_pointer()
+                                                .text_xs()
+                                                .text_color(if !all_time {
+                                                    theme::text_primary()
+                                                } else {
+                                                    theme::text_muted()
+                                                })
+                                                .on_click(cx.listener(|this, _, _, cx| {
+                                                    if this.sankey_all_time {
+                                                        this.sankey_all_time = false;
+                                                        this.sankey_bucket = None;
+                                                        this.flow_anim_epoch =
+                                                            this.flow_anim_epoch.wrapping_add(1);
+                                                        cx.notify();
+                                                    }
+                                                }))
+                                                .child("Current"),
+                                        )
+                                        .child(
+                                            div()
+                                                .id("sk-mode-alltime")
+                                                .px_2()
+                                                .py(px(2.0))
+                                                .rounded(theme::r_xs())
+                                                .bg(if all_time {
+                                                    theme::surface_active()
+                                                } else {
+                                                    gpui::rgba(0x00000000)
+                                                })
+                                                .hover(|s| s.bg(theme::row_hover()))
+                                                .cursor_pointer()
+                                                .text_xs()
+                                                .text_color(if all_time {
+                                                    theme::text_primary()
+                                                } else {
+                                                    theme::text_muted()
+                                                })
+                                                .on_click(cx.listener(|this, _, _, cx| {
+                                                    if !this.sankey_all_time {
+                                                        this.sankey_all_time = true;
+                                                        this.sankey_bucket = None;
+                                                        this.flow_anim_epoch =
+                                                            this.flow_anim_epoch.wrapping_add(1);
+                                                        cx.notify();
+                                                    }
+                                                }))
+                                                .child("All-time"),
+                                        ),
+                                )
+                                .child(
+                                    div()
+                                        .id("sk-toggle-expand")
+                                        .px_2()
+                                        .py(px(3.0))
+                                        .rounded(theme::r_sm())
+                                        .bg(if expanded {
+                                            theme::surface_active()
                                         } else {
-                                            "icons/expand.svg"
+                                            theme::surface_subtle()
                                         })
-                                        .size(px(11.5))
+                                        .hover(|s| s.bg(theme::row_hover()))
+                                        .cursor_pointer()
+                                        .flex()
+                                        .items_center()
+                                        .gap(px(5.0))
+                                        .text_xs()
                                         .text_color(if expanded {
                                             theme::text_primary()
                                         } else {
-                                            theme::text_muted()
-                                        }),
+                                            theme::text_secondary()
+                                        })
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.sankey_expand_all = !this.sankey_expand_all;
+                                            this.sankey_zoom = None;
+                                            this.sankey_bucket = None;
+                                            this.sankey_filter.clear();
+                                            this.sankey_hover = None;
+                                            this.flow_anim_epoch =
+                                                this.flow_anim_epoch.wrapping_add(1);
+                                            cx.notify();
+                                        }))
+                                        .child(
+                                            svg()
+                                                .path(if expanded {
+                                                    "icons/minimize.svg"
+                                                } else {
+                                                    "icons/expand.svg"
+                                                })
+                                                .size(px(11.5))
+                                                .text_color(if expanded {
+                                                    theme::text_primary()
+                                                } else {
+                                                    theme::text_muted()
+                                                }),
+                                        )
+                                        .child(if expanded { "Collapse" } else { "Expand all" }),
                                 )
-                                .child(if expanded { "Collapse" } else { "Expand all" })
                                 .into_any_element()
                         }
                     } else {
@@ -7760,6 +8015,7 @@ impl JobHarnessApp {
                     .collect();
                 sankey::render_sankey_view(
                     &all_for_sankey,
+                    self.sankey_all_time,
                     self.sankey_zoom,
                     self.sankey_expand_all,
                     self.sankey_scale,
@@ -10684,6 +10940,7 @@ impl JobHarnessApp {
                         .flex_col()
                         .gap_4()
                         .overflow_y_scroll()
+                        .track_scroll(&self.settings_scroll)
                         .child(drawer_header(
                             "Settings",
                             Some("Agent runtime, automation rules, and interface preferences.".into()),
@@ -11902,63 +12159,116 @@ impl JobHarnessApp {
                                     },
                                 )
                         })
-                        // Section 5: Setup Wizard & Spotlight UI Tour (re-runnable anytime)
+                        // Section 5: Workspace switching, Setup Wizard & Spotlight UI Tour
                         .child(
                             div()
                                 .pt_3()
                                 .border_t_1()
                                 .border_color(theme::hairline())
                                 .flex()
-                                .items_center()
-                                .justify_between()
+                                .flex_col()
                                 .gap_2()
                                 .child(
                                     div()
-                                        .id("set-rerun-wizard")
-                                        .flex_1()
-                                        .px_2()
-                                        .py(px(6.0))
-                                        .rounded(theme::r_sm())
-                                        .bg(theme::surface_subtle())
-                                        .hover(|s| s.bg(theme::row_hover()))
-                                        .cursor_pointer()
                                         .flex()
                                         .items_center()
-                                        .justify_center()
-                                        .text_xs()
-                                        .text_color(theme::text_primary())
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.setup_step = 0;
-                                            this.active_popover = ActivePopover::SetupWizard;
-                                            this.cmd_anim_epoch =
-                                                this.cmd_anim_epoch.wrapping_add(1);
-                                            cx.notify();
-                                        }))
-                                        .child("Setup wizard"),
+                                        .justify_between()
+                                        .gap_2()
+                                        .child(
+                                            div()
+                                                .id("set-rerun-wizard")
+                                                .flex_1()
+                                                .px_2()
+                                                .py(px(6.0))
+                                                .rounded(theme::r_sm())
+                                                .bg(theme::surface_subtle())
+                                                .hover(|s| s.bg(theme::row_hover()))
+                                                .cursor_pointer()
+                                                .flex()
+                                                .items_center()
+                                                .justify_center()
+                                                .text_xs()
+                                                .text_color(theme::text_primary())
+                                                .on_click(cx.listener(|this, _, _, cx| {
+                                                    this.setup_step = 0;
+                                                    this.active_popover = ActivePopover::SetupWizard;
+                                                    this.cmd_anim_epoch =
+                                                        this.cmd_anim_epoch.wrapping_add(1);
+                                                    cx.notify();
+                                                }))
+                                                .child("Setup wizard"),
+                                        )
+                                        .child(
+                                            div()
+                                                .id("set-start-tour")
+                                                .flex_1()
+                                                .px_2()
+                                                .py(px(6.0))
+                                                .rounded(theme::r_sm())
+                                                .bg(theme::surface_subtle())
+                                                .hover(|s| s.bg(theme::row_hover()))
+                                                .cursor_pointer()
+                                                .flex()
+                                                .items_center()
+                                                .justify_center()
+                                                .text_xs()
+                                                .text_color(theme::text_secondary())
+                                                .on_click(cx.listener(|this, _, _, cx| {
+                                                    this.right_drawer = RightDrawer::Closed;
+                                                    this.tour_step = 0;
+                                                    this.tour_prev_step = 0;
+                                                    this.tour_anim_epoch =
+                                                        this.tour_anim_epoch.wrapping_add(1);
+                                                    this.active_popover = ActivePopover::Tour;
+                                                    cx.notify();
+                                                }))
+                                                .child("Quick UI tour"),
+                                        ),
                                 )
                                 .child(
                                     div()
-                                        .id("set-start-tour")
-                                        .flex_1()
-                                        .px_2()
-                                        .py(px(6.0))
-                                        .rounded(theme::r_sm())
-                                        .bg(theme::surface_subtle())
-                                        .hover(|s| s.bg(theme::row_hover()))
-                                        .cursor_pointer()
                                         .flex()
                                         .items_center()
-                                        .justify_center()
-                                        .text_xs()
-                                        .text_color(theme::text_secondary())
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.tour_step = 0;
-                                            this.active_popover = ActivePopover::Tour;
-                                            this.cmd_anim_epoch =
-                                                this.cmd_anim_epoch.wrapping_add(1);
-                                            cx.notify();
-                                        }))
-                                        .child("Quick UI tour"),
+                                        .justify_between()
+                                        .gap_2()
+                                        .child(
+                                            div()
+                                                .id("set-switch-ws")
+                                                .flex_1()
+                                                .px_2()
+                                                .py(px(6.0))
+                                                .rounded(theme::r_sm())
+                                                .hover(|s| s.bg(theme::row_hover()))
+                                                .cursor_pointer()
+                                                .flex()
+                                                .items_center()
+                                                .justify_center()
+                                                .text_xs()
+                                                .text_color(theme::text_muted())
+                                                .on_click(cx.listener(|this, _, _, cx| {
+                                                    this.open_workspace_dialog(cx);
+                                                }))
+                                                .child("Open folder…"),
+                                        )
+                                        .child(
+                                            div()
+                                                .id("set-try-sample")
+                                                .flex_1()
+                                                .px_2()
+                                                .py(px(6.0))
+                                                .rounded(theme::r_sm())
+                                                .hover(|s| s.bg(theme::row_hover()))
+                                                .cursor_pointer()
+                                                .flex()
+                                                .items_center()
+                                                .justify_center()
+                                                .text_xs()
+                                                .text_color(theme::text_muted())
+                                                .on_click(cx.listener(|this, _, _, cx| {
+                                                    this.launch_sample_workspace(cx);
+                                                }))
+                                                .child("Try sample data"),
+                                        ),
                                 ),
                         )
                         .into_any_element(),
@@ -12213,7 +12523,11 @@ impl JobHarnessApp {
         }
     }
 
-    fn render_popover(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+    fn render_popover(
+        &self,
+        viewport: gpui::Size<gpui::Pixels>,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
         match self.active_popover {
             ActivePopover::None => None,
             ActivePopover::CommandBar => {
@@ -13520,103 +13834,167 @@ impl JobHarnessApp {
                 )
             }
             ActivePopover::Tour => {
-                let epoch = self.cmd_anim_epoch;
                 let step = self.tour_step.min(4);
-                let stops: [(&str, &str, &str); 5] = [
+                let prev_step = self.tour_prev_step.min(4);
+                let anim_epoch = self.tour_anim_epoch;
+                let reduce_motion = self.reduce_motion;
+                let vw = f32::from(viewport.width).max(720.0);
+                let vh = f32::from(viewport.height).max(480.0);
+                let card_w = 340.0_f32;
+                let card_h = 166.0_f32;
+
+                // Driver.js-style live spotlight cutout rects (x, y, w, h) + anchored popover (px, py)
+                let stop_geom = |idx: usize| -> ((f32, f32, f32, f32), (f32, f32)) {
+                    let chat_off = if self.chat_open { self.chat_width } else { 0.0 };
+                    match idx {
+                        // 1. Search & Command bar (top center)
+                        0 => {
+                            let sw = 276.0_f32;
+                            let sx = ((vw - sw) * 0.5).clamp(110.0, (vw - sw - 230.0).max(110.0));
+                            let sy = 6.0;
+                            let sh = 34.0;
+                            let cx_pos =
+                                (sx + sw * 0.5 - card_w * 0.5).clamp(16.0, vw - card_w - 16.0);
+                            ((sx, sy, sw, sh), (cx_pos, sy + sh + 14.0))
+                        }
+                        // 2. Board / Sankey switch & Attention filter (top-right toolbar)
+                        1 => {
+                            let sw = 286.0_f32;
+                            let sx = (vw - sw - 14.0).max(chat_off + 16.0);
+                            let sy = 50.0;
+                            let sh = 34.0;
+                            let cx_pos = (vw - card_w - 20.0).max(16.0);
+                            ((sx, sy, sw, sh), (cx_pos, sy + sh + 14.0))
+                        }
+                        // 3. CVs, Profile, Tidy & Settings icons (top-right header)
+                        2 => {
+                            let sw = 188.0_f32;
+                            let sx = (vw - sw - 12.0).max(16.0);
+                            let sy = 6.0;
+                            let sh = 34.0;
+                            let cx_pos = (vw - card_w - 20.0).max(16.0);
+                            ((sx, sy, sw, sh), (cx_pos, sy + sh + 14.0))
+                        }
+                        // 4. Quick Ask / AI Chat rail (bottom-left)
+                        3 => {
+                            let sx = if self.chat_open { 10.0 } else { 14.0 };
+                            let sw = if self.chat_open {
+                                (self.chat_width - 20.0).clamp(160.0, 320.0)
+                            } else {
+                                46.0
+                            };
+                            let sh = 42.0;
+                            let sy = (vh - sh - 10.0).max(80.0);
+                            let cx_pos = (sx + sw + 14.0).min(vw - card_w - 16.0);
+                            let cy_pos = (sy + sh - card_h).clamp(56.0, vh - card_h - 16.0);
+                            ((sx, sy, sw, sh), (cx_pos, cy_pos))
+                        }
+                        // 5. Daily cap, 1-click Refresh & Health (bottom-right dock)
+                        _ => {
+                            let sw = 216.0_f32;
+                            let sh = 38.0;
+                            let sx = (vw - sw - 12.0).max(16.0);
+                            let sy = (vh - sh - 8.0).max(80.0);
+                            let cx_pos = (vw - card_w - 20.0).max(16.0);
+                            let cy_pos = (sy - card_h - 14.0).max(56.0);
+                            ((sx, sy, sw, sh), (cx_pos, cy_pos))
+                        }
+                    }
+                };
+
+                let stops: [(&str, &str); 5] = [
+                    (
+                        "Search & jump anywhere",
+                        "Filter all roles instantly across active and archived columns, or press ⌘K for quick commands.",
+                    ),
                     (
                         "Board & Sankey Flow",
-                        "Top toolbar (right)",
-                        "Toggle between Kanban columns and the 2D-zoomable Sankey funnel. Tap `Interviews ›` or `Archive ›` to expand sub-stages in place without layout shift.",
+                        "Switch between Kanban and the interactive funnel, or filter straight to roles needing attention.",
                     ),
                     (
-                        "Attention & Tidy",
-                        "Top bar",
-                        "`Attention` filters to urgent interviews and active conversations that went quiet (`Follow up` 5–13d in amber, `Stale` 14+d in rose). Use the Tidy broom to Archive, Follow up, or Keep active — nothing auto-archives.",
+                        "CVs, Profile, Tidy & Settings",
+                        "Toggle child CV tracks and cover letters, review quiet threads, or tune your delegation safety mode.",
                     ),
                     (
-                        "Role Drawer & Chapter Reader",
-                        "Click any card",
-                        "Inspect Overview, 2-layer Briefs, and canonical Record evidence. Expand any brief for the side-rail chapter view and smooth cross-paragraph text selection.",
+                        "Ask your agent anytime",
+                        "Open Quick Ask or press ⌘\\ to chat with Hermes, Claude Code, Codex, or Pi over your local ledger.",
                     ),
                     (
-                        "Chat, Sessions & Ephemeral Secrets",
-                        "Left rail  ⌘\\",
-                        "Talk to Hermes, Claude Code, Codex, or Pi directly over your local ledger. Copy or export full Markdown transcripts from the chat header, or press ⌘K → `Pass a secret` for 1-use auto-shredding logins.",
-                    ),
-                    (
-                        "Delegation & 1-Click Refresh",
-                        "Settings & bottom dock",
-                        "Pick `Drafts only`, `Assisted` (recommended), or `Autonomous` in Settings — plus optional `Keep Mac awake during runs`. Click the refresh icon beside your daily cap anytime for instant sync.",
+                        "Daily cap & instant sync",
+                        "Track your daily submission budget, inspect workspace health, and refresh live from disk with one click.",
                     ),
                 ];
-                let (title, anchor, desc) = stops[step];
-                let card = div()
-                    .id("tour-spotlight-card")
-                    .occlude()
-                    .w(px(460.0))
-                    .rounded(theme::r_lg())
-                    .bg(theme::popover_glass())
-                    .border_1()
-                    .border_color(theme::lavender_border())
-                    .shadow_lg()
-                    .p_5()
-                    .flex()
-                    .flex_col()
-                    .gap_3()
-                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .justify_between()
-                            .child(
-                                div()
-                                    .text_size(px(11.0))
-                                    .text_color(theme::lavender())
-                                    .child(format!("Quick Tour  {} / 5  —  {anchor}", step + 1)),
-                            )
-                            .child(
-                                div()
-                                    .id("tour-skip")
-                                    .text_xs()
-                                    .text_color(theme::text_muted())
-                                    .hover(|s| s.text_color(theme::text_primary()))
-                                    .cursor_pointer()
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.active_popover = ActivePopover::None;
-                                        cx.notify();
-                                    }))
-                                    .child("Skip"),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .text_sm()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(theme::text_primary())
-                            .child(title),
-                    )
-                    .child(
-                        div()
-                            .text_xs()
-                            .line_height(px(19.0))
-                            .text_color(theme::text_secondary())
-                            .child(desc),
-                    )
-                    .child(
-                        div()
-                            .pt_2()
-                            .border_t_1()
-                            .border_color(theme::hairline())
-                            .flex()
-                            .items_center()
-                            .justify_between()
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap(px(5.0))
-                                    .children((0..5).map(|i| {
+
+                let (title, desc) = stops[step];
+                let ((x0, y0, w0, h0), (px0, py0)) = stop_geom(prev_step);
+                let ((x1, y1, w1, h1), (px1, py1)) = stop_geom(step);
+                let lerp = |a: f32, b: f32, t: f32| a + (b - a) * t;
+                let scrim_col = gpui::rgba(0x050508a8);
+                let dur = Duration::from_millis(if reduce_motion || prev_step == step {
+                    1
+                } else {
+                    260
+                });
+
+                let popover_card =
+                    div()
+                        .id("tour-spotlight-card")
+                        .occlude()
+                        .w(px(card_w))
+                        .rounded(theme::r_lg())
+                        .bg(theme::popover_glass())
+                        .border_1()
+                        .border_color(theme::hairline_strong())
+                        .shadow_lg()
+                        .p_4()
+                        .flex()
+                        .flex_col()
+                        .gap(px(10.0))
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .gap_2()
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_color(theme::text_primary())
+                                        .child(title),
+                                )
+                                .child(
+                                    div()
+                                        .id("tour-skip")
+                                        .text_xs()
+                                        .text_color(theme::text_muted())
+                                        .hover(|s| s.text_color(theme::text_primary()))
+                                        .cursor_pointer()
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.active_popover = ActivePopover::None;
+                                            cx.notify();
+                                        }))
+                                        .child("Skip"),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .line_height(px(18.0))
+                                .text_color(theme::text_secondary())
+                                .child(desc),
+                        )
+                        .child(
+                            div()
+                                .pt_2()
+                                .border_t_1()
+                                .border_color(theme::hairline())
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .child(div().flex().items_center().gap(px(5.0)).children(
+                                    (0..5).map(|i| {
                                         div()
                                             .w(if i == step { px(16.0) } else { px(6.0) })
                                             .h(px(6.0))
@@ -13626,69 +14004,73 @@ impl JobHarnessApp {
                                             } else {
                                                 theme::surface_active()
                                             })
-                                    })),
-                            )
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap_2()
-                                    .when(step > 0, |r| {
-                                        r.child(
+                                    }),
+                                ))
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap_2()
+                                        .when(step > 0, |r| {
+                                            r.child(
+                                                div()
+                                                    .id("tour-back")
+                                                    .px_2()
+                                                    .py(px(4.0))
+                                                    .rounded(theme::r_sm())
+                                                    .hover(|s| s.bg(theme::row_hover()))
+                                                    .cursor_pointer()
+                                                    .text_xs()
+                                                    .text_color(theme::text_secondary())
+                                                    .on_click(cx.listener(|this, _, _, cx| {
+                                                        if this.tour_step > 0 {
+                                                            this.tour_prev_step = this.tour_step;
+                                                            this.tour_step -= 1;
+                                                            this.tour_anim_epoch = this
+                                                                .tour_anim_epoch
+                                                                .wrapping_add(1);
+                                                            cx.notify();
+                                                        }
+                                                    }))
+                                                    .child("Back"),
+                                            )
+                                        })
+                                        .child(
                                             div()
-                                                .id("tour-back")
-                                                .px_2()
+                                                .id("tour-next")
+                                                .px_3()
                                                 .py(px(4.0))
                                                 .rounded(theme::r_sm())
+                                                .bg(theme::surface_active())
                                                 .hover(|s| s.bg(theme::row_hover()))
                                                 .cursor_pointer()
                                                 .text_xs()
-                                                .text_color(theme::text_secondary())
+                                                .font_weight(FontWeight::MEDIUM)
+                                                .text_color(theme::text_primary())
                                                 .on_click(cx.listener(|this, _, _, cx| {
-                                                    if this.tour_step > 0 {
-                                                        this.tour_step -= 1;
+                                                    if this.tour_step < 4 {
+                                                        this.tour_prev_step = this.tour_step;
+                                                        this.tour_step += 1;
+                                                        this.tour_anim_epoch =
+                                                            this.tour_anim_epoch.wrapping_add(1);
+                                                        cx.notify();
+                                                    } else {
+                                                        this.active_popover = ActivePopover::None;
                                                         cx.notify();
                                                     }
                                                 }))
-                                                .child("Back"),
-                                        )
-                                    })
-                                    .child(
-                                        div()
-                                            .id("tour-next")
-                                            .px_3()
-                                            .py(px(4.0))
-                                            .rounded(theme::r_sm())
-                                            .bg(theme::surface_active())
-                                            .hover(|s| s.bg(theme::row_hover()))
-                                            .cursor_pointer()
-                                            .text_xs()
-                                            .font_weight(FontWeight::MEDIUM)
-                                            .text_color(theme::text_primary())
-                                            .on_click(cx.listener(|this, _, _, cx| {
-                                                if this.tour_step < 4 {
-                                                    this.tour_step += 1;
-                                                    cx.notify();
-                                                } else {
-                                                    this.active_popover = ActivePopover::None;
-                                                    cx.notify();
-                                                }
-                                            }))
-                                            .child(if step < 4 { "Next →" } else { "Finish" }),
-                                    ),
-                            ),
-                    );
+                                                .child(if step < 4 { "Next" } else { "Done" }),
+                                        ),
+                                ),
+                        );
 
+                // Smoothly morph all 4 cutout scrim walls + spotlight ring + popover (ZERO opacity flash!)
                 Some(
                     div()
                         .id("tour-backdrop")
                         .occlude()
                         .absolute()
                         .inset_0()
-                        .bg(gpui::rgba(0x05050892))
-                        .flex()
-                        .items_center()
-                        .justify_center()
                         .on_mouse_down(
                             MouseButton::Left,
                             cx.listener(|this, _, _, cx| {
@@ -13696,17 +14078,82 @@ impl JobHarnessApp {
                                 cx.notify();
                             }),
                         )
-                        .child(if self.reduce_motion {
-                            card.into_any_element()
-                        } else {
-                            card.with_animation(
-                                SharedString::from(format!("pop-tour-{epoch}-{step}")),
-                                Animation::new(Duration::from_millis(140))
-                                    .with_easing(ease_out_quint()),
-                                |el, t| el.opacity(t).mt(px(-6.0 * (1.0 - t))),
-                            )
-                            .into_any_element()
-                        })
+                        // Top scrim
+                        .child(
+                            div()
+                                .absolute()
+                                .left_0()
+                                .top_0()
+                                .w(px(vw))
+                                .bg(scrim_col)
+                                .with_animation(
+                                    SharedString::from(format!("tour-top-{anim_epoch}")),
+                                    Animation::new(dur).with_easing(ease_out_quint()),
+                                    move |el, t| el.h(px(lerp(y0, y1, t).max(0.0))),
+                                ),
+                        )
+                        // Bottom scrim
+                        .child(
+                            div()
+                                .absolute()
+                                .left_0()
+                                .w(px(vw))
+                                .bg(scrim_col)
+                                .with_animation(
+                                    SharedString::from(format!("tour-bot-{anim_epoch}")),
+                                    Animation::new(dur).with_easing(ease_out_quint()),
+                                    move |el, t| {
+                                        let top = (lerp(y0, y1, t) + lerp(h0, h1, t)).min(vh);
+                                        el.top(px(top)).h(px((vh - top).max(0.0)))
+                                    },
+                                ),
+                        )
+                        // Left scrim
+                        .child(div().absolute().left_0().bg(scrim_col).with_animation(
+                            SharedString::from(format!("tour-left-{anim_epoch}")),
+                            Animation::new(dur).with_easing(ease_out_quint()),
+                            move |el, t| {
+                                el.top(px(lerp(y0, y1, t)))
+                                    .h(px(lerp(h0, h1, t)))
+                                    .w(px(lerp(x0, x1, t).max(0.0)))
+                            },
+                        ))
+                        // Right scrim
+                        .child(div().absolute().bg(scrim_col).with_animation(
+                            SharedString::from(format!("tour-right-{anim_epoch}")),
+                            Animation::new(dur).with_easing(ease_out_quint()),
+                            move |el, t| {
+                                let lx = (lerp(x0, x1, t) + lerp(w0, w1, t)).min(vw);
+                                el.top(px(lerp(y0, y1, t)))
+                                    .h(px(lerp(h0, h1, t)))
+                                    .left(px(lx))
+                                    .w(px((vw - lx).max(0.0)))
+                            },
+                        ))
+                        // Crisp spotlight ring framing the live cutout
+                        .child(
+                            div()
+                                .absolute()
+                                .rounded(theme::r_md())
+                                .border_1()
+                                .border_color(theme::lavender())
+                                .with_animation(
+                                    SharedString::from(format!("tour-ring-{anim_epoch}")),
+                                    Animation::new(dur).with_easing(ease_out_quint()),
+                                    move |el, t| {
+                                        el.left(px(lerp(x0, x1, t)))
+                                            .top(px(lerp(y0, y1, t)))
+                                            .w(px(lerp(w0, w1, t)))
+                                            .h(px(lerp(h0, h1, t)))
+                                    },
+                                ),
+                        )
+                        // Smoothly gliding minimal popover card
+                        .child(div().absolute().child(popover_card).with_animation(
+                            SharedString::from(format!("tour-card-{anim_epoch}")),
+                            Animation::new(dur).with_easing(ease_out_quint()),
+                            move |el, t| el.left(px(lerp(px0, px1, t))).top(px(lerp(py0, py1, t))),
+                        ))
                         .into_any_element(),
                 )
             }
@@ -13987,7 +14434,7 @@ impl JobHarnessApp {
 }
 
 impl Render for JobHarnessApp {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .id("root")
             .track_focus(&self.focus_handle)
@@ -14851,7 +15298,184 @@ impl Render for JobHarnessApp {
                         .into_any_element()
                 })
             })
-            .when_some(self.render_popover(cx), |d, pop| d.child(pop))
+            .when(self.needs_first_run, |d| {
+                d.child(
+                    div()
+                        .id("first-run-launchpad")
+                        .occlude()
+                        .absolute()
+                        .inset_0()
+                        .bg(theme::window_glass())
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(
+                            div()
+                                .w(px(440.0))
+                                .p_6()
+                                .rounded(theme::r_lg())
+                                .bg(theme::panel_glass())
+                                .border_1()
+                                .border_color(theme::hairline_strong())
+                                .flex()
+                                .flex_col()
+                                .gap_4()
+                                .child(
+                                    div()
+                                        .flex()
+                                        .flex_col()
+                                        .gap(px(6.0))
+                                        .child(
+                                            div()
+                                                .text_base()
+                                                .font_weight(FontWeight::SEMIBOLD)
+                                                .text_color(theme::text_primary())
+                                                .child("Welcome to Job Harness"),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .line_height(px(19.0))
+                                                .text_color(theme::text_secondary())
+                                                .child("Keep applications, submitted CVs, and interview briefs in one private folder on your Mac — usable by any AI agent."),
+                                        ),
+                                )
+                                .child(
+                                    div()
+                                        .flex()
+                                        .flex_col()
+                                        .gap_2()
+                                        .child(
+                                            div()
+                                                .id("first-run-sample")
+                                                .w_full()
+                                                .px_4()
+                                                .py(px(10.0))
+                                                .rounded(theme::r_md())
+                                                .bg(theme::white_solid())
+                                                .hover(|s| s.opacity(0.92))
+                                                .cursor_pointer()
+                                                .flex()
+                                                .items_center()
+                                                .justify_between()
+                                                .on_click(cx.listener(|this, _, _, cx| {
+                                                    this.launch_sample_workspace(cx);
+                                                }))
+                                                .child(
+                                                    div()
+                                                        .flex()
+                                                        .flex_col()
+                                                        .gap(px(1.0))
+                                                        .child(
+                                                            div()
+                                                                .text_xs()
+                                                                .font_weight(FontWeight::SEMIBOLD)
+                                                                .text_color(theme::ink_dark())
+                                                                .child("Try with sample data"),
+                                                        )
+                                                        .child(
+                                                            div()
+                                                                .text_size(px(11.0))
+                                                                .text_color(gpui::rgba(0x3f3f46ff))
+                                                                .child("Explore 10 realistic roles, submitted CVs & interview briefs"),
+                                                        ),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .text_xs()
+                                                        .font_weight(FontWeight::SEMIBOLD)
+                                                        .text_color(theme::ink_dark())
+                                                        .child("→"),
+                                                ),
+                                        )
+                                        .child(
+                                            div()
+                                                .id("first-run-create")
+                                                .w_full()
+                                                .px_4()
+                                                .py(px(10.0))
+                                                .rounded(theme::r_md())
+                                                .bg(theme::surface_subtle())
+                                                .border_1()
+                                                .border_color(theme::hairline())
+                                                .hover(|s| s.bg(theme::row_hover()))
+                                                .cursor_pointer()
+                                                .flex()
+                                                .items_center()
+                                                .justify_between()
+                                                .on_click(cx.listener(|this, _, _, cx| {
+                                                    this.create_workspace_dialog(cx);
+                                                }))
+                                                .child(
+                                                    div()
+                                                        .flex()
+                                                        .flex_col()
+                                                        .gap(px(1.0))
+                                                        .child(
+                                                            div()
+                                                                .text_xs()
+                                                                .font_weight(FontWeight::MEDIUM)
+                                                                .text_color(theme::text_primary())
+                                                                .child("Create my workspace"),
+                                                        )
+                                                        .child(
+                                                            div()
+                                                                .text_size(px(11.0))
+                                                                .text_color(theme::text_muted())
+                                                                .child("Start a fresh private folder on disk with guided setup"),
+                                                        ),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .text_xs()
+                                                        .text_color(theme::text_muted())
+                                                        .child("→"),
+                                                ),
+                                        )
+                                        .child(
+                                            div()
+                                                .id("first-run-open")
+                                                .w_full()
+                                                .px_4()
+                                                .py(px(8.0))
+                                                .rounded(theme::r_md())
+                                                .hover(|s| s.bg(theme::row_hover()))
+                                                .cursor_pointer()
+                                                .flex()
+                                                .items_center()
+                                                .justify_between()
+                                                .on_click(cx.listener(|this, _, _, cx| {
+                                                    this.open_workspace_dialog(cx);
+                                                }))
+                                                .child(
+                                                    div()
+                                                        .text_xs()
+                                                        .text_color(theme::text_secondary())
+                                                        .child("Open existing workspace folder…"),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .text_xs()
+                                                        .text_color(theme::text_muted())
+                                                        .child("↗"),
+                                                ),
+                                        ),
+                                )
+                                .child(
+                                    div()
+                                        .pt_2()
+                                        .border_t_1()
+                                        .border_color(theme::hairline())
+                                        .text_size(px(11.0))
+                                        .text_color(theme::text_muted())
+                                        .child("100% local Markdown & SQLite. Nothing leaves your machine unless you connect an agent."),
+                                ),
+                        ),
+                )
+            })
+            .when_some(self.render_popover(window.viewport_size(), cx), |d, pop| {
+                d.child(pop)
+            })
     }
 }
 
@@ -15400,6 +16024,7 @@ fn crisp_caret(id_tag: &'static str, height: f32, reduce_motion: bool) -> AnyEle
 }
 
 /// Left-aligned wrapping inline editor for long profile fields (Target roles, Location, Avoid list, emails).
+#[allow(dead_code)]
 fn inline_editable_text_left(
     text: &str,
     placeholder: &str,

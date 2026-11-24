@@ -62,6 +62,7 @@ Wire it to the user's runtime:
 | **Cursor / Windsurf** | Add the `command` and `args` from `jh connect mcp` under MCP Servers in settings |
 | **OpenCode** | Add the stdio MCP command under `mcp` in `opencode.json` |
 | **Hermes Agent** | Use `jh --root "$PWD" call <tool> --input '{...}'` directly via terminal (0 persistent MCP schema tokens) and schedule routines from `config/career-routines.json` |
+| **Any custom CLI agent** | Register yourself in `~/.config/job-harness/runtimes.json` (`[{"name":"MyAgent","command":"my-agent --stdin","models":["model-id"]}]`) so you appear in the desktop app's Agent selector and in-app chat automatically |
 
 ---
 

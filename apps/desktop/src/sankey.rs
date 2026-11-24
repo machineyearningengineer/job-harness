@@ -111,8 +111,21 @@ pub fn classify_card_leaf(card: &RoleCard) -> SankeyBucket {
     }
 }
 
-pub fn matches_bucket(card: &RoleCard, bucket: SankeyBucket) -> bool {
-    let leaf = classify_card_leaf(card);
+pub fn classify_card_for_mode(card: &RoleCard, all_time: bool) -> SankeyBucket {
+    if !all_time {
+        return classify_card_leaf(card);
+    }
+    match card.furthest_stage.as_deref() {
+        Some("offer") => SankeyBucket::Offer,
+        Some("final") => SankeyBucket::FinalRound,
+        Some("technical") => SankeyBucket::Technical,
+        Some("screening" | "introduction") => SankeyBucket::Screening,
+        _ => classify_card_leaf(card),
+    }
+}
+
+pub fn matches_bucket_for_mode(card: &RoleCard, bucket: SankeyBucket, all_time: bool) -> bool {
+    let leaf = classify_card_for_mode(card, all_time);
     match bucket {
         SankeyBucket::Total => true,
         SankeyBucket::AppliedAll => leaf != SankeyBucket::Saved,
@@ -126,6 +139,11 @@ pub fn matches_bucket(card: &RoleCard, bucket: SankeyBucket) -> bool {
         ),
         other => leaf == other,
     }
+}
+
+#[allow(dead_code)]
+pub fn matches_bucket(card: &RoleCard, bucket: SankeyBucket) -> bool {
+    matches_bucket_for_mode(card, bucket, false)
 }
 
 #[derive(Clone, Copy)]
@@ -285,6 +303,7 @@ fn build_ribbons(
 #[allow(clippy::too_many_arguments)]
 pub fn render_sankey_view<V: 'static>(
     cards: &[RoleCard],
+    all_time: bool,
     zoom_root: Option<SankeyBucket>,
     expand_all: bool,
     zoom_scale: f32,
@@ -314,7 +333,7 @@ pub fn render_sankey_view<V: 'static>(
     let mut closed_other = 0usize;
 
     for c in cards {
-        match classify_card_leaf(c) {
+        match classify_card_for_mode(c, all_time) {
             SankeyBucket::Saved => saved += 1,
             SankeyBucket::NoResponse => no_response += 1,
             SankeyBucket::Screening => screening += 1,
@@ -918,7 +937,7 @@ pub fn render_sankey_view<V: 'static>(
         .map(|b| {
             cards
                 .iter()
-                .filter(|c| matches_bucket(c, b))
+                .filter(|c| matches_bucket_for_mode(c, b, all_time))
                 .cloned()
                 .collect()
         })

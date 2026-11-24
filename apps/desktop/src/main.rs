@@ -1,6 +1,7 @@
 //! Native GPUI desktop binary for Job Harness.
 mod app;
 mod chat_bridge;
+mod demo_seed;
 mod icons;
 mod macos_notify;
 mod markdown;

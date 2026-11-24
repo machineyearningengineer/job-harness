@@ -5,7 +5,10 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 publish = false
-description = "Workspace-first career tools for humans and agents"
+description = "Local-first AI job search workbench, job application tracker, and MCP server in Rust"
+repository = "https://github.com/machineyearningengineer/job-harness"
+keywords = ["job-search", "mcp", "ai-agents", "career", "local-first"]
+categories = ["command-line-utilities", "development-tools"]
 default-run = "job-harness"
 
 [[bin]]

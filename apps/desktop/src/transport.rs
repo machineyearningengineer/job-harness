@@ -76,6 +76,7 @@ pub struct RoleCard {
     pub company: String,
     pub title: String,
     pub stage: String,
+    pub furthest_stage: Option<String>,
     pub outcome: Option<String>,
     pub column: &'static str,
     pub urgency: String,
@@ -413,6 +414,25 @@ impl WorkspaceClient {
                 .unwrap_or(30),
         };
 
+        // Load pipeline records first so attention items can display exact interview countdowns
+        let records = self.load_records()?;
+        let scheduled_by_path: std::collections::HashMap<String, String> = records
+            .iter()
+            .filter_map(|row| {
+                let rec = row["record"].as_str()?;
+                let rpath = if rec.starts_with("applications/") {
+                    rec.to_owned()
+                } else {
+                    format!("applications/{rec}")
+                };
+                let start = row["scheduled_start"]
+                    .as_str()
+                    .filter(|s| !s.is_empty())?
+                    .to_owned();
+                Some((rpath, start))
+            })
+            .collect();
+
         // Map derived urgency by record_path from review_queue
         let mut urgency_by_path: std::collections::HashMap<String, (String, String)> =
             std::collections::HashMap::new();
@@ -425,6 +445,11 @@ impl WorkspaceClient {
                 urgency_by_path.insert(p.clone(), (urg.clone(), reason.clone()));
             }
             if urg == "urgent_now" || urg == "upcoming" {
+                let detail = rpath
+                    .as_deref()
+                    .and_then(|p| scheduled_by_path.get(p))
+                    .and_then(|start| format_interview_countdown(start))
+                    .unwrap_or_else(|| concise_reason(&reason));
                 attention_items.push(AttentionEntry {
                     urgency: urg,
                     company: item["company"]
@@ -432,14 +457,12 @@ impl WorkspaceClient {
                         .or_else(|| item["title"].as_str())
                         .unwrap_or("Role")
                         .to_owned(),
-                    detail: concise_reason(&reason),
+                    detail,
                     record_path: rpath,
                 });
             }
         }
 
-        // Load pipeline records cleanly (local fast path or via find_application)
-        let records = self.load_records()?;
         let total_records = records.len();
         let mut active_cards = Vec::new();
         let mut archived_cards = Vec::new();
@@ -552,12 +575,50 @@ impl WorkspaceClient {
             )
             .to_ascii_lowercase();
 
+            let furthest_stage = if column == "Archive" || stage == "closed" {
+                let explicit = row["furthest_stage"]
+                    .as_str()
+                    .filter(|s| !s.trim().is_empty())
+                    .map(|s| s.trim().to_ascii_lowercase());
+                explicit.or_else(|| {
+                    if status_detail_low.contains("offer") {
+                        Some("offer".into())
+                    } else if status_detail_low.contains("final interview")
+                        || status_detail_low.contains("final round")
+                        || status_detail_low.contains("final stage")
+                        || status_detail_low.contains("on-site")
+                        || status_detail_low.contains("onsite")
+                    {
+                        Some("final".into())
+                    } else if status_detail_low.contains("technical")
+                        || status_detail_low.contains("interview")
+                        || status_detail_low.contains("take-home")
+                        || status_detail_low.contains("coding test")
+                        || status_detail_low.contains("live coding")
+                        || status_detail_low.contains("system design")
+                    {
+                        Some("technical".into())
+                    } else if status_detail_low.contains("screen")
+                        || status_detail_low.contains("intro call")
+                        || status_detail_low.contains("recruiter call")
+                        || status_detail_low.contains("phone call")
+                        || brief_path.is_some()
+                    {
+                        Some("screening".into())
+                    } else {
+                        None
+                    }
+                })
+            } else {
+                Some(stage.clone())
+            };
             let quiet_days = extract_quiet_days(&urgency_reason);
             let card = RoleCard {
                 record_path,
                 company,
                 title: role_title,
                 stage,
+                furthest_stage,
                 outcome,
                 column,
                 urgency,
@@ -1311,6 +1372,54 @@ fn extract_quiet_badge(reason: &str) -> Option<String> {
     } else {
         Some(format!("Follow up {days}d"))
     }
+}
+
+fn format_interview_countdown(iso: &str) -> Option<String> {
+    let dt = chrono::DateTime::parse_from_rfc3339(iso).ok()?;
+    let now = chrono::Utc::now();
+    let delta = dt.with_timezone(&chrono::Utc).signed_duration_since(now);
+    let mins = delta.num_minutes();
+    if mins < -60 {
+        return None;
+    }
+    let local = dt.with_timezone(&chrono::Local);
+    if mins <= 0 {
+        return Some("Interview now".into());
+    }
+    if mins < 120 {
+        return Some(format!("Interview in {mins}m"));
+    }
+    let hours = delta.num_hours();
+    if hours < 24 && local.date_naive() == chrono::Local::now().date_naive() {
+        return Some(format!("Today {}", local.format("%H:%M")));
+    }
+    let days = (local.date_naive() - chrono::Local::now().date_naive()).num_days();
+    if days == 1 {
+        return Some(format!("Tomorrow {}", local.format("%H:%M")));
+    }
+    if days > 1 {
+        return Some(format!("In {days}d ({})", local.format("%a %H:%M")));
+    }
+    Some(format!("In {hours}h"))
+}
+
+pub fn save_default_workspace(root: &Path) -> Result<()> {
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .context("No HOME directory")?;
+    let dir = home.join(".config/job-harness");
+    fs::create_dir_all(&dir)?;
+    let path = dir.join("settings.json");
+    let mut cfg = fs::read(&path)
+        .ok()
+        .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
+        .filter(Value::is_object)
+        .unwrap_or_else(|| json!({}));
+    cfg["workspace"] = json!(root.display().to_string());
+    let tmp = dir.join("settings.json.tmp");
+    fs::write(&tmp, serde_json::to_vec_pretty(&cfg)?)?;
+    fs::rename(&tmp, &path)?;
+    Ok(())
 }
 
 fn concise_reason(reason: &str) -> String {

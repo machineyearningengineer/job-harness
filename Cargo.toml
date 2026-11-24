@@ -8,11 +8,6 @@ version = "0.3.0"
 edition = "2024"
 rust-version = "1.88"
 license = "MIT"
-repository = "https://github.com/machineyearningengineer/job-harness"
-homepage = "https://github.com/machineyearningengineer/job-harness"
-description = "Local-first AI job search workbench, job application tracker, and MCP server in Rust"
-keywords = ["job-search", "mcp", "ai-agents", "career", "local-first"]
-categories = ["command-line-utilities", "development-tools"]
 publish = false
 
 [workspace.dependencies]

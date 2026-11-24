@@ -1,17 +1,21 @@
-name: Private native release
-# Deliberately heavy: an owner explicitly requests all five native targets.
-# Creating or pushing a tag never starts this workflow.
+name: Release native binaries & desktop app
+# Owner explicitly triggers a release build from a pinned version tag.
 on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Existing version tag to build (for example v0.2.0)
+        description: Existing version tag to build (for example v0.3.0)
         type: string
         required: true
       confirm_full_release:
-        description: Build/test all five targets and three components, then publish a private preview
+        description: Build/test all native targets and publish GitHub Release with checksums
         type: boolean
         required: true
+        default: false
+      prerelease:
+        description: Mark release as prerelease
+        type: boolean
+        required: false
         default: false
 permissions:
   contents: read
@@ -26,7 +30,7 @@ defaults:
     shell: bash
 jobs:
   source:
-    if: github.event.repository.private == true && inputs.confirm_full_release
+    if: inputs.confirm_full_release
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     env:
@@ -48,10 +52,10 @@ jobs:
           release_owner=${GH_REPO%%/*}
           release_name=${GH_REPO#*/}
           release_lookup=$(gh api graphql \
-            -f query='query($owner: String!, $name: String!, $tag: String!) { repository(owner: $owner, name: $name) { isPrivate release(tagName: $tag) { tagName } } }' \
+            -f query='query($owner: String!, $name: String!, $tag: String!) { repository(owner: $owner, name: $name) { release(tagName: $tag) { tagName } } }' \
             -f owner="$release_owner" -f name="$release_name" -f tag="$RELEASE_TAG")
-          if ! jq -e '(has("errors") | not) and (.data.repository.isPrivate == true) and (.data.repository | has("release"))' <<< "$release_lookup" > /dev/null; then
-            printf '%s\n' 'Could not verify a private repository and release lookup; no native builds will start.' >&2
+          if ! jq -e '(has("errors") | not) and (.data.repository | has("release"))' <<< "$release_lookup" > /dev/null; then
+            printf '%s\n' 'Could not verify release lookup; no native builds will start.' >&2
             exit 1
           fi
           if ! jq -e '.data.repository.release == null' <<< "$release_lookup" > /dev/null; then
@@ -71,7 +75,7 @@ jobs:
           printf 'commit=%s\n' "$commit" >> "$GITHUB_OUTPUT"
   build:
     needs: source
-    if: github.event.repository.private == true && inputs.confirm_full_release
+    if: inputs.confirm_full_release
     # Each platform validates and links three separate native components.
     timeout-minutes: 90
     strategy:
@@ -171,6 +175,41 @@ jobs:
           cargo +1.97.1 run -p job-harness-dev --locked -- release-stage --component core --tag "$RELEASE_TAG" --target "$RELEASE_TARGET" --binary "target/release/job-harness$RELEASE_SUFFIX" --output dist
           cargo +1.97.1 run -p job-harness-dev --locked -- release-stage --component local --tag "$RELEASE_TAG" --target "$RELEASE_TARGET" --binary "providers/local/native/target/release/job-harness-local$RELEASE_SUFFIX" --output dist
           cargo +1.97.1 run -p job-harness-dev --locked -- release-stage --component desktop --tag "$RELEASE_TAG" --target "$RELEASE_TARGET" --binary "apps/desktop/target/release/job-harness-desktop$RELEASE_SUFFIX" --output dist
+      - name: Package macOS .app bundle
+        if: runner.os == 'macOS'
+        run: |
+          VER="${RELEASE_TAG#v}"
+          APP="dist/Job Harness.app"
+          mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+          install -m 755 "apps/desktop/target/release/job-harness-desktop" "$APP/Contents/MacOS/job-harness-desktop"
+          if [ -f "apps/desktop/icons/icon.icns" ]; then
+            cp "apps/desktop/icons/icon.icns" "$APP/Contents/Resources/icon.icns"
+          fi
+          cat > "$APP/Contents/Info.plist" <<EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>CFBundleDevelopmentRegion</key><string>en</string>
+            <key>CFBundleDisplayName</key><string>Job Harness</string>
+            <key>CFBundleExecutable</key><string>job-harness-desktop</string>
+            <key>CFBundleIconFile</key><string>icon.icns</string>
+            <key>CFBundleIdentifier</key><string>dev.jobharness.desktop</string>
+            <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
+            <key>CFBundleName</key><string>Job Harness</string>
+            <key>CFBundlePackageType</key><string>APPL</string>
+            <key>CFBundleShortVersionString</key><string>${VER}</string>
+            <key>CFBundleVersion</key><string>${VER}</string>
+            <key>NSHighResolutionCapable</key><true/>
+            <key>NSPrincipalClass</key><string>NSApplication</string>
+          </dict>
+          </plist>
+          EOF
+          codesign --force --deep --sign - "$APP"
+          ZIP="Job-Harness-${RELEASE_TAG}-${RELEASE_TARGET}.app.zip"
+          ditto -c -k --sequesterRsrc --keepParent "$APP" "dist/$ZIP"
+          (cd dist && shasum -a 256 "$ZIP" > "${ZIP}.sha256")
+          rm -rf "$APP"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: native-${{ matrix.target }}
@@ -199,13 +238,16 @@ jobs:
         with:
           path: artifacts
           merge-multiple: true
-      - name: Verify private scope and publish checksummed preview
+      - name: Verify checksums and publish release
         env:
           GH_REPO: ${{ github.repository }}
         run: |
-          test "$(gh api "repos/$GH_REPO" --jq '.private')" = true
           test "$(gh api "repos/$GH_REPO/commits/$RELEASE_TAG" --jq '.sha')" = "$RELEASE_COMMIT"
           cd artifacts
           cat ./*.sha256 > SHA256SUMS
           sha256sum --check SHA256SUMS
-          gh release create "$RELEASE_TAG" ./*.tar.gz ./*.zip SHA256SUMS --verify-tag --prerelease --title "Job Harness $RELEASE_TAG" --notes-file "../docs/releases/$RELEASE_TAG.md"
+          PRE_FLAG=""
+          if [ "${{ inputs.prerelease }}" = "true" ]; then
+            PRE_FLAG="--prerelease"
+          fi
+          gh release create "$RELEASE_TAG" ./*.tar.gz ./*.zip SHA256SUMS --verify-tag $PRE_FLAG --title "Job Harness $RELEASE_TAG" --notes-file "../docs/releases/$RELEASE_TAG.md"
