@@ -156,6 +156,46 @@ enum Command {
         #[command(subcommand)]
         action: context::ContextCommand,
     },
+    /// Ephemeral, owner-only (0600), self-destructing secret handoff (never stored in workspace or chat).
+    Secret {
+        #[command(subcommand)]
+        action: SecretCmd,
+    },
+}
+#[derive(Subcommand)]
+enum SecretCmd {
+    /// Request a short-lived secret from the user (pops Desktop Secret Modal or terminal fulfill).
+    Request {
+        #[arg(long)]
+        label: String,
+        #[arg(long)]
+        reason: String,
+        #[arg(long)]
+        url: Option<String>,
+        /// Field spec as `name:Label:secret` or `name:Label:text` (repeatable).
+        #[arg(long = "field")]
+        fields: Vec<String>,
+        #[arg(long, default_value_t = 300)]
+        ttl: u64,
+        #[arg(long, default_value_t = 1)]
+        max_uses: u32,
+    },
+    /// List active and recently resolved ephemeral secret requests (metadata only).
+    List,
+    /// Privately fulfill a pending secret request from the terminal (hidden input, zero history).
+    Fulfill {
+        id: String,
+        #[arg(long)]
+        ttl: Option<u64>,
+    },
+    /// Read one field once; automatically zero-overwrites and deletes on final use.
+    Read { id: String, field: String },
+    /// Return 0600 file paths for command-line `$(cat <file>)` delivery without echoing values.
+    Paths { id: String },
+    /// Immediately zero-overwrite and destroy a secret request.
+    Revoke { id: String },
+    /// Sweep and shred any expired secret payloads.
+    Sweep,
 }
 #[derive(Subcommand)]
 enum Notes {
@@ -632,11 +672,126 @@ async fn execute(cli: Cli) -> anyhow::Result<Option<Value>> {
             return Ok(Some(Engine::open(&root)?.call(tool, &args)));
         }
         Command::Context { action } => context::execute(&root, action).await?,
+        Command::Secret { action } => handle_secret_cmd(action)?,
         Command::Schemas { .. } | Command::ConfigSchema { .. } | Command::Configure { .. } => {
             unreachable!()
         }
     };
     Ok(Some(success(data)))
+}
+
+fn handle_secret_cmd(action: SecretCmd) -> anyhow::Result<Value> {
+    use job_harness_core::secrets::{self, SecretFieldSpec};
+    use std::collections::BTreeMap;
+    match action {
+        SecretCmd::Request {
+            label,
+            reason,
+            url,
+            fields,
+            ttl,
+            max_uses,
+        } => {
+            let parsed_fields: Vec<SecretFieldSpec> = fields
+                .into_iter()
+                .map(|raw| {
+                    let parts: Vec<&str> = raw.split(':').collect();
+                    let name = parts.first().copied().unwrap_or("value").trim().to_owned();
+                    let flabel = parts
+                        .get(1)
+                        .copied()
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or(&name)
+                        .to_owned();
+                    let is_secret = parts
+                        .get(2)
+                        .map(|s| !s.eq_ignore_ascii_case("text"))
+                        .unwrap_or(true);
+                    SecretFieldSpec {
+                        name,
+                        label: flabel,
+                        placeholder: None,
+                        secret: is_secret,
+                    }
+                })
+                .collect();
+            let req = secrets::create_request(label, reason, url, parsed_fields, ttl, max_uses)?;
+            Ok(json!({
+                "request": req,
+                "fulfill_command": format!("jh secret fulfill {}", req.id),
+                "note": "Desktop GUI auto-opens a focused Secret Modal if running; otherwise run fulfill_command in your terminal."
+            }))
+        }
+        SecretCmd::List => {
+            let items = secrets::sweep_expired()?;
+            Ok(json!({ "requests": items }))
+        }
+        SecretCmd::Fulfill { id, ttl } => {
+            let req = secrets::load_request(&id)?;
+            let mut values = BTreeMap::new();
+            for field in &req.fields {
+                eprint!(
+                    "{}{}: ",
+                    field.label,
+                    if field.secret { " (hidden)" } else { "" }
+                );
+                let val = read_secret_line(field.secret)?;
+                if field.secret {
+                    eprintln!();
+                }
+                values.insert(field.name.clone(), val);
+            }
+            let updated = secrets::fulfill_request(&id, &values, ttl)?;
+            Ok(json!({
+                "request": updated,
+                "note": "Secret armed (0600 temp storage, auto-shreds after use or expiry)."
+            }))
+        }
+        SecretCmd::Read { id, field } => {
+            let (value, req) = secrets::consume_field(&id, &field)?;
+            Ok(json!({
+                "value": value,
+                "status": req.status,
+                "uses_remaining": req.uses_remaining,
+            }))
+        }
+        SecretCmd::Paths { id } => {
+            let paths = secrets::deliver_file_paths(&id)?;
+            Ok(json!({
+                "id": id,
+                "files": paths,
+                "note": "Read directly inside commands via $(cat <path>); run `jh secret revoke <id>` immediately after."
+            }))
+        }
+        SecretCmd::Revoke { id } => {
+            let req = secrets::revoke_request(&id)?;
+            Ok(json!({ "request": req, "destroyed": true }))
+        }
+        SecretCmd::Sweep => {
+            let items = secrets::sweep_expired()?;
+            Ok(json!({ "remaining": items.len() }))
+        }
+    }
+}
+
+fn read_secret_line(hidden: bool) -> anyhow::Result<String> {
+    let mut line = String::new();
+    #[cfg(unix)]
+    let toggled = if hidden && std::io::stdin().is_terminal() {
+        std::process::Command::new("stty")
+            .arg("-echo")
+            .status()
+            .is_ok()
+    } else {
+        false
+    };
+    let read_res = std::io::stdin().read_line(&mut line);
+    #[cfg(unix)]
+    if toggled {
+        let _ = std::process::Command::new("stty").arg("echo").status();
+    }
+    read_res?;
+    Ok(line.trim_end_matches(&['\r', '\n'][..]).to_owned())
 }
 
 pub async fn run() {

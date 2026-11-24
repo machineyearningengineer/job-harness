@@ -19,6 +19,7 @@ pub enum AgentRuntime {
     Hermes { binary: PathBuf, profile: String },
     ClaudeCode { binary: PathBuf },
     Codex { binary: PathBuf },
+    Pi { binary: PathBuf },
     Custom { name: String, command: String },
     Unconfigured,
 }
@@ -280,6 +281,9 @@ impl AgentRuntime {
         if let Some(binary) = which_in_path("codex") {
             out.push(Self::Codex { binary });
         }
+        if let Some(binary) = which_in_path("pi") {
+            out.push(Self::Pi { binary });
+        }
         if let Ok(cmd) = std::env::var("JOB_HARNESS_AGENT_CMD")
             && !cmd.trim().is_empty()
         {
@@ -300,6 +304,7 @@ impl AgentRuntime {
             Self::Hermes { .. } => "hermes",
             Self::ClaudeCode { .. } => "claude",
             Self::Codex { .. } => "codex",
+            Self::Pi { .. } => "pi",
             Self::Custom { .. } => "custom",
             Self::Unconfigured => "none",
         }
@@ -310,6 +315,7 @@ impl AgentRuntime {
             Self::Hermes { .. } => "Hermes",
             Self::ClaudeCode { .. } => "Claude",
             Self::Codex { .. } => "Codex",
+            Self::Pi { .. } => "Pi",
             Self::Custom { name, .. } => name.as_str(),
             Self::Unconfigured => "No agent",
         }
@@ -352,7 +358,7 @@ impl AgentRuntime {
                     .to_ascii_lowercase();
                 m.is_empty() || m.contains("opus")
             }
-            Self::Custom { .. } | Self::Unconfigured => false,
+            Self::Pi { .. } | Self::Custom { .. } | Self::Unconfigured => false,
         }
     }
 
@@ -428,6 +434,7 @@ impl AgentRuntime {
             Self::Hermes { profile, .. } => format!("Hermes ({profile})"),
             Self::ClaudeCode { .. } => "Claude Code".into(),
             Self::Codex { .. } => "Codex".into(),
+            Self::Pi { .. } => "Pi".into(),
             Self::Custom { name, .. } => format!("{name} (custom)"),
             Self::Unconfigured => "Not connected".into(),
         }
@@ -447,7 +454,7 @@ impl AgentRuntime {
             Self::Hermes { profile, .. } => list_hermes_sessions(profile),
             Self::ClaudeCode { .. } => list_claude_sessions(workspace),
             Self::Codex { .. } => list_codex_sessions(),
-            Self::Custom { .. } | Self::Unconfigured => Vec::new(),
+            Self::Pi { .. } | Self::Custom { .. } | Self::Unconfigured => Vec::new(),
         }
     }
 
@@ -609,6 +616,28 @@ fn run_streaming(
             non_native_files.extend(attachments.iter().cloned());
             (c, true)
         }
+        AgentRuntime::Pi { binary } => {
+            let mut c = Command::new(binary);
+            c.arg("-p");
+            if opts.resume_existing
+                && let Some(sid) = opts.session_name.as_deref().filter(|s| !s.is_empty())
+            {
+                c.args(["--session", sid]);
+            } else {
+                c.arg("--no-session");
+            }
+            if let Some(m) = opts.model.as_deref().filter(|m| !m.is_empty()) {
+                c.args(["--model", m]);
+            }
+            if let Some(p) = opts.provider.as_deref().filter(|p| !p.is_empty()) {
+                c.args(["--provider", p]);
+            }
+            if let Some(dir) = workspace {
+                c.current_dir(dir);
+            }
+            non_native_files.extend(attachments.iter().cloned());
+            (c, true)
+        }
         AgentRuntime::Custom { command, .. } => {
             let mut c = Command::new("sh");
             c.args(["-lc", command]);
@@ -653,6 +682,7 @@ fn run_streaming(
     if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
         let mut dirs: Vec<PathBuf> = vec![
             home.join(".local/bin"),
+            home.join(".local/share/mise/shims"),
             home.join(".cargo/bin"),
             PathBuf::from("/opt/homebrew/bin"),
             PathBuf::from("/usr/local/bin"),
@@ -1291,11 +1321,26 @@ pub fn extract_citations(text: &str) -> Vec<String> {
 }
 
 fn which_in_path(name: &str) -> Option<PathBuf> {
-    let path = std::env::var_os("PATH")?;
-    for dir in std::env::split_paths(&path) {
-        let candidate = dir.join(name);
-        if candidate.is_file() {
-            return Some(candidate);
+    if let Some(path) = std::env::var_os("PATH") {
+        for dir in std::env::split_paths(&path) {
+            let candidate = dir.join(name);
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+        for dir in [
+            home.join(".local/bin"),
+            home.join(".local/share/mise/shims"),
+            home.join(".cargo/bin"),
+            PathBuf::from("/opt/homebrew/bin"),
+            PathBuf::from("/usr/local/bin"),
+        ] {
+            let candidate = dir.join(name);
+            if candidate.is_file() {
+                return Some(candidate);
+            }
         }
     }
     None
@@ -1548,7 +1593,7 @@ fn list_hermes_sessions(profile: &str) -> Vec<HostSession> {
     if !db.is_file() {
         return Vec::new();
     }
-    let sql = "SELECT s.id, COALESCE(NULLIF((SELECT m.content FROM messages m WHERE m.session_id = s.id AND m.role = 'user' ORDER BY m.id ASC LIMIT 1), ''), s.title, s.id) AS label, s.started_at, COALESCE(s.message_count, 0) AS mc FROM sessions s WHERE COALESCE(s.message_count, 0) > 0 AND COALESCE(s.title, '') NOT LIKE '[bot:%' ORDER BY COALESCE(s.last_activity_at, s.started_at) DESC LIMIT 8;";
+    let sql = "SELECT s.id, COALESCE(NULLIF((SELECT m.content FROM messages m WHERE m.session_id = s.id AND m.role = 'user' ORDER BY m.id ASC LIMIT 1), ''), s.title, s.id) AS label, s.started_at, COALESCE(s.message_count, 0) AS mc FROM sessions s WHERE COALESCE(s.message_count, 0) > 0 AND COALESCE(s.title, '') NOT LIKE '[bot:%' AND COALESCE(s.title, '') NOT LIKE '[Cronjob%' AND COALESCE((SELECT m.content FROM messages m WHERE m.session_id = s.id AND m.role = 'user' ORDER BY m.id ASC LIMIT 1), '') NOT LIKE '[Cronjob%' ORDER BY COALESCE(s.last_activity_at, s.started_at) DESC LIMIT 8;";
     let Ok(out) = Command::new("sqlite3")
         .arg("-readonly")
         .arg("-json")

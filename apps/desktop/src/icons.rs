@@ -70,6 +70,8 @@ const UPLOAD: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="16" heigh
 
 const FOLDER: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></svg>"#;
 
+const LOCK: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="11" x="3" y="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>"#;
+
 impl AssetSource for EmbeddedIcons {
     fn load(&self, path: &str) -> Result<Option<Cow<'static, [u8]>>> {
         let bytes = match path {
@@ -106,6 +108,7 @@ impl AssetSource for EmbeddedIcons {
             "icons/archive.svg" => Some(ARCHIVE.as_bytes()),
             "icons/upload.svg" => Some(UPLOAD.as_bytes()),
             "icons/folder.svg" => Some(FOLDER.as_bytes()),
+            "icons/lock.svg" => Some(LOCK.as_bytes()),
             _ => None,
         };
         Ok(bytes.map(Cow::Borrowed))
@@ -146,6 +149,7 @@ impl AssetSource for EmbeddedIcons {
             "icons/archive.svg".into(),
             "icons/upload.svg".into(),
             "icons/folder.svg".into(),
+            "icons/lock.svg".into(),
         ])
     }
 }

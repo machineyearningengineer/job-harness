@@ -966,7 +966,7 @@ pub fn render_sankey_view<V: 'static>(
                 format!("{matched_count} / {total_in_bucket}")
             } else {
                 match pct {
-                    Some(p) => format!("{total_in_bucket} · {p}%"),
+                    Some(p) => format!("{total_in_bucket} ({p}%)"),
                     None => total_in_bucket.to_string(),
                 }
             };

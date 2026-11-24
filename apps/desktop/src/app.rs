@@ -22,10 +22,11 @@ use gpui::{
     SharedString, StatefulInteractiveElement, Styled, TouchPhase, Window, div, ease_out_quint, img,
     point, prelude::FluentBuilder, px, svg,
 };
+use job_harness_core::secrets::{self, SecretFieldSpec, SecretRequest, SecretStatus};
 use notify::RecommendedWatcher;
 use serde_json::json;
 use std::{
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{BTreeMap, HashMap, HashSet, VecDeque},
     path::PathBuf,
     rc::Rc,
     sync::{
@@ -83,6 +84,7 @@ enum ActiveInput {
     None,
     Search,
     SankeyFilter,
+    SecretField,
     QuickAsk,
     Chat,
     CommandBar,
@@ -102,6 +104,7 @@ enum ActivePopover {
     CommandBar,
     Agent,
     Sessions,
+    Secret,
     Budget,
     Health,
 }
@@ -137,6 +140,7 @@ enum CommandAction {
     ToggleArchive,
     RefreshWorkspace,
     ImportMasterCv,
+    PassSecret,
     AskAgent(String),
 }
 
@@ -319,6 +323,14 @@ pub struct JobHarnessApp {
     sync_epoch: u64,
     toast: Option<(String, Instant)>,
     undo_move: Option<UndoMove>,
+
+    // Ephemeral self-destructing secret handoff (in-memory only while typing, then 0600 temp files)
+    active_secret_req: Option<SecretRequest>,
+    secret_drafts: Vec<String>,
+    secret_field_idx: usize,
+    armed_secrets: Vec<SecretRequest>,
+    seen_pending_secrets: HashSet<String>,
+    known_ready_secrets: HashMap<String, String>,
 }
 
 impl Focusable for JobHarnessApp {
@@ -488,8 +500,34 @@ impl JobHarnessApp {
             sync_epoch: 1,
             toast: None,
             undo_move: None,
+            active_secret_req: None,
+            secret_drafts: Vec::new(),
+            secret_field_idx: 0,
+            armed_secrets: Vec::new(),
+            seen_pending_secrets: HashSet::new(),
+            known_ready_secrets: HashMap::new(),
         };
         app.refresh_snapshot_async(false, cx);
+        // Background ephemeral secret vault watcher: auto-opens Secret Modal on agent requests,
+        // updates live TTL countdown, and confirms when consumed & shredded or expired.
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(Duration::from_millis(1200))
+                    .await;
+                let swept = cx
+                    .background_executor()
+                    .spawn(async move { secrets::sweep_expired().unwrap_or_default() })
+                    .await;
+                let ok = this.update(cx, |app, cx| {
+                    app.sync_secret_vault_state(swept, cx);
+                });
+                if ok.is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
         if let Ok(scene) = std::env::var("JOB_HARNESS_SHOWCASE_SCENE")
             && !scene.trim().is_empty()
         {
@@ -1806,6 +1844,11 @@ impl JobHarnessApp {
             ),
             ("Refresh workspace", "⌘R", CommandAction::RefreshWorkspace),
             (
+                "Pass a secret to agent…",
+                "1-use",
+                CommandAction::PassSecret,
+            ),
+            (
                 "Import / Replace Master CV PDF",
                 "CV",
                 CommandAction::ImportMasterCv,
@@ -1863,8 +1906,170 @@ impl JobHarnessApp {
                 self.refresh_snapshot_async(true, cx);
             }
             CommandAction::ImportMasterCv => self.import_cv_dialog(cx),
+            CommandAction::PassSecret => self.open_proactive_secret_modal(cx),
             CommandAction::AskAgent(prompt) => self.submit_prompt(prompt, false, cx),
         }
+    }
+
+    fn sync_secret_vault_state(&mut self, all: Vec<SecretRequest>, cx: &mut Context<Self>) {
+        let mut new_ready_map: HashMap<String, String> = HashMap::new();
+        let mut armed = Vec::new();
+        let mut newly_pending: Option<SecretRequest> = None;
+
+        for req in &all {
+            match req.status {
+                SecretStatus::Pending => {
+                    if self.seen_pending_secrets.insert(req.id.clone())
+                        && self.active_secret_req.is_none()
+                    {
+                        newly_pending = Some(req.clone());
+                    }
+                }
+                SecretStatus::Ready => {
+                    new_ready_map.insert(req.id.clone(), req.label.clone());
+                    armed.push(req.clone());
+                }
+                SecretStatus::Consumed => {
+                    if let Some(lbl) = self.known_ready_secrets.remove(&req.id) {
+                        self.set_toast(format!("Secret consumed & shredded — {lbl}"), cx);
+                    }
+                }
+                SecretStatus::Expired => {
+                    if let Some(lbl) = self.known_ready_secrets.remove(&req.id) {
+                        self.set_toast(format!("Secret expired & destroyed — {lbl}"), cx);
+                    }
+                }
+                SecretStatus::Revoked => {
+                    self.known_ready_secrets.remove(&req.id);
+                }
+            }
+        }
+        let changed = self.armed_secrets != armed || newly_pending.is_some();
+        self.armed_secrets = armed;
+        self.known_ready_secrets = new_ready_map;
+        if let Some(req) = newly_pending {
+            self.open_secret_modal(req, cx);
+            return;
+        }
+        if changed || !self.armed_secrets.is_empty() {
+            cx.notify();
+        }
+    }
+
+    fn open_secret_modal(&mut self, req: SecretRequest, cx: &mut Context<Self>) {
+        self.secret_drafts = vec![String::new(); req.fields.len()];
+        self.secret_field_idx = 0;
+        self.active_secret_req = Some(req);
+        self.active_popover = ActivePopover::Secret;
+        self.active_input = ActiveInput::SecretField;
+        self.cmd_anim_epoch = self.cmd_anim_epoch.wrapping_add(1);
+        cx.notify();
+    }
+
+    fn open_proactive_secret_modal(&mut self, cx: &mut Context<Self>) {
+        let fields = vec![
+            SecretFieldSpec {
+                name: "username".into(),
+                label: "Username or email".into(),
+                placeholder: Some("name@example.com".into()),
+                secret: false,
+            },
+            SecretFieldSpec {
+                name: "password".into(),
+                label: "Password or token".into(),
+                placeholder: Some("Stored 0600 in temp (1-use)".into()),
+                secret: true,
+            },
+        ];
+        if let Ok(req) = secrets::create_request(
+            "One-time credential".into(),
+            "Passed privately via ephemeral 0600 file — never enters chat history or Git.".into(),
+            None,
+            fields,
+            300,
+            1,
+        ) {
+            self.seen_pending_secrets.insert(req.id.clone());
+            self.open_secret_modal(req, cx);
+        }
+    }
+
+    fn close_secret_modal(&mut self, revoke_if_pending: bool, cx: &mut Context<Self>) {
+        if let Some(req) = self.active_secret_req.take()
+            && revoke_if_pending
+            && req.status == SecretStatus::Pending
+        {
+            let id = req.id;
+            std::thread::spawn(move || {
+                let _ = secrets::revoke_request(&id);
+            });
+        }
+        for s in &mut self.secret_drafts {
+            s.clear();
+        }
+        self.secret_drafts.clear();
+        self.secret_field_idx = 0;
+        if self.active_popover == ActivePopover::Secret {
+            self.active_popover = ActivePopover::None;
+        }
+        if self.active_input == ActiveInput::SecretField {
+            self.active_input = ActiveInput::None;
+        }
+        cx.notify();
+    }
+
+    fn submit_secret_modal(&mut self, cx: &mut Context<Self>) {
+        let Some(req) = self.active_secret_req.clone() else {
+            return;
+        };
+        let mut values = BTreeMap::new();
+        for (idx, field) in req.fields.iter().enumerate() {
+            let val = self
+                .secret_drafts
+                .get(idx)
+                .map(|s| s.trim().to_owned())
+                .unwrap_or_default();
+            if val.is_empty() {
+                self.secret_field_idx = idx;
+                self.set_toast(format!("Enter {} first", field.label), cx);
+                return;
+            }
+            values.insert(field.name.clone(), val);
+        }
+        let id = req.id.clone();
+        let label = req.label.clone();
+        let field_names: Vec<String> = req.fields.iter().map(|f| f.name.clone()).collect();
+        match secrets::fulfill_request(&id, &values, Some(300)) {
+            Ok(armed) => {
+                self.known_ready_secrets
+                    .insert(armed.id.clone(), armed.label.clone());
+                self.armed_secrets.retain(|r| r.id != armed.id);
+                self.armed_secrets.insert(0, armed);
+                self.close_secret_modal(false, cx);
+                if self.chat_input.trim().is_empty() {
+                    let fields_hint = field_names.join(", ");
+                    self.chat_input = format!(
+                        "One-time secret ready (id: {id}, fields: {fields_hint}). Read once via `jh secret read {id} <field>`."
+                    );
+                }
+                self.set_toast(
+                    format!("Armed 1-use secret ({label}) — 5m self-destruct"),
+                    cx,
+                );
+            }
+            Err(e) => {
+                self.set_toast(format!("Could not arm secret: {e}"), cx);
+            }
+        }
+    }
+
+    fn destroy_secret_now(&mut self, id: String, cx: &mut Context<Self>) {
+        self.armed_secrets.retain(|r| r.id != id);
+        self.known_ready_secrets.remove(&id);
+        std::thread::spawn(move || {
+            let _ = secrets::revoke_request(&id);
+        });
+        self.set_toast("Secret overwritten and destroyed", cx);
     }
 
     fn import_cv_dialog(&mut self, cx: &mut Context<Self>) {
@@ -2286,6 +2491,11 @@ impl JobHarnessApp {
                 ActiveInput::CommandBar => std::mem::take(&mut self.command_query),
                 ActiveInput::Search => std::mem::take(&mut self.search_query),
                 ActiveInput::SankeyFilter => std::mem::take(&mut self.sankey_filter),
+                ActiveInput::SecretField => self
+                    .secret_drafts
+                    .get_mut(self.secret_field_idx)
+                    .map(std::mem::take)
+                    .unwrap_or_default(),
                 ActiveInput::QuickAsk => std::mem::take(&mut self.quick_input),
                 ActiveInput::Chat => std::mem::take(&mut self.chat_input),
                 ActiveInput::ModelField => std::mem::take(&mut self.model_draft),
@@ -2328,6 +2538,14 @@ impl JobHarnessApp {
                             self.sankey_filter.clear();
                         }
                         self.sankey_filter.push_str(clean.trim());
+                    }
+                    ActiveInput::SecretField => {
+                        if let Some(buf) = self.secret_drafts.get_mut(self.secret_field_idx) {
+                            if replace_all {
+                                buf.clear();
+                            }
+                            buf.push_str(clean.trim());
+                        }
                     }
                     ActiveInput::QuickAsk => {
                         if replace_all {
@@ -2424,6 +2642,10 @@ impl JobHarnessApp {
             if self.expanded_reader.is_some() {
                 self.expanded_reader = None;
                 cx.notify();
+                return;
+            }
+            if self.active_popover == ActivePopover::Secret {
+                self.close_secret_modal(true, cx);
                 return;
             }
             if self.active_popover != ActivePopover::None || self.quick_popover_open {
@@ -2571,6 +2793,7 @@ impl JobHarnessApp {
         let target_buf = match active_in {
             ActiveInput::Search => Some(&mut self.search_query),
             ActiveInput::SankeyFilter => Some(&mut self.sankey_filter),
+            ActiveInput::SecretField => self.secret_drafts.get_mut(self.secret_field_idx),
             ActiveInput::QuickAsk => Some(&mut self.quick_input),
             ActiveInput::Chat => Some(&mut self.chat_input),
             ActiveInput::ModelField => Some(&mut self.model_draft),
@@ -2589,6 +2812,16 @@ impl JobHarnessApp {
                         };
                         cx.notify();
                     }
+                }
+                "tab" if active_in == ActiveInput::SecretField => {
+                    let n = self.secret_drafts.len().max(1);
+                    self.secret_field_idx = if shift {
+                        (self.secret_field_idx + n - 1) % n
+                    } else {
+                        (self.secret_field_idx + 1) % n
+                    };
+                    self.input_all_selected = false;
+                    cx.notify();
                 }
                 "tab" if active_in == ActiveInput::Chat => {
                     let items = self.chat_picker_items();
@@ -2665,6 +2898,14 @@ impl JobHarnessApp {
                             }
                             ActiveInput::InlineConfig => {
                                 self.commit_inline_config(cx);
+                            }
+                            ActiveInput::SecretField => {
+                                if self.secret_field_idx + 1 < self.secret_drafts.len() {
+                                    self.secret_field_idx += 1;
+                                    cx.notify();
+                                } else {
+                                    self.submit_secret_modal(cx);
+                                }
                             }
                             _ => {}
                         }
@@ -2913,43 +3154,54 @@ impl JobHarnessApp {
                             }))
                             .child("⌘K"),
                     )
-                    // Tidy / Cleanup button
+                    // Icon-only Tidy button matching Bell, with crisp corner count badge when tidy_n > 0
                     .child(
                         div()
                             .id("btn-tidy")
-                            .px_2()
-                            .py_1()
+                            .relative()
+                            .w(px(28.0))
+                            .h(px(28.0))
                             .rounded(theme::r_sm())
                             .flex()
                             .items_center()
-                            .gap_1()
+                            .justify_center()
                             .cursor_pointer()
                             .when(tidy_open, |d| d.bg(theme::surface_active()))
                             .hover(|s| s.bg(theme::row_hover()))
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.open_right_drawer(RightDrawer::Tidy, cx);
                             }))
-                            .child(svg().path("icons/tidy.svg").size(px(14.0)).text_color(
-                                if tidy_n > 0 {
-                                    theme::lavender()
+                            .child(svg().path("icons/tidy.svg").size(px(15.0)).text_color(
+                                if tidy_open {
+                                    theme::text_primary()
                                 } else {
                                     theme::text_secondary()
                                 },
                             ))
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(if tidy_open {
-                                        theme::text_primary()
-                                    } else {
-                                        theme::text_secondary()
-                                    })
-                                    .child(if tidy_n > 0 {
-                                        format!("Tidy · {tidy_n}")
-                                    } else {
-                                        "Tidy".into()
-                                    }),
-                            ),
+                            .when(tidy_n > 0, |d| {
+                                d.child(
+                                    div()
+                                        .absolute()
+                                        .top(px(1.0))
+                                        .right(px(0.0))
+                                        .min_w(px(14.0))
+                                        .h(px(14.0))
+                                        .px(px(3.0))
+                                        .rounded(px(99.0))
+                                        .bg(theme::lavender())
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .text_size(px(8.5))
+                                        .font_weight(FontWeight::BOLD)
+                                        .text_color(theme::ink_dark())
+                                        .child(if tidy_n > 99 {
+                                            "99".to_owned()
+                                        } else {
+                                            tidy_n.to_string()
+                                        }),
+                                )
+                            }),
                     )
                     .child(
                         div()
@@ -3429,7 +3681,7 @@ impl JobHarnessApp {
                                             .overflow_hidden()
                                             .text_xs()
                                             .text_color(theme::text_muted())
-                                            .child(format!("· {model_badge} ▾")),
+                                            .child(format!("{model_badge} ▾")),
                                     ),
                             )
                             .when(self.runtime.supports_fast_mode(&self.agent_opts), |r| {
@@ -3653,7 +3905,7 @@ impl JobHarnessApp {
                                 .overflow_hidden()
                                 .text_size(px(11.0))
                                 .text_color(theme::text_secondary())
-                                .child(format!("Resuming · {}", truncate_end(&lbl, 34))),
+                                .child(format!("Resuming: {}", truncate_end(&lbl, 34))),
                         )
                         .child(
                             div()
@@ -3829,7 +4081,7 @@ impl JobHarnessApp {
                                     let step_count = msg.steps.len();
                                     let tok_suffix = msg
                                         .total_tokens
-                                        .map(|t| format!(" · {}", format_tokens(t)))
+                                        .map(|t| format!("  {}", format_tokens(t)))
                                         .unwrap_or_default();
                                     let header_label = if actively_writing {
                                         let base = if self.stream_status.is_empty() {
@@ -3837,12 +4089,12 @@ impl JobHarnessApp {
                                         } else {
                                             self.stream_status.clone()
                                         };
-                                        format!("{base} · {:.0}s", elapsed_s.max(0.0))
+                                        format!("{base}  {:.0}s", elapsed_s.max(0.0))
                                     } else if step_count > 0 {
                                         let noun = if step_count == 1 { "step" } else { "steps" };
-                                        format!("{step_count} {noun} · {elapsed_s:.1}s{tok_suffix}")
+                                        format!("{step_count} {noun}  {elapsed_s:.1}s{tok_suffix}")
                                     } else {
-                                        format!("Thought · {elapsed_s:.1}s{tok_suffix}")
+                                        format!("Thought  {elapsed_s:.1}s{tok_suffix}")
                                     };
 
                                     let dot = div().w(px(6.0)).h(px(6.0)).rounded(px(99.0)).bg(
@@ -4012,7 +4264,7 @@ impl JobHarnessApp {
                                                 step.name.clone()
                                             } else {
                                                 format!(
-                                                    "{} · {}",
+                                                    "{}  {}",
                                                     step.name,
                                                     truncate_end(&step.detail, detail_cap)
                                                 )
@@ -5058,7 +5310,7 @@ impl JobHarnessApp {
                                                 .overflow_hidden()
                                                 .text_size(px(11.5))
                                                 .text_color(theme::lavender())
-                                                .child(format!("{company} · {short}")),
+                                                .child(format!("{company} — {short}")),
                                         )
                                         .child(
                                             div()
@@ -5168,9 +5420,9 @@ impl JobHarnessApp {
                                     self.pasted_snippets.iter().enumerate().map(|(pi, txt)| {
                                         let lines = txt.lines().count().max(1);
                                         let paste_label = if lines > 1 {
-                                            format!("Pasted · {lines} lines")
+                                            format!("Pasted ({lines} lines)")
                                         } else {
-                                            format!("Pasted · {} chars", txt.chars().count())
+                                            format!("Pasted ({} chars)", txt.chars().count())
                                         };
                                         div()
                                             .px_2()
@@ -5473,13 +5725,13 @@ impl JobHarnessApp {
         div()
             .flex()
             .flex_col()
-            .gap_3()
+            .gap_4()
             // 1. Clean 1-row equal-width segmented Runtime switcher (never wraps onto 2 rows)
             .child(
                 div()
                     .flex()
                     .flex_col()
-                    .gap_1()
+                    .gap(px(6.0))
                     .child(
                         div()
                             .text_xs()
@@ -5562,11 +5814,11 @@ impl JobHarnessApp {
                                 let prov_tag = preset
                                     .provider_label
                                     .as_deref()
-                                    .map(|s| truncate_end(s, 12));
+                                    .map(|s| truncate_end(s, 14));
                                 div()
                                     .id(SharedString::from(format!("{scope}-preset-{i}")))
-                                    .px_2()
-                                    .py(px(6.0))
+                                    .px_3()
+                                    .py(px(7.0))
                                     .rounded(theme::r_sm())
                                     .bg(if is_selected {
                                         theme::surface_active()
@@ -5578,7 +5830,7 @@ impl JobHarnessApp {
                                     .flex()
                                     .items_center()
                                     .justify_between()
-                                    .gap_2()
+                                    .gap_3()
                                     .text_xs()
                                     .on_click(cx.listener(move |this, _, _, cx| {
                                         if i == 0 {
@@ -5602,7 +5854,7 @@ impl JobHarnessApp {
                                             } else {
                                                 theme::text_secondary()
                                             })
-                                            .child(truncate_end(&preset.label, 20)),
+                                            .child(truncate_end(&preset.label, 30)),
                                     )
                                     .child(
                                         div()
@@ -5613,13 +5865,17 @@ impl JobHarnessApp {
                                             .when_some(prov_tag, |r, tag| {
                                                 r.child(
                                                     div()
+                                                        .text_size(px(11.0))
                                                         .text_color(theme::text_muted())
                                                         .child(tag),
                                                 )
                                             })
                                             .when(is_selected, |r| {
                                                 r.child(
-                                                    div().text_color(theme::lavender()).child("●"),
+                                                    svg()
+                                                        .path("icons/check.svg")
+                                                        .size(px(12.0))
+                                                        .text_color(theme::emerald()),
                                                 )
                                             }),
                                     )
@@ -7111,6 +7367,53 @@ impl JobHarnessApp {
                             .items_center()
                             .gap_2()
                             .flex_shrink_0()
+                            .when_some(self.armed_secrets.first().cloned(), |d, sec| {
+                                let rem = sec.remaining_secs(secrets::now_unix());
+                                let mins = rem / 60;
+                                let secs = rem % 60;
+                                let destroy_id = sec.id.clone();
+                                d.child(
+                                    div()
+                                        .px_2()
+                                        .py_1()
+                                        .rounded(theme::r_sm())
+                                        .bg(theme::amber_wash())
+                                        .border_1()
+                                        .border_color(gpui::rgba(0xfacc1544))
+                                        .flex()
+                                        .items_center()
+                                        .gap_2()
+                                        .text_xs()
+                                        .child(
+                                            svg()
+                                                .path("icons/lock.svg")
+                                                .size(px(12.0))
+                                                .text_color(theme::amber_text()),
+                                        )
+                                        .child(div().text_color(theme::amber_text()).child(
+                                            format!(
+                                                "{} {mins}:{secs:02}",
+                                                truncate_end(&sec.label, 18)
+                                            ),
+                                        ))
+                                        .child(
+                                            div()
+                                                .id("dock-destroy-secret")
+                                                .px(px(5.0))
+                                                .py(px(1.5))
+                                                .rounded(theme::r_xs())
+                                                .bg(theme::surface_active())
+                                                .hover(|s| s.bg(theme::rose_wash()))
+                                                .cursor_pointer()
+                                                .text_size(px(10.5))
+                                                .text_color(theme::rose_text())
+                                                .on_click(cx.listener(move |this, _, _, cx| {
+                                                    this.destroy_secret_now(destroy_id.clone(), cx);
+                                                }))
+                                                .child("Destroy"),
+                                        ),
+                                )
+                            })
                             .when_some(self.toast.clone(), |d, (msg, _)| {
                                 let has_undo = self.undo_move.is_some();
                                 d.child(
@@ -7348,7 +7651,7 @@ impl JobHarnessApp {
                                             div()
                                                 .text_xs()
                                                 .text_color(theme::text_muted())
-                                                .child(format!("{}  ·  {}", role.title, stage_label)),
+                                                .child(format!("{}  —  {}", role.title, stage_label)),
                                         ),
                                 )
                                 .child(
@@ -7897,100 +8200,147 @@ impl JobHarnessApp {
                                                         ),
                                                 ),
                                         )
-                                        // Brief layer / stage slide switcher when multiple parts exist
+                                        // Compact 1-row section stepper (no multi-line tab soup in narrow drawer!)
                                         .when(sec_count >= 2, |d| {
+                                            let cur_label = match active_sec {
+                                                Some(i) => format!(
+                                                    "{}/{}  {}",
+                                                    i + 1,
+                                                    sec_count,
+                                                    truncate_end(&sections[i].label, 24)
+                                                ),
+                                                None => format!("All {sec_count} sections"),
+                                            };
                                             d.child(
                                                 div()
-                                                    .flex()
-                                                    .flex_col()
-                                                    .gap_2()
                                                     .pb_2()
                                                     .border_b_1()
                                                     .border_color(theme::hairline())
+                                                    .flex()
+                                                    .items_center()
+                                                    .justify_between()
+                                                    .gap_2()
                                                     .child(
                                                         div()
+                                                            .id("bsec-all")
+                                                            .min_w_0()
+                                                            .overflow_hidden()
+                                                            .px_2()
+                                                            .py(px(3.0))
+                                                            .rounded(theme::r_xs())
+                                                            .when(active_sec.is_some(), |b| {
+                                                                b.bg(theme::surface_subtle())
+                                                            })
+                                                            .hover(|s| s.bg(theme::row_hover()))
+                                                            .cursor_pointer()
+                                                            .text_xs()
+                                                            .text_color(if active_sec.is_some() {
+                                                                theme::text_primary()
+                                                            } else {
+                                                                theme::text_muted()
+                                                            })
+                                                            .on_click(cx.listener(
+                                                                |this, _, _, cx| {
+                                                                    this.brief_section = None;
+                                                                    this.brief_section_epoch =
+                                                                        this.brief_section_epoch
+                                                                            .wrapping_add(1);
+                                                                    cx.notify();
+                                                                },
+                                                            ))
+                                                            .child(cur_label),
+                                                    )
+                                                    .child(
+                                                        div()
+                                                            .flex_shrink_0()
                                                             .flex()
-                                                            .flex_wrap()
-                                                            .gap_1()
+                                                            .items_center()
+                                                            .gap(px(2.0))
                                                             .child(
                                                                 div()
-                                                                    .id("bsec-all")
-                                                                    .px_2()
-                                                                    .py(px(2.0))
-                                                                    .rounded(theme::r_sm())
-                                                                    .bg(if active_sec.is_none() {
-                                                                        theme::surface_active()
-                                                                    } else {
-                                                                        gpui::rgba(0x00000000)
+                                                                    .id("bsec-prev")
+                                                                    .w(px(22.0))
+                                                                    .h(px(22.0))
+                                                                    .rounded(theme::r_xs())
+                                                                    .hover(|s| {
+                                                                        s.bg(theme::row_hover())
+                                                                            .text_color(
+                                                                                theme::text_primary(),
+                                                                            )
                                                                     })
-                                                                    .text_xs()
-                                                                    .text_color(
-                                                                        if active_sec.is_none() {
-                                                                            theme::text_primary()
-                                                                        } else {
-                                                                            theme::text_muted()
-                                                                        },
-                                                                    )
+                                                                    .flex()
+                                                                    .items_center()
+                                                                    .justify_center()
                                                                     .cursor_pointer()
+                                                                    .text_xs()
+                                                                    .text_color(theme::text_muted())
                                                                     .on_click(cx.listener(
-                                                                        |this, _, _, cx| {
+                                                                        move |this, _, _, cx| {
                                                                             this.brief_section =
-                                                                                None;
+                                                                                match this
+                                                                                    .brief_section
+                                                                                {
+                                                                                    None
+                                                                                    | Some(0) => {
+                                                                                        Some(
+                                                                                            sec_count
+                                                                                                .saturating_sub(
+                                                                                                    1,
+                                                                                                ),
+                                                                                        )
+                                                                                    }
+                                                                                    Some(i) => {
+                                                                                        Some(i - 1)
+                                                                                    }
+                                                                                };
                                                                             this.brief_section_epoch =
                                                                                 this.brief_section_epoch
                                                                                     .wrapping_add(1);
                                                                             cx.notify();
                                                                         },
                                                                     ))
-                                                                    .child("All"),
+                                                                    .child("‹"),
                                                             )
-                                                            .children(
-                                                                sections.iter().enumerate().map(
-                                                                    |(idx, sec)| {
-                                                                        let on =
-                                                                            active_sec == Some(idx);
-                                                                        div()
-                                                                            .id(SharedString::from(
-                                                                                format!(
-                                                                                    "bsec-{idx}"
-                                                                                ),
-                                                                            ))
-                                                                            .px_2()
-                                                                            .py(px(2.0))
-                                                                            .rounded(theme::r_sm())
-                                                                            .bg(if on {
-                                                                                theme::surface_active()
-                                                                            } else {
-                                                                                gpui::rgba(0x00000000)
-                                                                            })
-                                                                            .hover(|s| {
-                                                                                s.bg(
-                                                                                    theme::row_hover(),
-                                                                                )
-                                                                            })
-                                                                            .text_xs()
-                                                                            .text_color(if on {
-                                                                                theme::lavender()
-                                                                            } else {
-                                                                                theme::text_muted()
-                                                                            })
-                                                                            .cursor_pointer()
-                                                                            .on_click(cx.listener(
-                                                                                move |this,
-                                                                                      _,
-                                                                                      _,
-                                                                                      cx| {
-                                                                                    this.brief_section =
-                                                                                        Some(idx);
-                                                                                    this.brief_section_epoch =
-                                                                                        this.brief_section_epoch
-                                                                                            .wrapping_add(1);
-                                                                                    cx.notify();
-                                                                                },
-                                                                            ))
-                                                                            .child(sec.label.clone())
-                                                                    },
-                                                                ),
+                                                            .child(
+                                                                div()
+                                                                    .id("bsec-next")
+                                                                    .w(px(22.0))
+                                                                    .h(px(22.0))
+                                                                    .rounded(theme::r_xs())
+                                                                    .hover(|s| {
+                                                                        s.bg(theme::row_hover())
+                                                                            .text_color(
+                                                                                theme::text_primary(),
+                                                                            )
+                                                                    })
+                                                                    .flex()
+                                                                    .items_center()
+                                                                    .justify_center()
+                                                                    .cursor_pointer()
+                                                                    .text_xs()
+                                                                    .text_color(theme::text_muted())
+                                                                    .on_click(cx.listener(
+                                                                        move |this, _, _, cx| {
+                                                                            this.brief_section =
+                                                                                match this
+                                                                                    .brief_section
+                                                                                {
+                                                                                    None => Some(0),
+                                                                                    Some(i)
+                                                                                        if i + 1
+                                                                                            < sec_count =>
+                                                                                    {
+                                                                                        Some(i + 1)
+                                                                                    }
+                                                                                    Some(_) => None,
+                                                                                };
+                                                                            this.brief_section_epoch =
+                                                                                this.brief_section_epoch
+                                                                                    .wrapping_add(1);
+                                                                            cx.notify();
+                                                                        },
+                                                                    ))
+                                                                    .child("›"),
                                                             ),
                                                     ),
                                             )
@@ -8420,7 +8770,7 @@ impl JobHarnessApp {
                                                 .iter()
                                                 .map(|r| r.short_name())
                                                 .collect::<Vec<_>>()
-                                                .join(" · "),
+                                                .join(", "),
                                         )),
                                 ),
                         )
@@ -8666,7 +9016,7 @@ impl JobHarnessApp {
                                         .pl_3()
                                         .text_xs()
                                         .text_color(theme::text_muted())
-                                        .child(format!("· {title}"))
+                                        .child(title.to_string())
                                 }))
                                 .child(
                                     div()
@@ -8953,7 +9303,7 @@ impl JobHarnessApp {
                                                         this.open_citation(p, cx);
                                                     } else {
                                                         this.expanded_reader = Some((
-                                                            format!("Digest · {at_copy}"),
+                                                            format!("Digest ({at_copy})"),
                                                             summary_copy.clone(),
                                                         ));
                                                         cx.notify();
@@ -9039,16 +9389,17 @@ impl JobHarnessApp {
                                                 )),
                                         ),
                                 )
-                                .child(self.render_agent_controls("set", true, cx))
+                                .child(self.render_agent_controls("set", false, cx))
                                 .child({
                                     let open = self.show_connect_help;
-                                    let connect_rows: [(&str, &str, &str); 4] = [
+                                    let connect_rows: [(&str, &str, &str); 5] = [
                                         (
                                             "ChatGPT (Codex CLI)",
                                             "codex login",
                                             "codex login",
                                         ),
                                         ("Claude Code", "claude", "claude"),
+                                        ("Pi coding agent", "pi auth login", "pi auth login"),
                                         (
                                             "Hermes / local models",
                                             "hermes model",
@@ -9239,7 +9590,10 @@ impl JobHarnessApp {
                             let agent_servers: Vec<_> = self
                                 .mcp_servers
                                 .iter()
-                                .filter(|s| matches!(s.scope, McpScope::AgentOnly(_)))
+                                .filter(|s| {
+                                    matches!(s.scope, McpScope::AgentOnly(_))
+                                        && s.visible_to(active_kind)
+                                })
                                 .collect();
                             div()
                                 .pt_3()
@@ -9320,8 +9674,8 @@ impl JobHarnessApp {
                                                         .bg(theme::surface_subtle())
                                                         .hover(|s| s.bg(theme::row_hover()))
                                                         .cursor_pointer()
-                                                        .text_size(px(10.0))
-                                                        .text_color(theme::text_secondary())
+                                                        .text_size(px(10.5))
+                                                        .text_color(theme::text_primary())
                                                         .on_click(cx.listener(
                                                             move |this, _, _, cx| {
                                                                 cx.write_to_clipboard(
@@ -9330,29 +9684,29 @@ impl JobHarnessApp {
                                                                     ),
                                                                 );
                                                                 this.set_toast(
-                                                                    "Copied MCP registration command",
+                                                                    "Copied `jh connect mcp` command",
                                                                     cx,
                                                                 );
                                                             },
                                                         ))
-                                                        .child("Active · Copy MCP"),
+                                                        .child("Connected"),
                                                 ),
                                         )
                                         .children(caps.into_iter().map(|(label, tier, access)| {
                                             let (dot_col, status_txt, status_col) = match access {
                                                 CapabilityAccess::Active { global: true, .. } => (
                                                     theme::emerald(),
-                                                    "Active · Shared".to_owned(),
+                                                    "Shared".to_owned(),
                                                     theme::text_primary(),
                                                 ),
                                                 CapabilityAccess::Active { global: false, .. } => (
                                                     theme::emerald(),
-                                                    format!("Active · {active_name}"),
+                                                    active_name.clone(),
                                                     theme::text_primary(),
                                                 ),
                                                 CapabilityAccess::BuiltIn => (
                                                     theme::emerald(),
-                                                    format!("Built-in · {active_name}"),
+                                                    "Built-in".to_owned(),
                                                     theme::text_primary(),
                                                 ),
                                                 CapabilityAccess::OtherRuntime { owner, .. } => (
@@ -9467,7 +9821,7 @@ impl JobHarnessApp {
                                                 div()
                                                     .text_size(px(10.0))
                                                     .text_color(theme::text_muted())
-                                                    .child("Agent-only MCPs"),
+                                                    .child(format!("Only in {active_name}")),
                                             )
                                             .child(div().flex().flex_wrap().gap(px(5.0)).children(
                                                 agent_servers.into_iter().take(8).map(|srv| {
@@ -9750,12 +10104,12 @@ impl JobHarnessApp {
                         .children(quiet_roles.into_iter().enumerate().map(|(i, card)| {
                             let today = chrono::Utc::now().date_naive();
                             let (days, age_label) = if let Some(d) = card.quiet_days {
-                                (d, format!("Quiet {d}d · {}", title_case_stage(&card.stage)))
+                                (d, format!("Quiet {d}d  {}", title_case_stage(&card.stage)))
                             } else if let Ok(checked) =
                                 chrono::NaiveDate::parse_from_str(&card.checked, "%Y-%m-%d")
                             {
                                 let d = (today - checked).num_days().max(0) as u64;
-                                (d, format!("Stale {d}d · {}", title_case_stage(&card.stage)))
+                                (d, format!("Stale {d}d  {}", title_case_stage(&card.stage)))
                             } else {
                                 (0, title_case_stage(&card.stage))
                             };
@@ -10025,6 +10379,7 @@ impl JobHarnessApp {
                                                     CommandAction::ImportMasterCv => {
                                                         "icons/upload.svg"
                                                     }
+                                                    CommandAction::PassSecret => "icons/lock.svg",
                                                     CommandAction::AskAgent(_) => {
                                                         "icons/terminal.svg"
                                                     }
@@ -10160,13 +10515,18 @@ impl JobHarnessApp {
             }
             ActivePopover::Agent => {
                 let epoch = self.cmd_anim_epoch;
+                let pop_w = if self.chat_fullscreen {
+                    340.0
+                } else {
+                    (self.chat_width - 24.0).clamp(276.0, 348.0)
+                };
                 let card = div()
                     .id("agent-popover")
                     .absolute()
                     .left(px(12.0))
-                    .top(px(84.0))
-                    .w(px(280.0))
-                    .p_3()
+                    .top(px(96.0))
+                    .w(px(pop_w))
+                    .p_4()
                     .rounded(theme::r_lg())
                     .bg(theme::popover_glass())
                     .border_1()
@@ -10211,13 +10571,18 @@ impl JobHarnessApp {
                 let is_fresh = !self.agent_opts.resume_existing;
                 let active_id = self.agent_opts.session_name.clone();
                 let sessions = self.host_sessions.clone();
+                let pop_w = if self.chat_fullscreen {
+                    340.0
+                } else {
+                    (self.chat_width - 24.0).clamp(276.0, 348.0)
+                };
                 let card = div()
                     .id("sessions-popover")
                     .absolute()
                     .left(px(12.0))
-                    .top(px(84.0))
-                    .w(px(300.0))
-                    .p_3()
+                    .top(px(96.0))
+                    .w(px(pop_w))
+                    .p_4()
                     .rounded(theme::r_lg())
                     .bg(theme::popover_glass())
                     .border_1()
@@ -10310,7 +10675,7 @@ impl JobHarnessApp {
                                 let stitle = s.title.clone();
                                 let rt_toast = rt_name.clone();
                                 let meta = if s.message_count > 0 {
-                                    format!("{} · {} msgs", s.age_label, s.message_count)
+                                    format!("{}   {} msgs", s.age_label, s.message_count)
                                 } else {
                                     s.age_label.clone()
                                 };
@@ -10379,6 +10744,244 @@ impl JobHarnessApp {
                         .into_any_element(),
                 )
             }
+            ActivePopover::Secret => {
+                let req = self.active_secret_req.clone()?;
+                let epoch = self.cmd_anim_epoch;
+                let active_idx = self.secret_field_idx;
+                let drafts = self.secret_drafts.clone();
+                let rem = req.remaining_secs(secrets::now_unix());
+                let ttl_mins = (rem / 60).max(1);
+                let url_opt = req.url.clone();
+                let card = div()
+                    .id("secret-modal-card")
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .w(px(480.0))
+                    .rounded(theme::r_lg())
+                    .bg(theme::popover_glass())
+                    .border_1()
+                    .border_color(theme::hairline_strong())
+                    .shadow_lg()
+                    .overflow_hidden()
+                    .flex()
+                    .flex_col()
+                    .child(
+                        div()
+                            .px_5()
+                            .py_4()
+                            .border_b_1()
+                            .border_color(theme::hairline())
+                            .flex()
+                            .flex_col()
+                            .gap(px(6.0))
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .justify_between()
+                                    .gap_2()
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .items_center()
+                                            .gap_2()
+                                            .child(
+                                                svg()
+                                                    .path("icons/lock.svg")
+                                                    .size(px(15.0))
+                                                    .text_color(theme::amber_text()),
+                                            )
+                                            .child(
+                                                div()
+                                                    .text_sm()
+                                                    .font_weight(FontWeight::MEDIUM)
+                                                    .text_color(theme::text_primary())
+                                                    .child(req.label.clone()),
+                                            ),
+                                    )
+                                    .child(
+                                        div()
+                                            .px(px(6.0))
+                                            .py(px(2.0))
+                                            .rounded(theme::r_xs())
+                                            .bg(theme::amber_wash())
+                                            .text_size(px(10.5))
+                                            .text_color(theme::amber_text())
+                                            .child(format!("1-use  {ttl_mins}m TTL")),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(theme::text_secondary())
+                                    .child(req.reason.clone()),
+                            )
+                            .when_some(url_opt, |d, u| {
+                                let u_open = u.clone();
+                                d.child(
+                                    div()
+                                        .id("secret-open-url")
+                                        .text_size(px(11.0))
+                                        .text_color(theme::text_muted())
+                                        .hover(|s| s.text_color(theme::text_primary()))
+                                        .cursor_pointer()
+                                        .on_click(cx.listener(move |_, _, _, _| {
+                                            open_url(&u_open);
+                                        }))
+                                        .child(truncate_end(&u, 58)),
+                                )
+                            }),
+                    )
+                    .child(div().px_5().py_4().flex().flex_col().gap_3().children(
+                        req.fields.iter().enumerate().map(|(fi, field)| {
+                            let focused =
+                                self.active_input == ActiveInput::SecretField && active_idx == fi;
+                            let raw_val = drafts.get(fi).cloned().unwrap_or_default();
+                            let display_val = if field.secret {
+                                "•".repeat(raw_val.chars().count())
+                            } else {
+                                raw_val
+                            };
+                            let ph = field
+                                .placeholder
+                                .clone()
+                                .unwrap_or_else(|| format!("Enter {}…", field.label));
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap(px(5.0))
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(theme::text_muted())
+                                        .child(field.label.clone()),
+                                )
+                                .child(
+                                    div()
+                                        .id(SharedString::from(format!("sec-field-{fi}")))
+                                        .px_3()
+                                        .py(px(8.0))
+                                        .rounded(theme::r_md())
+                                        .bg(if focused {
+                                            theme::surface_active()
+                                        } else {
+                                            theme::surface_subtle()
+                                        })
+                                        .border_1()
+                                        .border_color(if focused {
+                                            theme::hairline_strong()
+                                        } else {
+                                            gpui::rgba(0x00000000)
+                                        })
+                                        .hover(|s| {
+                                            if focused {
+                                                s
+                                            } else {
+                                                s.bg(gpui::rgba(0xffffff0e))
+                                            }
+                                        })
+                                        .cursor_text()
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            this.secret_field_idx = fi;
+                                            this.active_input = ActiveInput::SecretField;
+                                            cx.notify();
+                                        }))
+                                        .child(input_line(
+                                            &display_val,
+                                            &ph,
+                                            focused,
+                                            self.reduce_motion,
+                                            "sec",
+                                            52,
+                                        )),
+                                )
+                        }),
+                    ))
+                    .child(
+                        div()
+                            .px_5()
+                            .py_3()
+                            .border_t_1()
+                            .border_color(theme::hairline())
+                            .bg(theme::window_glass())
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .text_size(px(11.0))
+                                    .text_color(theme::text_muted())
+                                    .child("0600 temp file — auto-shreds after read"),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(
+                                        div()
+                                            .id("secret-cancel-btn")
+                                            .px_3()
+                                            .py(px(5.0))
+                                            .rounded(theme::r_sm())
+                                            .hover(|s| s.bg(theme::row_hover()))
+                                            .cursor_pointer()
+                                            .text_xs()
+                                            .text_color(theme::text_muted())
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                this.close_secret_modal(true, cx);
+                                            }))
+                                            .child("Cancel"),
+                                    )
+                                    .child(
+                                        div()
+                                            .id("secret-submit-btn")
+                                            .px_3()
+                                            .py(px(5.0))
+                                            .rounded(theme::r_sm())
+                                            .bg(theme::white_solid())
+                                            .cursor_pointer()
+                                            .text_xs()
+                                            .font_weight(FontWeight::MEDIUM)
+                                            .text_color(theme::ink_dark())
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                this.submit_secret_modal(cx);
+                                            }))
+                                            .child("Arm secret"),
+                                    ),
+                            ),
+                    );
+                Some(
+                    div()
+                        .id("secret-backdrop")
+                        .occlude()
+                        .absolute()
+                        .inset_0()
+                        .bg(gpui::rgba(0x040408cc))
+                        .flex()
+                        .justify_center()
+                        .pt(px(96.0))
+                        .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, _, _, cx| {
+                                this.close_secret_modal(true, cx);
+                            }),
+                        )
+                        .child(if self.reduce_motion {
+                            card.into_any_element()
+                        } else {
+                            card.with_animation(
+                                SharedString::from(format!("pop-secret-{epoch}")),
+                                Animation::new(Duration::from_millis(140))
+                                    .with_easing(ease_out_quint()),
+                                |el, t| el.opacity(t).mt(px(-8.0 * (1.0 - t))),
+                            )
+                            .into_any_element()
+                        })
+                        .into_any_element(),
+                )
+            }
             ActivePopover::Budget => {
                 let b = &self.snapshot.daily_budget;
                 let right_off = self.bottom_popover_right_offset();
@@ -10431,7 +11034,7 @@ impl JobHarnessApp {
                 let rt_ready = self.runtime.is_ready();
                 let is_healthy = unresolved == 0 && rt_ready;
                 let ws_loc = format!(
-                    "{} · {}",
+                    "{} ({})",
                     self.client.target.label(),
                     if self.client.target.is_remote() {
                         "Remote"
@@ -10439,14 +11042,8 @@ impl JobHarnessApp {
                         "Local"
                     }
                 );
-                let pipeline_summary = if self.snapshot.upcoming_count > 0 {
-                    format!(
-                        "{} roles · {} upcoming",
-                        self.snapshot.total_records, self.snapshot.upcoming_count
-                    )
-                } else {
-                    format!("{} roles", self.snapshot.total_records)
-                };
+                let upcoming_n = self.snapshot.upcoming_count;
+                let total_roles = self.snapshot.total_records;
                 let card = popover_shell(true, 330.0, right_off)
                     .id("health-popover-card")
                     .occlude()
@@ -10554,7 +11151,53 @@ impl JobHarnessApp {
                                     ),
                             ),
                     )
-                    .child(kv_row("Pipeline", pipeline_summary))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .gap_2()
+                            .text_xs()
+                            .child(div().text_color(theme::text_muted()).child("Pipeline"))
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(
+                                        div()
+                                            .text_color(theme::text_primary())
+                                            .child(format!("{total_roles} roles")),
+                                    )
+                                    .when(upcoming_n > 0, |row| {
+                                        row.child(
+                                            div()
+                                                .id("health-focus-upcoming")
+                                                .px(px(6.0))
+                                                .py(px(2.0))
+                                                .rounded(theme::r_xs())
+                                                .bg(theme::surface_subtle())
+                                                .hover(|s| {
+                                                    s.bg(theme::row_hover())
+                                                        .text_color(theme::text_primary())
+                                                })
+                                                .cursor_pointer()
+                                                .text_color(theme::text_secondary())
+                                                .on_click(cx.listener(|this, _, _, cx| {
+                                                    this.active_popover = ActivePopover::None;
+                                                    this.popover_pinned = false;
+                                                    this.flow_view = false;
+                                                    this.only_attention = true;
+                                                    this.attention_toggled = true;
+                                                    this.attention_anim_epoch =
+                                                        this.attention_anim_epoch.wrapping_add(1);
+                                                    cx.notify();
+                                                }))
+                                                .child(format!("{upcoming_n} upcoming →")),
+                                        )
+                                    }),
+                            ),
+                    )
                     .child(
                         div()
                             .flex()
@@ -10591,12 +11234,12 @@ impl JobHarnessApp {
                                             cx,
                                         );
                                     }))
-                                    .child(format!("{unresolved} · Review →"))
+                                    .child(format!("{unresolved} Review →"))
                                     .into_any_element()
                             } else {
                                 div()
                                     .text_color(theme::emerald())
-                                    .child("0 · All clear")
+                                    .child("All clear")
                                     .into_any_element()
                             }),
                     )
@@ -11162,13 +11805,17 @@ impl Render for JobHarnessApp {
                                 .gap_3()
                                 .child(
                                     div()
+                                        .id("rsec-scroll-x")
                                         .flex_1()
+                                        .min_w_0()
+                                        .overflow_x_scroll()
                                         .flex()
-                                        .flex_wrap()
+                                        .items_center()
                                         .gap_1()
                                         .child(
                                             div()
                                                 .id("rsec-all")
+                                                .flex_shrink_0()
                                                 .px_2()
                                                 .py(px(3.0))
                                                 .rounded(theme::r_sm())
@@ -11196,6 +11843,7 @@ impl Render for JobHarnessApp {
                                             let on = active_sec == Some(idx);
                                             div()
                                                 .id(SharedString::from(format!("rsec-{idx}")))
+                                                .flex_shrink_0()
                                                 .px_2()
                                                 .py(px(3.0))
                                                 .rounded(theme::r_sm())
@@ -11207,7 +11855,7 @@ impl Render for JobHarnessApp {
                                                 .hover(|s| s.bg(theme::row_hover()))
                                                 .text_xs()
                                                 .text_color(if on {
-                                                    theme::lavender()
+                                                    theme::text_primary()
                                                 } else {
                                                     theme::text_muted()
                                                 })
@@ -11226,16 +11874,22 @@ impl Render for JobHarnessApp {
                                         .flex_shrink_0()
                                         .flex()
                                         .items_center()
-                                        .gap_2()
+                                        .gap(px(2.0))
                                         .text_xs()
                                         .text_color(theme::text_secondary())
                                         .child(
                                             div()
                                                 .id("rsec-prev")
-                                                .px_2()
-                                                .py(px(2.0))
+                                                .w(px(24.0))
+                                                .h(px(24.0))
                                                 .rounded(theme::r_xs())
-                                                .hover(|s| s.bg(theme::row_hover()))
+                                                .hover(|s| {
+                                                    s.bg(theme::row_hover())
+                                                        .text_color(theme::text_primary())
+                                                })
+                                                .flex()
+                                                .items_center()
+                                                .justify_center()
                                                 .cursor_pointer()
                                                 .on_click(cx.listener(move |this, _, _, cx| {
                                                     this.brief_section = match this.brief_section {
@@ -11248,15 +11902,21 @@ impl Render for JobHarnessApp {
                                                         this.brief_section_epoch.wrapping_add(1);
                                                     cx.notify();
                                                 }))
-                                                .child("‹ Prev"),
+                                                .child("‹"),
                                         )
                                         .child(
                                             div()
                                                 .id("rsec-next")
-                                                .px_2()
-                                                .py(px(2.0))
+                                                .w(px(24.0))
+                                                .h(px(24.0))
                                                 .rounded(theme::r_xs())
-                                                .hover(|s| s.bg(theme::row_hover()))
+                                                .hover(|s| {
+                                                    s.bg(theme::row_hover())
+                                                        .text_color(theme::text_primary())
+                                                })
+                                                .flex()
+                                                .items_center()
+                                                .justify_center()
                                                 .cursor_pointer()
                                                 .on_click(cx.listener(move |this, _, _, cx| {
                                                     this.brief_section = match this.brief_section {
@@ -11268,7 +11928,7 @@ impl Render for JobHarnessApp {
                                                         this.brief_section_epoch.wrapping_add(1);
                                                     cx.notify();
                                                 }))
-                                                .child("Next ›"),
+                                                .child("›"),
                                         ),
                                 ),
                         )
@@ -11537,7 +12197,7 @@ fn short_section_pill(heading: &str) -> String {
         let l = left.trim();
         let r = right.trim();
         if l.eq_ignore_ascii_case("Recorded update") && !r.is_empty() {
-            return format!("Update · {}", truncate_end(r, 12));
+            return format!("Update {}", truncate_end(r, 12));
         }
     }
     let head = heading

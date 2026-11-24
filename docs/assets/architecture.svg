@@ -1,16 +1,163 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="830" viewBox="0 0 1440 830" role="img" aria-labelledby="title description">
-  <title id="title">Job Harness architecture and ownership boundaries</title><desc id="description">Four code layers: interfaces, protocol adapters, workspace engine and pure domain. Separate private evidence and coordinator state are durable; indexes are derived. Host connectors and model credentials remain outside the engine.</desc>
-  <style>text{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;fill:#20232a}.label{font-size:17px;letter-spacing:1.2px;fill:#687486}.name{font-size:27px;font-weight:600}.body{font-size:21px;fill:#58616e}.mono{font-family:'SF Mono',Consolas,monospace;font-size:18px;fill:#687486}</style>
-  <rect x="1" y="1" width="1438" height="828" rx="12" fill="#fafbfc" stroke="#dfe3e9"/>
-  <text x="55" y="66" font-size="34" font-weight="500">Durable context. Replaceable execution.</text><text x="55" y="105" class="body">Every interface shares the same engine rules and versioned contracts.</text>
-  <path d="M54 141h1332M735 168v527" stroke="#dfe3e9"/><text x="55" y="183" class="label">REUSABLE SOFTWARE</text><path d="M70 224v438" stroke="#315eec" stroke-width="3"/>
-  <circle cx="70" cy="245" r="5" fill="#315eec"/><text x="96" y="252" class="name">Interfaces</text><text x="96" y="287" class="body">CLI · MCP clients · desktop · Rust consumers</text><path d="M96 314h589" stroke="#e4e7ec"/>
-  <circle cx="70" cy="348" r="5" fill="#315eec"/><text x="96" y="355" class="name">Protocol adapters</text><text x="96" y="390" class="body">MCP server · ACP client · model host · loopback UI</text><path d="M96 417h589" stroke="#e4e7ec"/>
-  <circle cx="70" cy="451" r="5" fill="#315eec"/><text x="96" y="458" class="name">Workspace engine</text><text x="96" y="493" class="body">Schemas · batches · provenance · journal · artifacts</text><text x="96" y="526" class="body">Intake · exact / optional semantic search · CV packets</text><path d="M96 553h589" stroke="#e4e7ec"/>
-  <circle cx="70" cy="587" r="5" fill="#315eec"/><text x="96" y="594" class="name">Pure domain</text><text x="96" y="629" class="body">Identity, states and canonical encoding</text><text x="96" y="661" class="mono">Native + WASM-checkable</text>
-  <text x="784" y="183" class="label">PRIVATE WORKSPACE</text><text x="784" y="250" class="name">Evidence you can read</text><text x="784" y="287" class="body">Markdown facts, answers, vacancies and original notes</text>
-  <text x="784" y="347" class="name">State you can recover</text><text x="784" y="384" class="body">One coordinator journal; unresolved attempts persist</text>
-  <text x="784" y="444" class="name">Files and evidence you can verify</text><text x="784" y="481" class="body">Selected content, exact PDFs and saved evidence</text>
-  <text x="784" y="541" class="name">Views you can rebuild</text><text x="784" y="578" class="body">Derived SQLite indexes and pipeline projections</text><text x="784" y="650" class="mono">Config selects behavior; it never invents facts.</text>
-  <path d="M54 708h1332" stroke="#dfe3e9"/><text x="55" y="753" class="label">HOST BOUNDARY</text><text x="290" y="753" class="body">Browser · mail · calendar · model runtimes · credentials · current user scope</text><text x="55" y="797" class="body">The host performs external actions. The engine records exact intent, uncertainty and evidence.</text>
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="720" viewBox="0 0 1280 720" role="img" aria-labelledby="title desc">
+  <title id="title">Job Harness System Architecture Whiteboard</title>
+  <desc id="desc">Visual system diagram showing how Job Harness separates durable local career state and safety guards from replaceable AI agent runtimes, scoped connectors, and self-destructing ephemeral secrets.</desc>
+  <defs>
+    <pattern id="dotgrid" width="24" height="24" patternUnits="userSpaceOnUse">
+      <circle cx="2" cy="2" r="1" fill="#1e202b"/>
+    </pattern>
+    <marker id="arr-cyan" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 1 1 L 9 5 L 1 9 z" fill="#38bdf8"/>
+    </marker>
+    <marker id="arr-green" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 1 1 L 9 5 L 1 9 z" fill="#34d399"/>
+    </marker>
+    <marker id="arr-amber" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 1 1 L 9 5 L 1 9 z" fill="#facc15"/>
+    </marker>
+    <marker id="arr-muted" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 1 1 L 9 5 L 1 9 z" fill="#6b7082"/>
+    </marker>
+    <style>
+      .sans { font-family: -apple-system, BlinkMacSystemFont, "Inter", "SF Pro Text", "Segoe UI", sans-serif; }
+      .mono { font-family: "SF Mono", ui-monospace, Menlo, Consolas, monospace; }
+      .zone { font-size: 11px; font-weight: 600; letter-spacing: 1.2px; fill: #6e7385; }
+      .title { font-size: 22px; font-weight: 600; fill: #f1f2f6; }
+      .lead { font-size: 13.5px; fill: #9397a6; }
+      .node-h { font-size: 14.5px; font-weight: 600; fill: #eceef4; }
+      .node-p { font-size: 12px; fill: #9397a6; }
+      .edge-lbl { font-size: 11px; font-weight: 500; fill: #8b90a0; }
+      .pill-t { font-size: 11px; font-weight: 500; fill: #cfd3df; }
+    </style>
+  </defs>
+
+  <!-- Whiteboard canvas with subtle dot grid -->
+  <rect x="1" y="1" width="1278" height="718" rx="12" fill="#0c0c10" stroke="#22232d" stroke-width="1.5"/>
+  <rect x="2" y="2" width="1276" height="716" rx="11" fill="url(#dotgrid)"/>
+
+  <!-- Title -->
+  <text x="42" y="48" class="sans title">System Architecture</text>
+  <text x="42" y="72" class="sans lead">Durable local state and safety guards sit underneath any AI agent, browser, or model you choose.</text>
+
+  <!-- ZONE 1: YOU & INTERFACES (top-left) -->
+  <rect x="40" y="102" width="290" height="314" rx="10" fill="#111218" fill-opacity="0.92" stroke="#262836"/>
+  <text x="58" y="128" class="sans zone">YOU &amp; SURFACES</text>
+
+  <rect x="58" y="144" width="254" height="82" rx="7" fill="#161822" stroke="#2f3a4a"/>
+  <rect x="70" y="158" width="22" height="22" rx="4" fill="#38bdf8" fill-opacity="0.14"/>
+  <path d="M76 164 h10 v10 h-10 z M80 164 v10" fill="none" stroke="#38bdf8" stroke-width="1.5"/>
+  <text x="102" y="174" class="sans node-h">Desktop Workbench</text>
+  <text x="70" y="200" class="sans node-p">Kanban board and Sankey flow</text>
+  <text x="70" y="216" class="sans node-p">2-layer briefs, Chat, Secret modal</text>
+
+  <rect x="58" y="240" width="254" height="74" rx="7" fill="#161822" stroke="#2a2c3a"/>
+  <text x="72" y="266" class="sans node-h">Terminal CLI (jh)</text>
+  <text x="72" y="286" class="sans node-p">Single native Rust binary</text>
+  <text x="72" y="302" class="sans node-p">Local setup, status, CV builds</text>
+
+  <rect x="58" y="328" width="254" height="70" rx="7" fill="#161822" stroke="#2a2c3a"/>
+  <text x="72" y="354" class="sans node-h">Remote Sync (jh serve)</text>
+  <text x="72" y="374" class="sans node-p">Optional HTTP and live SSE stream</text>
+  <text x="72" y="390" class="sans node-p">Over Tailscale or SSH tunnel</text>
+
+  <!-- ZONE 2: DETERMINISTIC RUST ENGINE (center) -->
+  <rect x="414" y="102" width="420" height="314" rx="10" fill="#111518" fill-opacity="0.94" stroke="#24423a" stroke-width="1.4"/>
+  <text x="434" y="128" class="sans zone" fill="#34d399">JOB HARNESS CORE (DETERMINISTIC RUST)</text>
+
+  <rect x="434" y="144" width="182" height="84" rx="7" fill="#161b20" stroke="#2b383c"/>
+  <text x="448" y="169" class="sans node-h">Submission Guard</text>
+  <text x="448" y="190" class="sans node-p">Freeze SHA-256 packet</text>
+  <text x="448" y="207" class="sans node-p">Block duplicate retries</text>
+  <text x="448" y="221" class="sans node-p">Enforce daily caps</text>
+
+  <rect x="632" y="144" width="182" height="84" rx="7" fill="#161b20" stroke="#2b383c"/>
+  <text x="646" y="169" class="sans node-h">Derived Attention</text>
+  <text x="646" y="190" class="sans node-p">Urgent and upcoming</text>
+  <text x="646" y="207" class="sans node-p">Quiet role tidy queue</text>
+  <text x="646" y="221" class="sans node-p">CV track gap check</text>
+
+  <rect x="434" y="244" width="380" height="72" rx="7" fill="#161b20" stroke="#2b383c"/>
+  <text x="448" y="269" class="sans node-h">Focused Stdio MCP &amp; Typed v2 Contracts</text>
+  <text x="448" y="290" class="sans node-p">Exact deduplication, 2-layer briefs, fail-closed permissions</text>
+  <text x="448" y="306" class="sans node-p">All external actions default to human review first</text>
+
+  <rect x="434" y="330" width="380" height="68" rx="7" fill="#121e1a" stroke="#255444"/>
+  <text x="450" y="356" class="mono node-h" fill="#34d399">harness.sqlite (WAL)</text>
+  <text x="450" y="378" class="sans node-p">Atomic coordinator journal and fast local search index</text>
+
+  <!-- ZONE 3: PRIVATE WORKSPACE ON DISK (top-right) -->
+  <rect x="918" y="102" width="322" height="314" rx="10" fill="#111218" fill-opacity="0.92" stroke="#262836"/>
+  <text x="936" y="128" class="sans zone">YOUR PRIVATE FOLDER</text>
+
+  <rect x="936" y="144" width="286" height="74" rx="7" fill="#161822" stroke="#2a2c3a"/>
+  <text x="952" y="169" class="sans node-h">Career Ledger</text>
+  <text x="952" y="190" class="sans node-p">Verified facts and approved answers</text>
+  <text x="952" y="206" class="sans node-p">Interview notes and debriefs</text>
+
+  <rect x="936" y="232" width="286" height="74" rx="7" fill="#161822" stroke="#2a2c3a"/>
+  <text x="952" y="257" class="sans node-h">Master CV &amp; Tracks</text>
+  <text x="952" y="278" class="sans node-p">Single baseline.json source of truth</text>
+  <text x="952" y="294" class="sans node-p">Tailored Backend, Product, AI PDFs</text>
+
+  <rect x="936" y="320" width="286" height="78" rx="7" fill="#161822" stroke="#2a2c3a"/>
+  <text x="952" y="345" class="sans node-h">Submitted Packets</text>
+  <text x="952" y="366" class="sans node-p">Exact PDFs, receipts, and responses</text>
+  <text x="952" y="382" class="sans node-p">Company and round interview briefs</text>
+
+  <!-- CONNECTORS: Top row -->
+  <path d="M 330 225 C 368 225, 374 225, 412 225" fill="none" stroke="#38bdf8" stroke-width="1.8" marker-end="url(#arr-cyan)" marker-start="url(#arr-cyan)"/>
+  <text x="344" y="213" class="sans edge-lbl" fill="#38bdf8">Live sync</text>
+
+  <path d="M 834 258 C 874 258, 876 258, 916 258" fill="none" stroke="#34d399" stroke-width="1.8" marker-end="url(#arr-green)" marker-start="url(#arr-green)"/>
+  <text x="844" y="246" class="sans edge-lbl" fill="#34d399">Read / write</text>
+
+  <!-- TRUST BOUNDARY LINE -->
+  <line x1="40" y1="454" x2="1240" y2="454" stroke="#3a3326" stroke-width="1.3" stroke-dasharray="6 5"/>
+  <rect x="466" y="442" width="348" height="24" rx="5" fill="#0c0c10"/>
+  <text x="482" y="458" class="sans zone" fill="#d4b157">TRUST BOUNDARY — ZERO CREDENTIALS ON DISK</text>
+
+  <!-- BOTTOM ROW: HOST RUNTIME + SCOPED CONNECTORS + EPHEMERAL SECRETS -->
+  <!-- Box A: Host Agent Runtime -->
+  <rect x="40" y="490" width="380" height="194" rx="10" fill="#12121a" stroke="#2a2c3d"/>
+  <text x="58" y="516" class="sans zone">HOST AGENT RUNTIME (SWAPPABLE)</text>
+  <text x="58" y="544" class="sans node-h">Hermes, Claude Code, Codex, Cursor, Local</text>
+  <text x="58" y="566" class="sans node-p">Owns reasoning, native session history, and CLI OAuth.</text>
+  <text x="58" y="584" class="sans node-p">Desktop chat stays stateless by default to prevent drift.</text>
+  <rect x="58" y="604" width="104" height="28" rx="5" fill="#1a1c28" stroke="#2f3348"/>
+  <text x="74" y="622" class="sans pill-t">codex login</text>
+  <rect x="172" y="604" width="90" height="28" rx="5" fill="#1a1c28" stroke="#2f3348"/>
+  <text x="196" y="622" class="sans pill-t">claude</text>
+  <rect x="272" y="604" width="128" height="28" rx="5" fill="#1a1c28" stroke="#2f3348"/>
+  <text x="290" y="622" class="sans pill-t">hermes / oMLX</text>
+  <text x="58" y="662" class="sans node-p" fill="#6e7385">No API keys stored inside Job Harness</text>
+
+  <!-- Box B: Scoped Connectors & Dedicated Browser -->
+  <rect x="454" y="490" width="396" height="194" rx="10" fill="#12121a" stroke="#2a2c3d"/>
+  <text x="472" y="516" class="sans zone">SCOPED TOOLS &amp; DEDICATED BROWSER</text>
+  <text x="472" y="544" class="sans node-h">Shared MCP vs Agent-Only Tools</text>
+  <text x="472" y="566" class="sans node-p">Mail and Calendar live in shared MCP so switching</text>
+  <text x="472" y="584" class="sans node-p">agents keeps them active. Web search uses built-ins.</text>
+  <rect x="472" y="604" width="174" height="60" rx="6" fill="#171924" stroke="#2c3042"/>
+  <text x="484" y="626" class="sans pill-t" fill="#34d399">Shared MCP</text>
+  <text x="484" y="646" class="sans node-p">Gmail, Calendar, Ledger</text>
+  <rect x="658" y="604" width="174" height="60" rx="6" fill="#171924" stroke="#2c3042"/>
+  <text x="670" y="626" class="sans pill-t" fill="#38bdf8">Dedicated Profile</text>
+  <text x="670" y="646" class="sans node-p">Job boards only, no bank</text>
+
+  <!-- Box C: Ephemeral Self-Destructing Secrets -->
+  <rect x="884" y="490" width="356" height="194" rx="10" fill="#17140f" stroke="#42361f"/>
+  <text x="902" y="516" class="sans zone" fill="#facc15">EPHEMERAL SECRET VAULT</text>
+  <text x="902" y="544" class="sans node-h">One-Use Self-Destructing Handoff</text>
+  <text x="902" y="566" class="sans node-p">Portal logins pass through a focused modal or</text>
+  <text x="902" y="584" class="sans node-p">hidden terminal prompt, never chat or Git.</text>
+  <rect x="902" y="604" width="320" height="60" rx="6" fill="#1e1a12" stroke="#4e4024"/>
+  <text x="916" y="626" class="mono pill-t" fill="#fde047">$TMPDIR 0600 · TTL 5m · 1-use</text>
+  <text x="916" y="646" class="sans node-p">Zero-overwritten and unlinked right after read</text>
+
+  <!-- Vertical flow arrows crossing Trust Boundary -->
+  <path d="M 230 490 C 230 458, 520 462, 520 418" fill="none" stroke="#6b7082" stroke-width="1.6" marker-end="url(#arr-muted)" marker-start="url(#arr-muted)"/>
+  <text x="242" y="478" class="sans edge-lbl">MCP tool calls</text>
+
+  <path d="M 420 588 H 452" fill="none" stroke="#38bdf8" stroke-width="1.6" marker-end="url(#arr-cyan)"/>
+  <path d="M 884 588 H 852" fill="none" stroke="#facc15" stroke-width="1.6" marker-end="url(#arr-amber)"/>
+  <path d="M 185 416 C 185 456, 1060 442, 1060 488" fill="none" stroke="#facc15" stroke-width="1.4" stroke-dasharray="4 4" marker-end="url(#arr-amber)"/>
 </svg>
