@@ -56,6 +56,18 @@ const FLOW: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="14" height=
 
 const HISTORY: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M12 7v5l4 2"/></svg>"#;
 
+const BRIEFCASE: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M16 20V4a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v16"/><rect width="20" height="14" x="2" y="6" rx="2"/></svg>"#;
+
+const FILE_TEXT: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/><path d="M10 9H8"/><path d="M16 13H8"/><path d="M16 17H8"/></svg>"#;
+
+const GAUGE: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="m12 14 4-4"/><path d="M3.34 19a10 10 0 1 1 17.32 0"/></svg>"#;
+
+const FILTER: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/></svg>"#;
+
+const ARCHIVE: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><rect width="20" height="5" x="2" y="3" rx="1"/><path d="M4 8v11a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8"/><path d="M10 12h4"/></svg>"#;
+
+const UPLOAD: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" x2="12" y1="3" y2="15"/></svg>"#;
+
 impl AssetSource for EmbeddedIcons {
     fn load(&self, path: &str) -> Result<Option<Cow<'static, [u8]>>> {
         let bytes = match path {
@@ -85,6 +97,12 @@ impl AssetSource for EmbeddedIcons {
             "icons/columns.svg" => Some(COLUMNS.as_bytes()),
             "icons/flow.svg" => Some(FLOW.as_bytes()),
             "icons/history.svg" => Some(HISTORY.as_bytes()),
+            "icons/briefcase.svg" => Some(BRIEFCASE.as_bytes()),
+            "icons/file-text.svg" => Some(FILE_TEXT.as_bytes()),
+            "icons/gauge.svg" => Some(GAUGE.as_bytes()),
+            "icons/filter.svg" => Some(FILTER.as_bytes()),
+            "icons/archive.svg" => Some(ARCHIVE.as_bytes()),
+            "icons/upload.svg" => Some(UPLOAD.as_bytes()),
             _ => None,
         };
         Ok(bytes.map(Cow::Borrowed))
@@ -118,6 +136,12 @@ impl AssetSource for EmbeddedIcons {
             "icons/columns.svg".into(),
             "icons/flow.svg".into(),
             "icons/history.svg".into(),
+            "icons/briefcase.svg".into(),
+            "icons/file-text.svg".into(),
+            "icons/gauge.svg".into(),
+            "icons/filter.svg".into(),
+            "icons/archive.svg".into(),
+            "icons/upload.svg".into(),
         ])
     }
 }

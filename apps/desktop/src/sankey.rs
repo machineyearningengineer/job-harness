@@ -1104,14 +1104,16 @@ pub fn render_sankey_view<V: 'static>(
             } else {
                 None
             };
+            let card_h = (58.0 + (drill_cards.len().clamp(1, 6) as f32) * 52.0).min(368.0);
             let card =
                 div()
                     .id("sankey-drill-popover")
+                    .occlude()
                     .on_mouse_down(MouseButton::Left, |_, _, cx| {
                         cx.stop_propagation();
                     })
                     .w(px(360.0))
-                    .max_h(px(340.0))
+                    .h(px(card_h))
                     .rounded(px(12.0))
                     .bg(theme::popover_glass())
                     .border_1()
@@ -1122,6 +1124,7 @@ pub fn render_sankey_view<V: 'static>(
                     .flex_col()
                     .child(
                         div()
+                            .flex_shrink_0()
                             .px_4()
                             .py_3()
                             .border_b_1()
@@ -1179,17 +1182,19 @@ pub fn render_sankey_view<V: 'static>(
                             .id("sankey-drill-scroll")
                             .flex_1()
                             .min_h_0()
+                            .w_full()
                             .overflow_y_scroll()
                             .p_2()
                             .flex()
                             .flex_col()
                             .gap(px(2.0))
-                            .children(drill_cards.into_iter().take(60).enumerate().map(
+                            .children(drill_cards.into_iter().take(80).enumerate().map(
                                 |(i, role)| {
                                     let open_cb = on_open_role.clone();
                                     let role_click = role.clone();
                                     div()
                                         .id(SharedString::from(format!("sk-pop-role-{i}")))
+                                        .flex_shrink_0()
                                         .w_full()
                                         .px_3()
                                         .py_2()

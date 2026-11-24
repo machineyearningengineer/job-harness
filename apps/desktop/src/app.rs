@@ -2809,9 +2809,9 @@ impl JobHarnessApp {
                 bar.child(
                     div()
                         .id("search-box")
-                        .w(px(250.0))
+                        .w(px(340.0))
                         .px_3()
-                        .py(px(4.5))
+                        .py(px(5.0))
                         .rounded(px(7.0))
                         .bg(theme::surface_subtle())
                         .border_1()
@@ -9602,9 +9602,9 @@ impl JobHarnessApp {
                                 .on_mouse_down(MouseButton::Left, |_, _, cx| {
                                     cx.stop_propagation();
                                 })
-                                .w(px(620.0))
-                                .max_h(px(490.0))
-                                .rounded(px(14.0))
+                                .w(px(680.0))
+                                .max_h(px(540.0))
+                                .rounded(px(16.0))
                                 .bg(theme::popover_glass())
                                 .border_1()
                                 .border_color(theme::hairline_strong())
@@ -9614,18 +9614,19 @@ impl JobHarnessApp {
                                 .overflow_hidden()
                                 .child(
                                     div()
+                                        .flex_shrink_0()
                                         .px_5()
-                                        .py_4()
+                                        .py(px(16.0))
                                         .border_b_1()
                                         .border_color(theme::hairline())
                                         .flex()
                                         .items_center()
                                         .gap_3()
-                                        .text_sm()
+                                        .text_size(px(15.0))
                                         .child(
                                             svg()
                                                 .path("icons/search.svg")
-                                                .size(px(16.0))
+                                                .size(px(17.0))
                                                 .flex_shrink_0()
                                                 .text_color(theme::text_muted()),
                                         )
@@ -9635,19 +9636,20 @@ impl JobHarnessApp {
                                             self.active_input == ActiveInput::CommandBar,
                                             self.reduce_motion,
                                             "cmd",
-                                            58,
+                                            64,
                                         )),
                                 )
                                 .child(
                                     div()
                                         .id("cmd-list")
                                         .flex_1()
+                                        .min_h_0()
                                         .px_3()
                                         .py_3()
                                         .overflow_y_scroll()
                                         .flex()
                                         .flex_col()
-                                        .gap(px(2.0))
+                                        .gap(px(4.0))
                                         .children({
                                             let mut items: Vec<AnyElement> = Vec::new();
                                             let mut last_section: Option<&'static str> = None;
@@ -9659,14 +9661,15 @@ impl JobHarnessApp {
                                                 if last_section != Some(section) {
                                                     items.push(
                                                         div()
+                                                            .flex_shrink_0()
                                                             .px_3()
                                                             .pt(if last_section.is_some() {
-                                                                px(12.0)
+                                                                px(14.0)
                                                             } else {
-                                                                px(2.0)
+                                                                px(4.0)
                                                             })
                                                             .pb(px(6.0))
-                                                            .text_size(px(11.5))
+                                                            .text_size(px(12.0))
                                                             .text_color(theme::text_muted())
                                                             .child(section)
                                                             .into_any_element(),
@@ -9675,22 +9678,34 @@ impl JobHarnessApp {
                                                 }
                                                 let active = i == selected;
                                                 let row_icon = match &entry.action {
-                                                    CommandAction::OpenRole(_) => "icons/eye.svg",
+                                                    CommandAction::OpenRole(_) => {
+                                                        "icons/briefcase.svg"
+                                                    }
+                                                    CommandAction::OpenCvs => "icons/file-text.svg",
                                                     CommandAction::OpenProfile => "icons/user.svg",
                                                     CommandAction::OpenSettings => {
                                                         "icons/settings.svg"
                                                     }
                                                     CommandAction::OpenTidy => "icons/tidy.svg",
+                                                    CommandAction::OpenBudget => "icons/gauge.svg",
                                                     CommandAction::ToggleChat => {
                                                         "icons/panel-left.svg"
+                                                    }
+                                                    CommandAction::ToggleAttention => {
+                                                        "icons/filter.svg"
+                                                    }
+                                                    CommandAction::ToggleArchive => {
+                                                        "icons/archive.svg"
                                                     }
                                                     CommandAction::RefreshWorkspace => {
                                                         "icons/refresh-cw.svg"
                                                     }
+                                                    CommandAction::ImportMasterCv => {
+                                                        "icons/upload.svg"
+                                                    }
                                                     CommandAction::AskAgent(_) => {
                                                         "icons/terminal.svg"
                                                     }
-                                                    _ => "icons/search.svg",
                                                 };
                                                 let action = entry.action;
                                                 items.push(
@@ -9698,9 +9713,10 @@ impl JobHarnessApp {
                                                         .id(SharedString::from(format!(
                                                             "cmd-row-{i}"
                                                         )))
+                                                        .flex_shrink_0()
                                                         .px_3()
-                                                        .py(px(10.0))
-                                                        .rounded(px(8.0))
+                                                        .py(px(11.0))
+                                                        .rounded(px(9.0))
                                                         .overflow_hidden()
                                                         .when(active, |d| {
                                                             d.bg(theme::surface_subtle())
@@ -9725,11 +9741,11 @@ impl JobHarnessApp {
                                                                 .min_w_0()
                                                                 .flex()
                                                                 .items_center()
-                                                                .gap_3()
+                                                                .gap(px(12.0))
                                                                 .child(
                                                                     svg()
                                                                         .path(row_icon)
-                                                                        .size(px(15.0))
+                                                                        .size(px(16.0))
                                                                         .flex_shrink_0()
                                                                         .text_color(if active {
                                                                             theme::text_primary()
@@ -9742,7 +9758,7 @@ impl JobHarnessApp {
                                                                         .flex_1()
                                                                         .min_w_0()
                                                                         .overflow_hidden()
-                                                                        .text_size(px(13.0))
+                                                                        .text_size(px(14.0))
                                                                         .text_color(if active {
                                                                             theme::text_primary()
                                                                         } else {
@@ -9750,14 +9766,14 @@ impl JobHarnessApp {
                                                                         })
                                                                         .child(truncate_end(
                                                                             &entry.label,
-                                                                            56,
+                                                                            60,
                                                                         )),
                                                                 ),
                                                         )
                                                         .child(
                                                             div()
                                                                 .flex_shrink_0()
-                                                                .text_size(px(11.5))
+                                                                .text_size(px(12.0))
                                                                 .text_color(theme::text_muted())
                                                                 .child(entry.meta),
                                                         )
@@ -9769,15 +9785,16 @@ impl JobHarnessApp {
                                 )
                                 .child(
                                     div()
+                                        .flex_shrink_0()
                                         .px_5()
-                                        .py_3()
+                                        .py(px(13.0))
                                         .border_t_1()
                                         .border_color(theme::hairline())
                                         .bg(theme::window_glass())
                                         .flex()
                                         .items_center()
                                         .gap_4()
-                                        .text_size(px(11.5))
+                                        .text_size(px(12.0))
                                         .text_color(theme::text_muted())
                                         .child(
                                             div()
@@ -9977,6 +9994,7 @@ impl JobHarnessApp {
                                 };
                                 div()
                                     .id(SharedString::from(format!("host-sess-{si}")))
+                                    .flex_shrink_0()
                                     .px_2()
                                     .py(px(6.0))
                                     .rounded(px(7.0))
