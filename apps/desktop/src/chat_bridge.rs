@@ -75,6 +75,86 @@ pub struct ModelPreset {
     pub provider_label: Option<String>,
 }
 
+/// Read-only view of a configured MCP server (names and source only — never reads secrets).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DiscoveredMcpServer {
+    pub name: String,
+    pub source: String,
+}
+
+/// Discovers configured MCP servers from standard local agent registries without reading secrets.
+pub fn discover_mcp_servers() -> Vec<DiscoveredMcpServer> {
+    let mut out: Vec<DiscoveredMcpServer> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    if let Ok(custom) = std::env::var("JOB_HARNESS_MCP_CONFIG")
+        && !custom.trim().is_empty()
+    {
+        read_json_mcp_names(Path::new(&custom), "MCP", &mut out, &mut seen);
+        return out;
+    }
+
+    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+        return out;
+    };
+    read_json_mcp_names(
+        &home.join(".mcporter/mcporter.json"),
+        "MCPorter",
+        &mut out,
+        &mut seen,
+    );
+    read_json_mcp_names(
+        &home.join(".config/mcporter/mcporter.json"),
+        "MCPorter",
+        &mut out,
+        &mut seen,
+    );
+    read_json_mcp_names(&home.join(".claude.json"), "Claude", &mut out, &mut seen);
+    if let Ok(toml_txt) = std::fs::read_to_string(home.join(".codex/config.toml")) {
+        for line in toml_txt.lines() {
+            let t = line.trim();
+            if let Some(rest) = t.strip_prefix("[mcp_servers.")
+                && let Some(name) = rest.strip_suffix(']')
+            {
+                let clean = name.trim_matches('"').trim();
+                if !clean.is_empty() && !clean.contains('.') && seen.insert(clean.to_owned()) {
+                    out.push(DiscoveredMcpServer {
+                        name: clean.to_owned(),
+                        source: "Codex".into(),
+                    });
+                }
+            }
+        }
+    }
+    out
+}
+
+fn read_json_mcp_names(
+    path: &Path,
+    source: &str,
+    out: &mut Vec<DiscoveredMcpServer>,
+    seen: &mut std::collections::HashSet<String>,
+) {
+    let Ok(bytes) = std::fs::read(path) else {
+        return;
+    };
+    let Ok(val) = serde_json::from_slice::<Value>(&bytes) else {
+        return;
+    };
+    for key in ["mcpServers", "servers"] {
+        if let Some(obj) = val.get(key).and_then(Value::as_object) {
+            for name in obj.keys() {
+                if seen.insert(name.clone()) {
+                    out.push(DiscoveredMcpServer {
+                        name: name.clone(),
+                        source: source.to_owned(),
+                    });
+                }
+            }
+        }
+    }
+}
+
 fn find_hermes() -> Option<PathBuf> {
     let home = std::env::var("HOME").unwrap_or_default();
     for bin in [

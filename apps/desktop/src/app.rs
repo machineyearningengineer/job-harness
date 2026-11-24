@@ -2,8 +2,12 @@
 //! Zero main-thread I/O: all Engine / SQLite / HTTP / disk calls execute off-thread so
 //! every click, toggle, scroll, and drag runs smoothly at 120Hz.
 use crate::{
-    chat_bridge::{AgentOptions, AgentRuntime, StreamEvent, extract_citations, is_image_path},
+    chat_bridge::{
+        AgentOptions, AgentRuntime, DiscoveredMcpServer, StreamEvent, discover_mcp_servers,
+        extract_citations, is_image_path,
+    },
     markdown::{self, LinkTarget},
+    sankey::{self, SankeyBucket},
     theme,
     transport::{
         RoleCard, RoleOverviewDetails, WorkspaceClient, WorkspaceSnapshot, WorkspaceTarget,
@@ -201,6 +205,7 @@ pub struct JobHarnessApp {
     client: WorkspaceClient,
     runtime: AgentRuntime,
     available_runtimes: Vec<AgentRuntime>,
+    mcp_servers: Vec<DiscoveredMcpServer>,
     agent_opts: AgentOptions,
     model_draft: String,
     last_seen_activity_at: Option<String>,
@@ -248,6 +253,11 @@ pub struct JobHarnessApp {
     interviews_anim_epoch: u64,
     attention_anim_epoch: u64,
     collapse_anim_epoch: u64,
+    flow_view: bool,
+    flow_anim_epoch: u64,
+    sankey_zoom: Option<SankeyBucket>,
+    sankey_bucket: Option<SankeyBucket>,
+    sankey_hover: Option<SankeyBucket>,
     reduce_motion: bool,
     expanded_reader: Option<(String, String)>,
     reader_raw_json: bool,
@@ -314,6 +324,7 @@ impl JobHarnessApp {
         let client = WorkspaceClient::new(target.clone());
         let saved = UiState::load();
         let available_runtimes = AgentRuntime::detect_all();
+        let mcp_servers = discover_mcp_servers();
         let saved_runtime = saved
             .agent_kind
             .as_deref()
@@ -347,6 +358,7 @@ impl JobHarnessApp {
             client,
             runtime,
             available_runtimes,
+            mcp_servers,
             agent_opts,
             model_draft: String::new(),
             last_seen_activity_at: saved.last_seen_activity_at.clone(),
@@ -404,6 +416,11 @@ impl JobHarnessApp {
             interviews_anim_epoch: 1,
             attention_anim_epoch: 1,
             collapse_anim_epoch: 1,
+            flow_view: false,
+            flow_anim_epoch: 1,
+            sankey_zoom: None,
+            sankey_bucket: None,
+            sankey_hover: None,
             reduce_motion: saved.reduce_motion,
             expanded_reader: None,
             reader_raw_json: false,
@@ -459,6 +476,56 @@ impl JobHarnessApp {
             undo_move: None,
         };
         app.refresh_snapshot_async(false, cx);
+        if let Ok(scene) = std::env::var("JOB_HARNESS_SHOWCASE_SCENE")
+            && !scene.trim().is_empty()
+        {
+            cx.spawn(async move |this, cx| {
+                cx.background_executor()
+                    .timer(Duration::from_millis(750))
+                    .await;
+                let _ = this.update(cx, |app, cx| match scene.trim() {
+                    "hero" => {
+                        app.flow_view = false;
+                        app.submit_prompt("What needs attention today?".into(), false, cx);
+                    }
+                    "brief" => {
+                        app.flow_view = false;
+                        app.submit_prompt("What needs attention today?".into(), false, cx);
+                        if let Some(card) = app
+                            .snapshot
+                            .active_cards
+                            .iter()
+                            .find(|c| c.brief_path.is_some())
+                            .cloned()
+                        {
+                            app.open_role_drawer(card, DrawerTab::Brief, cx);
+                        }
+                    }
+                    "flow" => {
+                        app.flow_view = true;
+                        app.sankey_hover = Some(SankeyBucket::Interviews);
+                        app.submit_prompt("What needs attention today?".into(), false, cx);
+                        cx.notify();
+                    }
+                    "flow-drill" => {
+                        app.flow_view = true;
+                        app.sankey_bucket = Some(SankeyBucket::Interviews);
+                        app.submit_prompt("What needs attention today?".into(), false, cx);
+                        cx.notify();
+                    }
+                    "guardrails" => {
+                        app.flow_view = false;
+                        app.open_right_drawer(RightDrawer::Settings, cx);
+                    }
+                    "command" => {
+                        app.flow_view = false;
+                        app.open_command_bar(cx);
+                    }
+                    _ => {}
+                });
+            })
+            .detach();
+        }
         app
     }
 
@@ -2093,8 +2160,10 @@ impl JobHarnessApp {
                             if let Some(last) = app.chat_messages.last_mut()
                                 && !last.is_user
                             {
-                                last.duration_ms =
-                                    Some(last.started_at.elapsed().as_millis() as u64);
+                                if last.duration_ms.is_none() {
+                                    last.duration_ms =
+                                        Some(last.started_at.elapsed().as_millis() as u64);
+                                }
                                 last.sent_label = chrono::Local::now().format("%H:%M").to_string();
                                 for st in &mut last.steps {
                                     st.done = true;
@@ -2131,8 +2200,18 @@ impl JobHarnessApp {
     }
 
     fn stop_stream(&mut self, cx: &mut Context<Self>) {
-        if let Some(flag) = &self.stream_cancel {
+        if let Some(flag) = self.stream_cancel.take() {
             flag.store(true, Ordering::Relaxed);
+        }
+        self.stream_turn_id = self.stream_turn_id.wrapping_add(1);
+        for msg in &mut self.chat_messages {
+            if !msg.is_user && msg.duration_ms.is_none() {
+                msg.duration_ms = Some(msg.started_at.elapsed().as_millis() as u64);
+                msg.revealed = msg.text.len();
+                for st in &mut msg.steps {
+                    st.done = true;
+                }
+            }
         }
         self.streaming = false;
         self.stream_status.clear();
@@ -2697,6 +2776,47 @@ impl JobHarnessApp {
                             .child(ws_label)
                     }),
             )
+            // Centered compact Filter Roles input right in the top bar (frees vertical board & Sankey space!)
+            .when(!self.chat_fullscreen, |bar| {
+                let search_active = self.active_input == ActiveInput::Search;
+                bar.child(
+                    div()
+                        .id("search-box")
+                        .w(px(250.0))
+                        .px_3()
+                        .py(px(4.5))
+                        .rounded(px(7.0))
+                        .bg(theme::surface_subtle())
+                        .border_1()
+                        .border_color(if search_active {
+                            theme::hairline_strong()
+                        } else {
+                            theme::hairline()
+                        })
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .cursor_text()
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.active_input = ActiveInput::Search;
+                            cx.notify();
+                        }))
+                        .child(
+                            svg()
+                                .path("icons/search.svg")
+                                .size(px(12.5))
+                                .text_color(theme::text_muted()),
+                        )
+                        .child(input_line(
+                            &self.search_query,
+                            "Filter roles…",
+                            search_active,
+                            self.reduce_motion,
+                            "search",
+                            28,
+                        )),
+                )
+            })
             .child(
                 div()
                     .flex()
@@ -5955,7 +6075,6 @@ impl JobHarnessApp {
 
     fn render_board(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let cards = self.filtered_cards();
-        let search_active = self.active_input == ActiveInput::Search;
         let quick_active = self.active_input == ActiveInput::QuickAsk;
         let base_columns: [&'static str; 3] = ["Saved", "Applied", "Screening"];
         let interview_stages: [(&'static str, &'static str); 3] = [
@@ -5981,55 +6100,18 @@ impl JobHarnessApp {
             .flex()
             .flex_col()
             .px_4()
-            .pt_3()
+            .pt_2()
             .pb(px(56.0))
-            .gap_3()
-            // Subtle search & inline view toggles (no boxed pills)
+            .gap_2()
+            // Whisper-thin view bar (Filter roles now lives cleanly in the centered titlebar!)
             .child(
                 div()
                     .w_full()
                     .flex_shrink_0()
                     .flex()
                     .items_center()
-                    .justify_between()
+                    .justify_end()
                     .gap_3()
-                    .child(
-                        div()
-                            .id("search-box")
-                            .w(px(280.0))
-                            .px_3()
-                            .py(px(6.0))
-                            .rounded(px(8.0))
-                            .bg(theme::surface_subtle())
-                            .border_1()
-                            .border_color(if search_active {
-                                theme::lavender_border()
-                            } else {
-                                theme::hairline()
-                            })
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .cursor_text()
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.active_input = ActiveInput::Search;
-                                cx.notify();
-                            }))
-                            .child(
-                                svg()
-                                    .path("icons/search.svg")
-                                    .size(px(13.0))
-                                    .text_color(theme::text_muted()),
-                            )
-                            .child(input_line(
-                                &self.search_query,
-                                "Filter roles…",
-                                search_active,
-                                self.reduce_motion,
-                                "search",
-                                34,
-                            )),
-                    )
                     .child(
                         div()
                             .flex()
@@ -6065,103 +6147,220 @@ impl JobHarnessApp {
                                 },
                             ))
                             .child(
-                                div()
-                                    .id("toggle-attention-only")
-                                    .px_2()
-                                    .py_1()
-                                    .rounded(px(6.0))
-                                    .cursor_pointer()
-                                    .when(self.only_attention, |d| d.bg(theme::surface_active()))
-                                    .hover(|s| s.bg(theme::row_hover()))
-                                    .text_xs()
-                                    .text_color(if self.only_attention {
-                                        theme::amber_text()
-                                    } else {
-                                        theme::text_muted()
-                                    })
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.toggle_attention_only(cx);
-                                    }))
-                                    .child("Attention only"),
-                            )
-                            .child(
-                                div()
-                                    .id("toggle-archive-col")
-                                    .px_2()
-                                    .py_1()
-                                    .rounded(px(6.0))
-                                    .cursor_pointer()
-                                    .when(self.show_archive, |d| d.bg(theme::surface_active()))
-                                    .hover(|s| s.bg(theme::row_hover()))
-                                    .text_xs()
-                                    .text_color(if self.show_archive {
-                                        theme::text_primary()
-                                    } else {
-                                        theme::text_muted()
-                                    })
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.show_archive = !this.show_archive;
-                                        this.archive_toggled = true;
-                                        this.archive_anim_epoch =
-                                            this.archive_anim_epoch.wrapping_add(1);
-                                        cx.notify();
-                                    }))
-                                    .child(format!("Archive ({})", self.snapshot.closed_count)),
-                            )
-                            // Non-intrusive horizontal nudge buttons for mouse-only users (also Shift+Wheel & ←/→)
-                            .child(
+                                // Sleek Linear/Zed borderless icon-pair view switcher (Board | Sankey Flow)
                                 div()
                                     .flex()
                                     .items_center()
                                     .gap(px(2.0))
-                                    .pl_1()
                                     .child(
                                         div()
-                                            .id("board-nudge-left")
-                                            .w(px(22.0))
-                                            .h(px(22.0))
-                                            .rounded(px(5.0))
+                                            .id("view-mode-board")
+                                            .w(px(26.0))
+                                            .h(px(26.0))
+                                            .rounded(px(6.0))
+                                            .when(!self.flow_view, |d| {
+                                                d.bg(theme::surface_subtle())
+                                            })
+                                            .hover(|s| s.bg(theme::row_hover()))
+                                            .cursor_pointer()
                                             .flex()
                                             .items_center()
                                             .justify_center()
-                                            .cursor_pointer()
-                                            .hover(|s| {
-                                                s.bg(theme::row_hover())
-                                                    .text_color(theme::text_primary())
-                                            })
-                                            .text_xs()
-                                            .text_color(theme::text_muted())
                                             .on_click(cx.listener(|this, _, _, cx| {
-                                                this.nudge_board_x(284.0, cx);
+                                                if this.flow_view {
+                                                    this.flow_view = false;
+                                                    this.flow_anim_epoch =
+                                                        this.flow_anim_epoch.wrapping_add(1);
+                                                    cx.notify();
+                                                }
                                             }))
-                                            .child("‹"),
+                                            .child(
+                                                svg()
+                                                    .path("icons/columns.svg")
+                                                    .size(px(14.0))
+                                                    .text_color(if !self.flow_view {
+                                                        theme::text_primary()
+                                                    } else {
+                                                        theme::text_muted()
+                                                    }),
+                                            ),
                                     )
                                     .child(
                                         div()
-                                            .id("board-nudge-right")
-                                            .w(px(22.0))
-                                            .h(px(22.0))
-                                            .rounded(px(5.0))
+                                            .id("view-mode-flow")
+                                            .w(px(26.0))
+                                            .h(px(26.0))
+                                            .rounded(px(6.0))
+                                            .when(self.flow_view, |d| d.bg(theme::surface_subtle()))
+                                            .hover(|s| s.bg(theme::row_hover()))
+                                            .cursor_pointer()
                                             .flex()
                                             .items_center()
                                             .justify_center()
-                                            .cursor_pointer()
-                                            .hover(|s| {
-                                                s.bg(theme::row_hover())
-                                                    .text_color(theme::text_primary())
-                                            })
-                                            .text_xs()
-                                            .text_color(theme::text_muted())
                                             .on_click(cx.listener(|this, _, _, cx| {
-                                                this.nudge_board_x(-284.0, cx);
+                                                if !this.flow_view {
+                                                    this.flow_view = true;
+                                                    this.sankey_hover = None;
+                                                    this.flow_anim_epoch =
+                                                        this.flow_anim_epoch.wrapping_add(1);
+                                                    cx.notify();
+                                                }
                                             }))
-                                            .child("›"),
+                                            .child(
+                                                svg()
+                                                    .path("icons/flow.svg")
+                                                    .size(px(14.0))
+                                                    .text_color(if self.flow_view {
+                                                        theme::text_primary()
+                                                    } else {
+                                                        theme::text_muted()
+                                                    }),
+                                            ),
                                     ),
-                            ),
+                            )
+                            .when(!self.flow_view, |bar| {
+                                bar.child(
+                                    div()
+                                        .id("toggle-attention-only")
+                                        .px_2()
+                                        .py_1()
+                                        .rounded(px(6.0))
+                                        .cursor_pointer()
+                                        .when(self.only_attention, |d| {
+                                            d.bg(theme::surface_active())
+                                        })
+                                        .hover(|s| s.bg(theme::row_hover()))
+                                        .text_xs()
+                                        .text_color(if self.only_attention {
+                                            theme::amber_text()
+                                        } else {
+                                            theme::text_muted()
+                                        })
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.toggle_attention_only(cx);
+                                        }))
+                                        .child("Attention only"),
+                                )
+                                .child(
+                                    div()
+                                        .id("toggle-archive-col")
+                                        .px_2()
+                                        .py_1()
+                                        .rounded(px(6.0))
+                                        .cursor_pointer()
+                                        .when(self.show_archive, |d| d.bg(theme::surface_active()))
+                                        .hover(|s| s.bg(theme::row_hover()))
+                                        .text_xs()
+                                        .text_color(if self.show_archive {
+                                            theme::text_primary()
+                                        } else {
+                                            theme::text_muted()
+                                        })
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.show_archive = !this.show_archive;
+                                            this.archive_toggled = true;
+                                            this.archive_anim_epoch =
+                                                this.archive_anim_epoch.wrapping_add(1);
+                                            cx.notify();
+                                        }))
+                                        .child(format!("Archive ({})", self.snapshot.closed_count)),
+                                )
+                            })
+                            // Non-intrusive horizontal nudge buttons for mouse-only users (only in Board view)
+                            .when(!self.flow_view, |bar| {
+                                bar.child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap(px(2.0))
+                                        .pl_1()
+                                        .child(
+                                            div()
+                                                .id("board-nudge-left")
+                                                .w(px(22.0))
+                                                .h(px(22.0))
+                                                .rounded(px(5.0))
+                                                .flex()
+                                                .items_center()
+                                                .justify_center()
+                                                .cursor_pointer()
+                                                .hover(|s| {
+                                                    s.bg(theme::row_hover())
+                                                        .text_color(theme::text_primary())
+                                                })
+                                                .text_xs()
+                                                .text_color(theme::text_muted())
+                                                .on_click(cx.listener(|this, _, _, cx| {
+                                                    this.nudge_board_x(284.0, cx);
+                                                }))
+                                                .child("‹"),
+                                        )
+                                        .child(
+                                            div()
+                                                .id("board-nudge-right")
+                                                .w(px(22.0))
+                                                .h(px(22.0))
+                                                .rounded(px(5.0))
+                                                .flex()
+                                                .items_center()
+                                                .justify_center()
+                                                .cursor_pointer()
+                                                .hover(|s| {
+                                                    s.bg(theme::row_hover())
+                                                        .text_color(theme::text_primary())
+                                                })
+                                                .text_xs()
+                                                .text_color(theme::text_muted())
+                                                .on_click(cx.listener(|this, _, _, cx| {
+                                                    this.nudge_board_x(-284.0, cx);
+                                                }))
+                                                .child("›"),
+                                        ),
+                                )
+                            }),
                     ),
             )
-            // Horizontally-scrollable Kanban board with axis-locked scroll & expandable Interviews group
-            .child({
+            // Animated swap between Kanban board and interactive Sankey Flow funnel
+            .child(if self.flow_view {
+                let q = self.search_query.trim().to_ascii_lowercase();
+                let all_for_sankey: Vec<RoleCard> = self
+                    .snapshot
+                    .active_cards
+                    .iter()
+                    .chain(self.snapshot.archived_cards.iter())
+                    .filter(|c| q.is_empty() || c.search_blob.contains(&q))
+                    .cloned()
+                    .collect();
+                sankey::render_sankey_view(
+                    &all_for_sankey,
+                    self.sankey_zoom,
+                    self.sankey_bucket,
+                    self.sankey_hover,
+                    self.flow_anim_epoch,
+                    self.reduce_motion,
+                    |hov, this: &mut Self, _, cx| {
+                        if this.sankey_hover != hov {
+                            this.sankey_hover = hov;
+                            cx.notify();
+                        }
+                    },
+                    |zm, this: &mut Self, _, cx| {
+                        this.sankey_zoom = zm;
+                        this.sankey_bucket = None;
+                        this.sankey_hover = None;
+                        this.flow_anim_epoch = this.flow_anim_epoch.wrapping_add(1);
+                        cx.notify();
+                    },
+                    |bucket, this: &mut Self, _, cx| {
+                        this.sankey_bucket = bucket;
+                        cx.notify();
+                    },
+                    |card, this: &mut Self, _, cx| {
+                        this.open_role_drawer(card, DrawerTab::Overview, cx);
+                    },
+                    cx,
+                )
+            } else {
                 let mut board_scroller = div()
                     .id("kanban-scroll-x")
                     .track_scroll(&self.board_scroll_x)
@@ -6272,6 +6471,7 @@ impl JobHarnessApp {
                             self.archive_anim_epoch,
                         )
                     })
+                    .into_any_element()
             })
             // Quick-Ask upward reply popover
             .when(self.quick_popover_open, |d| {
@@ -8361,6 +8561,103 @@ impl JobHarnessApp {
                         ))
                         // Section 1: Agent & Model controls
                         .child(self.render_agent_controls("set", true, cx))
+                        // Section 1b: Connected Layers (detected runtimes + configured MCP connectors, read-only)
+                        .child(
+                            div()
+                                .pt_3()
+                                .border_t_1()
+                                .border_color(theme::hairline())
+                                .flex()
+                                .flex_col()
+                                .gap_2()
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .justify_between()
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .text_color(theme::text_muted())
+                                                .child("Connections"),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_size(px(10.5))
+                                                .text_color(theme::text_muted())
+                                                .child(format!(
+                                                    "{} runtimes · {} MCP",
+                                                    self.available_runtimes.len(),
+                                                    self.mcp_servers.len()
+                                                )),
+                                        ),
+                                )
+                                .child(
+                                    div()
+                                        .flex()
+                                        .flex_wrap()
+                                        .gap(px(5.0))
+                                        .children(self.available_runtimes.iter().map(|rt| {
+                                            let active = rt.kind() == self.runtime.kind();
+                                            div()
+                                                .px_2()
+                                                .py(px(3.0))
+                                                .rounded(px(6.0))
+                                                .bg(if active {
+                                                    theme::surface_active()
+                                                } else {
+                                                    theme::surface_subtle()
+                                                })
+                                                .border_1()
+                                                .border_color(theme::hairline())
+                                                .flex()
+                                                .items_center()
+                                                .gap(px(5.0))
+                                                .text_size(px(11.0))
+                                                .text_color(if active {
+                                                    theme::text_primary()
+                                                } else {
+                                                    theme::text_secondary()
+                                                })
+                                                .child(
+                                                    div()
+                                                        .w(px(5.0))
+                                                        .h(px(5.0))
+                                                        .rounded(px(99.0))
+                                                        .bg(theme::emerald()),
+                                                )
+                                                .child(rt.short_name().to_owned())
+                                        }))
+                                        .children(self.mcp_servers.iter().take(10).map(|srv| {
+                                            div()
+                                                .px_2()
+                                                .py(px(3.0))
+                                                .rounded(px(6.0))
+                                                .bg(theme::window_glass())
+                                                .border_1()
+                                                .border_color(theme::hairline())
+                                                .flex()
+                                                .items_center()
+                                                .gap(px(5.0))
+                                                .text_size(px(11.0))
+                                                .text_color(theme::text_secondary())
+                                                .child(
+                                                    div()
+                                                        .w(px(5.0))
+                                                        .h(px(5.0))
+                                                        .rounded(px(99.0))
+                                                        .bg(theme::text_muted()),
+                                                )
+                                                .child(srv.name.clone())
+                                                .child(
+                                                    div()
+                                                        .text_size(px(9.5))
+                                                        .text_color(theme::text_muted())
+                                                        .child(srv.source.clone()),
+                                                )
+                                        })),
+                                ),
+                        )
                         // Section 2: Automation Permissions (stored in config/career-ledger.json)
                         .child(
                             div()
@@ -8801,36 +9098,48 @@ impl JobHarnessApp {
                                         )
                                         .child(input_line(
                                             &self.command_query,
-                                            "Jump to a role, run an action, or ask Chat…",
+                                            "Search roles, actions, or ask Chat…",
                                             self.active_input == ActiveInput::CommandBar,
                                             self.reduce_motion,
                                             "cmd",
                                             56,
-                                        ))
-                                        .child(
-                                            div()
-                                                .px(px(6.0))
-                                                .py(px(2.0))
-                                                .rounded(px(5.0))
-                                                .bg(theme::surface_subtle())
-                                                .border_1()
-                                                .border_color(theme::hairline())
-                                                .text_size(px(10.5))
-                                                .text_color(theme::text_muted())
-                                                .child("ESC"),
-                                        ),
+                                        )),
                                 )
                                 .child(
                                     div()
                                         .id("cmd-list")
                                         .flex_1()
-                                        .p_2()
+                                        .px_2()
+                                        .py_2()
                                         .overflow_y_scroll()
                                         .flex()
                                         .flex_col()
-                                        .gap(px(2.0))
-                                        .children(entries.into_iter().enumerate().map(
-                                            |(i, entry)| {
+                                        .gap(px(1.0))
+                                        .children({
+                                            let mut items: Vec<AnyElement> = Vec::new();
+                                            let mut last_section: Option<&'static str> = None;
+                                            for (i, entry) in entries.into_iter().enumerate() {
+                                                let section = match &entry.action {
+                                                    CommandAction::OpenRole(_) => "Roles",
+                                                    _ => "Actions",
+                                                };
+                                                if last_section != Some(section) {
+                                                    items.push(
+                                                        div()
+                                                            .px_3()
+                                                            .pt(if last_section.is_some() {
+                                                                px(10.0)
+                                                            } else {
+                                                                px(2.0)
+                                                            })
+                                                            .pb(px(4.0))
+                                                            .text_size(px(11.0))
+                                                            .text_color(theme::text_muted())
+                                                            .child(section)
+                                                            .into_any_element(),
+                                                    );
+                                                    last_section = Some(section);
+                                                }
                                                 let active = i == selected;
                                                 let row_icon = match &entry.action {
                                                     CommandAction::OpenRole(_) => "icons/eye.svg",
@@ -8851,83 +9160,79 @@ impl JobHarnessApp {
                                                     _ => "icons/search.svg",
                                                 };
                                                 let action = entry.action;
-                                                div()
-                                                    .id(SharedString::from(format!("cmd-row-{i}")))
-                                                    .px_3()
-                                                    .py(px(8.0))
-                                                    .rounded(px(8.0))
-                                                    .overflow_hidden()
-                                                    .when(active, |d| d.bg(theme::surface_active()))
-                                                    .hover(|s| s.bg(theme::row_hover()))
-                                                    .flex()
-                                                    .items_center()
-                                                    .justify_between()
-                                                    .gap_3()
-                                                    .cursor_pointer()
-                                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                                        this.execute_command(action.clone(), cx);
-                                                    }))
-                                                    .child(
-                                                        div()
-                                                            .flex_1()
-                                                            .min_w_0()
-                                                            .flex()
-                                                            .items_center()
-                                                            .gap_2()
-                                                            .child(
-                                                                svg()
-                                                                    .path(row_icon)
-                                                                    .size(px(13.0))
-                                                                    .flex_shrink_0()
-                                                                    .text_color(if active {
-                                                                        theme::text_primary()
-                                                                    } else {
-                                                                        theme::text_muted()
-                                                                    }),
-                                                            )
-                                                            .child(
-                                                                div()
-                                                                    .flex_1()
-                                                                    .min_w_0()
-                                                                    .overflow_hidden()
-                                                                    .text_xs()
-                                                                    .font_weight(if active {
-                                                                        FontWeight::MEDIUM
-                                                                    } else {
-                                                                        FontWeight::NORMAL
-                                                                    })
-                                                                    .text_color(if active {
-                                                                        theme::text_primary()
-                                                                    } else {
-                                                                        theme::text_secondary()
-                                                                    })
-                                                                    .child(truncate_end(
-                                                                        &entry.label,
-                                                                        50,
-                                                                    )),
-                                                            ),
-                                                    )
-                                                    .child(
-                                                        div()
-                                                            .flex_shrink_0()
-                                                            .px(px(6.0))
-                                                            .py(px(2.0))
-                                                            .rounded(px(5.0))
-                                                            .when(active, |d| {
-                                                                d.bg(theme::surface_subtle())
-                                                                    .border_1()
-                                                                    .border_color(theme::hairline())
-                                                            })
-                                                            .text_size(px(11.0))
-                                                            .text_color(if active {
-                                                                theme::text_secondary()
-                                                            } else {
-                                                                theme::text_muted()
-                                                            })
-                                                            .child(entry.meta),
-                                                    )
-                                            },
-                                        )),
+                                                items.push(
+                                                    div()
+                                                        .id(SharedString::from(format!(
+                                                            "cmd-row-{i}"
+                                                        )))
+                                                        .px_3()
+                                                        .py(px(8.0))
+                                                        .rounded(px(7.0))
+                                                        .overflow_hidden()
+                                                        .when(active, |d| {
+                                                            d.bg(theme::surface_subtle())
+                                                        })
+                                                        .hover(|s| s.bg(theme::row_hover()))
+                                                        .flex()
+                                                        .items_center()
+                                                        .justify_between()
+                                                        .gap_3()
+                                                        .cursor_pointer()
+                                                        .on_click(cx.listener(
+                                                            move |this, _, _, cx| {
+                                                                this.execute_command(
+                                                                    action.clone(),
+                                                                    cx,
+                                                                );
+                                                            },
+                                                        ))
+                                                        .child(
+                                                            div()
+                                                                .flex_1()
+                                                                .min_w_0()
+                                                                .flex()
+                                                                .items_center()
+                                                                .gap_3()
+                                                                .child(
+                                                                    svg()
+                                                                        .path(row_icon)
+                                                                        .size(px(14.0))
+                                                                        .flex_shrink_0()
+                                                                        .text_color(if active {
+                                                                            theme::text_primary()
+                                                                        } else {
+                                                                            theme::text_muted()
+                                                                        }),
+                                                                )
+                                                                .child(
+                                                                    div()
+                                                                        .flex_1()
+                                                                        .min_w_0()
+                                                                        .overflow_hidden()
+                                                                        .text_xs()
+                                                                        .text_color(if active {
+                                                                            theme::text_primary()
+                                                                        } else {
+                                                                            theme::text_secondary()
+                                                                        })
+                                                                        .child(truncate_end(
+                                                                            &entry.label,
+                                                                            50,
+                                                                        )),
+                                                                ),
+                                                        )
+                                                        .child(
+                                                            div()
+                                                                .flex_shrink_0()
+                                                                .text_size(px(11.0))
+                                                                .text_color(theme::text_muted())
+                                                                .child(entry.meta),
+                                                        )
+                                                        .into_any_element(),
+                                                );
+                                            }
+                                            items
+                                        }),
                                 )
                                 .child(
                                     div()
@@ -8938,11 +9243,34 @@ impl JobHarnessApp {
                                         .bg(theme::window_glass())
                                         .flex()
                                         .items_center()
-                                        .justify_between()
+                                        .gap_4()
                                         .text_size(px(11.0))
                                         .text_color(theme::text_muted())
-                                        .child("↑↓ Navigate  ·  ⏎ Open  ·  ⎋ Close")
-                                        .child("Job Harness"),
+                                        .child(
+                                            div()
+                                                .flex()
+                                                .items_center()
+                                                .gap(px(4.0))
+                                                .child(cmd_keycap("↑"))
+                                                .child(cmd_keycap("↓"))
+                                                .child(div().ml(px(2.0)).child("Navigate")),
+                                        )
+                                        .child(
+                                            div()
+                                                .flex()
+                                                .items_center()
+                                                .gap(px(5.0))
+                                                .child(cmd_keycap("Enter"))
+                                                .child("Select"),
+                                        )
+                                        .child(
+                                            div()
+                                                .flex()
+                                                .items_center()
+                                                .gap(px(5.0))
+                                                .child(cmd_keycap("Esc"))
+                                                .child("Close"),
+                                        ),
                                 )
                                 .with_animation(
                                     SharedString::from(format!("cmd-anim-{epoch}")),
@@ -10516,4 +10844,17 @@ fn drawer_header(
         .when_some(subtitle, |d, sub| {
             d.child(div().text_xs().text_color(theme::text_muted()).child(sub))
         })
+}
+
+fn cmd_keycap(label: &'static str) -> impl IntoElement {
+    div()
+        .px(px(5.0))
+        .py(px(1.5))
+        .rounded(px(4.0))
+        .bg(theme::surface_subtle())
+        .border_1()
+        .border_color(theme::hairline())
+        .text_size(px(10.5))
+        .text_color(theme::text_secondary())
+        .child(label)
 }

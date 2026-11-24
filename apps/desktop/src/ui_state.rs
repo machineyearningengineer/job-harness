@@ -24,6 +24,11 @@ pub struct UiState {
 
 impl UiState {
     pub fn path() -> Option<PathBuf> {
+        if let Ok(custom) = std::env::var("JOB_HARNESS_UI_STATE_PATH")
+            && !custom.trim().is_empty()
+        {
+            return Some(PathBuf::from(custom));
+        }
         let home = std::env::var_os("HOME").map(PathBuf::from)?;
         let dir = if cfg!(target_os = "macos") {
             home.join("Library/Application Support/Job Harness")

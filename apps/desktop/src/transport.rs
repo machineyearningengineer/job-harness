@@ -48,6 +48,7 @@ pub struct RoleCard {
     pub company: String,
     pub title: String,
     pub stage: String,
+    pub outcome: Option<String>,
     pub column: &'static str,
     pub urgency: String,
     pub urgency_reason: String,
@@ -419,6 +420,10 @@ impl WorkspaceClient {
                 .filter(|s| !s.is_empty())
                 .map(str::to_owned);
 
+            let outcome = row["outcome"]
+                .as_str()
+                .filter(|s| !s.trim().is_empty())
+                .map(str::to_owned);
             let note_line = if urgency == "urgent_now" {
                 scheduled_start
                     .as_deref()
@@ -426,6 +431,16 @@ impl WorkspaceClient {
                     .or_else(|| Some("Action needed".into()))
             } else if urgency == "upcoming" && urgency_reason.contains("quiet for") {
                 extract_quiet_badge(&urgency_reason)
+            } else if column == "Archive" {
+                match outcome
+                    .as_deref()
+                    .map(|s| s.to_ascii_lowercase())
+                    .as_deref()
+                {
+                    Some("rejected" | "rejection") => Some("Rejected".into()),
+                    Some("withdrawn" | "declined") => Some("Withdrawn".into()),
+                    _ => None,
+                }
             } else if stage == "technical" {
                 Some("Technical".into())
             } else if stage == "final" {
@@ -448,6 +463,7 @@ impl WorkspaceClient {
                 company,
                 title: role_title,
                 stage,
+                outcome,
                 column,
                 urgency,
                 urgency_reason,

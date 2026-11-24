@@ -50,6 +50,10 @@ const MESSAGE_SQUARE: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="1
 
 const ZAP: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 14a1 1 0 0 1-.78-1.63l9.9-10.2a.5.5 0 0 1 .86.46l-1.92 6.02A1 1 0 0 0 13 10h7a1 1 0 0 1 .78 1.63l-9.9 10.2a.5.5 0 0 1-.86-.46l1.92-6.02A1 1 0 0 0 11 14z"/></svg>"#;
 
+const COLUMNS: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="18" x="3" y="3" rx="2.5"/><path d="M9 3v18"/><path d="M15 3v18"/></svg>"#;
+
+const FLOW: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h4c3 0 5 6 10 6h4"/><path d="M3 18h4c3 0 5-6 10-6"/><path d="M3 12h4c3 0 5 6 10 6h4"/></svg>"#;
+
 impl AssetSource for EmbeddedIcons {
     fn load(&self, path: &str) -> Result<Option<Cow<'static, [u8]>>> {
         let bytes = match path {
@@ -76,6 +80,8 @@ impl AssetSource for EmbeddedIcons {
             "icons/square-pen.svg" => Some(SQUARE_PEN.as_bytes()),
             "icons/message-square.svg" => Some(MESSAGE_SQUARE.as_bytes()),
             "icons/zap.svg" => Some(ZAP.as_bytes()),
+            "icons/columns.svg" => Some(COLUMNS.as_bytes()),
+            "icons/flow.svg" => Some(FLOW.as_bytes()),
             _ => None,
         };
         Ok(bytes.map(Cow::Borrowed))
@@ -106,6 +112,8 @@ impl AssetSource for EmbeddedIcons {
             "icons/square-pen.svg".into(),
             "icons/message-square.svg".into(),
             "icons/zap.svg".into(),
+            "icons/columns.svg".into(),
+            "icons/flow.svg".into(),
         ])
     }
 }

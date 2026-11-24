@@ -3,6 +3,7 @@ mod app;
 mod chat_bridge;
 mod icons;
 mod markdown;
+mod sankey;
 mod theme;
 mod transport;
 mod ui_state;
