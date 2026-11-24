@@ -434,12 +434,12 @@ impl WorkspaceClient {
         let unresolved_attempts = health["unresolved_attempt_count"].as_u64().unwrap_or(0);
         let closed_count = archived_cards.len();
 
-        let mut recent_activity = Vec::new();
+        let mut recent_activity: Vec<ActivityDigestEntry> = Vec::new();
         if let Some(arr) = events_data["events"].as_array() {
             for ev in arr.iter().rev() {
-                let tool = ev["tool"].as_str().unwrap_or("").to_owned();
-                let summary = ev["summary"].as_str().unwrap_or("").trim().to_owned();
-                if summary.is_empty() && tool == "start_run" {
+                let raw_tool = ev["tool"].as_str().unwrap_or("");
+                let raw_summary = ev["summary"].as_str().unwrap_or("").trim();
+                if raw_summary.is_empty() && raw_tool == "start_run" {
                     continue;
                 }
                 let at = ev["at"].as_str().unwrap_or("").to_owned();
@@ -447,21 +447,41 @@ impl WorkspaceClient {
                     .as_str()
                     .filter(|s| !s.is_empty())
                     .map(str::to_owned);
-                let display_summary = if !summary.is_empty() {
-                    summary
+                let tool_label = human_tool_label(raw_tool);
+                let mut display_summary = if !raw_summary.is_empty() {
+                    raw_summary.to_owned()
                 } else {
-                    match tool.as_str() {
+                    match raw_tool {
                         "finish_run" => "Completed bounded run".into(),
                         "update_application" | "record_event" => "Updated role tracking".into(),
                         "finish_submission" => "Recorded submission receipt".into(),
                         "daily_update" => "Processed daily inbox & calendar digest".into(),
-                        _ => format!("Recorded {tool}"),
+                        _ => format!("Recorded {tool_label}"),
                     }
                 };
+                if display_summary.eq_ignore_ascii_case("application receipt")
+                    && let Some(rp) = &record_path
+                {
+                    let company = company_hint_from_record_path(rp);
+                    if !company.is_empty() {
+                        display_summary = format!("{company} — application receipt");
+                    }
+                }
+                let age_label = short_time_label(&at);
+                if let Some(prev) = recent_activity.last_mut()
+                    && (prev.summary == display_summary
+                        || prev.summary.starts_with(&format!("{display_summary} (")))
+                    && prev.age_label == age_label
+                {
+                    if !prev.summary.ends_with("multiple)") {
+                        prev.summary = format!("{display_summary} (multiple)");
+                    }
+                    continue;
+                }
                 recent_activity.push(ActivityDigestEntry {
-                    age_label: short_time_label(&at),
+                    age_label,
                     at,
-                    tool,
+                    tool: tool_label.to_owned(),
                     summary: display_summary,
                     record_path,
                 });
@@ -847,6 +867,46 @@ pub fn spawn_change_listener(
             None
         }
     }
+}
+
+fn human_tool_label(raw: &str) -> &'static str {
+    match raw {
+        "record_event" | "update_application" => "Role update",
+        "create_application" => "New role",
+        "finish_submission" => "Submission",
+        "finish_run" => "Run summary",
+        "daily_update" => "Daily check",
+        "save_receipt" => "Receipt saved",
+        _ => "Activity",
+    }
+}
+
+fn company_hint_from_record_path(path: &str) -> String {
+    let stem = path
+        .rsplit('/')
+        .next()
+        .unwrap_or(path)
+        .trim_end_matches(".md");
+    let parts: Vec<&str> = stem.split('-').collect();
+    // Skip leading YYYY-MM-DD date prefix if present
+    let start =
+        if parts.len() > 3 && parts[0].len() == 4 && parts[0].chars().all(|c| c.is_ascii_digit()) {
+            3
+        } else {
+            0
+        };
+    parts[start..]
+        .iter()
+        .take(2)
+        .map(|w| {
+            let mut ch = w.chars();
+            match ch.next() {
+                Some(first) => format!("{}{}", first.to_uppercase(), ch.as_str()),
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn batch_step_data<'a>(batch: &'a Value, id: &str) -> Option<&'a Value> {

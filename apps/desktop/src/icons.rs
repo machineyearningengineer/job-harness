@@ -14,6 +14,22 @@ const TIDY: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="16" height=
 
 const SEARCH: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>"#;
 
+const COPY: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg>"#;
+
+const REPLY: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 17 4 12 9 7"/><path d="M20 18v-2a4 4 0 0 0-4-4H4"/></svg>"#;
+
+const EXPAND: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/><line x1="21" x2="14" y1="3" y2="10"/><line x1="3" x2="10" y1="21" y2="14"/></svg>"#;
+
+const PAPERCLIP: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>"#;
+
+const ARROW_UP: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="m5 12 7-7 7 7"/><path d="M12 19V5"/></svg>"#;
+
+const STOP: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><rect x="5" y="5" width="14" height="14" rx="2.5"/></svg>"#;
+
+const REFRESH_CW: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/></svg>"#;
+
+const CHECK: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>"#;
+
 impl AssetSource for EmbeddedIcons {
     fn load(&self, path: &str) -> Result<Option<Cow<'static, [u8]>>> {
         let bytes = match path {
@@ -22,6 +38,14 @@ impl AssetSource for EmbeddedIcons {
             "icons/settings.svg" => Some(SETTINGS.as_bytes()),
             "icons/tidy.svg" => Some(TIDY.as_bytes()),
             "icons/search.svg" => Some(SEARCH.as_bytes()),
+            "icons/copy.svg" => Some(COPY.as_bytes()),
+            "icons/reply.svg" => Some(REPLY.as_bytes()),
+            "icons/expand.svg" => Some(EXPAND.as_bytes()),
+            "icons/paperclip.svg" => Some(PAPERCLIP.as_bytes()),
+            "icons/arrow-up.svg" => Some(ARROW_UP.as_bytes()),
+            "icons/stop.svg" => Some(STOP.as_bytes()),
+            "icons/refresh-cw.svg" => Some(REFRESH_CW.as_bytes()),
+            "icons/check.svg" => Some(CHECK.as_bytes()),
             _ => None,
         };
         Ok(bytes.map(Cow::Borrowed))
@@ -34,6 +58,14 @@ impl AssetSource for EmbeddedIcons {
             "icons/settings.svg".into(),
             "icons/tidy.svg".into(),
             "icons/search.svg".into(),
+            "icons/copy.svg".into(),
+            "icons/reply.svg".into(),
+            "icons/expand.svg".into(),
+            "icons/paperclip.svg".into(),
+            "icons/arrow-up.svg".into(),
+            "icons/stop.svg".into(),
+            "icons/refresh-cw.svg".into(),
+            "icons/check.svg".into(),
         ])
     }
 }

@@ -2,6 +2,7 @@
 mod app;
 mod chat_bridge;
 mod icons;
+mod markdown;
 mod theme;
 mod transport;
 mod ui_state;

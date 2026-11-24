@@ -35,11 +35,22 @@ pub enum StreamEvent {
         id: String,
         ok: bool,
         duration_ms: Option<u64>,
+        output: String,
     },
     Thinking(String),
     Delta(String),
+    Usage {
+        total_tokens: u64,
+    },
     Done,
     Error(String),
+}
+
+pub fn is_image_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .map(|s| s.to_ascii_lowercase())
+        .is_some_and(|ext| matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "webp" | "gif"))
 }
 
 /// Per-turn model controls forwarded to the host agent CLI (never stored in the ledger).
@@ -174,20 +185,27 @@ impl AgentRuntime {
         !matches!(self, Self::Unconfigured)
     }
 
-    /// Streams one turn directly from the host agent runtime with cancellation support.
+    /// Streams one turn directly from the host agent runtime with cancellation and media support.
     pub fn stream_turn(
         &self,
         workspace: Option<PathBuf>,
         prompt: String,
+        attachments: Vec<PathBuf>,
         opts: AgentOptions,
         tx: Sender<StreamEvent>,
         cancel: Arc<AtomicBool>,
     ) {
         let runtime = self.clone();
         std::thread::spawn(move || {
-            if let Err(err) =
-                run_streaming(&runtime, workspace.as_deref(), &prompt, &opts, &tx, &cancel)
-            {
+            if let Err(err) = run_streaming(
+                &runtime,
+                workspace.as_deref(),
+                &prompt,
+                &attachments,
+                &opts,
+                &tx,
+                &cancel,
+            ) {
                 let _ = tx.send(StreamEvent::Error(err.to_string()));
             }
             let _ = tx.send(StreamEvent::Done);
@@ -199,14 +217,16 @@ fn run_streaming(
     runtime: &AgentRuntime,
     workspace: Option<&Path>,
     prompt: &str,
+    attachments: &[PathBuf],
     opts: &AgentOptions,
     tx: &Sender<StreamEvent>,
     cancel: &Arc<AtomicBool>,
 ) -> Result<()> {
-    let trimmed = prompt.trim();
-    if trimmed.is_empty() {
+    let mut final_prompt = prompt.trim().to_owned();
+    if final_prompt.is_empty() && attachments.is_empty() {
         bail!("Empty message");
     }
+    let mut non_native_files = Vec::new();
     let (mut cmd, json_stream) = match runtime {
         AgentRuntime::Hermes { binary, profile } => {
             let mut c = Command::new(binary);
@@ -236,6 +256,13 @@ fn run_streaming(
             if let Some(r) = opts.reasoning.as_deref().filter(|r| !r.is_empty()) {
                 c.args(["--reasoning", r]);
             }
+            for att in attachments {
+                if is_image_path(att) {
+                    c.arg("--image").arg(att);
+                } else {
+                    non_native_files.push(att.clone());
+                }
+            }
             (c, true)
         }
         AgentRuntime::ClaudeCode { binary } => {
@@ -254,6 +281,7 @@ fn run_streaming(
             if let Some(dir) = workspace {
                 c.current_dir(dir);
             }
+            non_native_files.extend(attachments.iter().cloned());
             (c, true)
         }
         AgentRuntime::Codex { binary } => {
@@ -266,6 +294,7 @@ fn run_streaming(
             if let Some(dir) = workspace {
                 c.current_dir(dir);
             }
+            non_native_files.extend(attachments.iter().cloned());
             (c, true)
         }
         AgentRuntime::Custom { command, .. } => {
@@ -274,6 +303,15 @@ fn run_streaming(
             if let Some(dir) = workspace {
                 c.current_dir(dir);
             }
+            if !attachments.is_empty() {
+                let joined = attachments
+                    .iter()
+                    .map(|p| p.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(":");
+                c.env("JOB_HARNESS_ATTACHMENTS", joined);
+            }
+            non_native_files.extend(attachments.iter().cloned());
             (c, true)
         }
         AgentRuntime::Unconfigured => {
@@ -282,6 +320,21 @@ fn run_streaming(
             );
         }
     };
+
+    if !non_native_files.is_empty() {
+        let lines = non_native_files
+            .iter()
+            .map(|p| format!("[Attached file: {}]", p.display()))
+            .collect::<Vec<_>>()
+            .join("\n");
+        if final_prompt.is_empty() {
+            final_prompt = format!("Inspect the attached file(s):\n{lines}");
+        } else {
+            final_prompt = format!("{final_prompt}\n\n{lines}");
+        }
+    } else if final_prompt.is_empty() {
+        final_prompt = "Inspect the attached image(s).".into();
+    }
 
     let _ = tx.send(StreamEvent::Status("Thinking…".into()));
     let mut child = cmd
@@ -292,7 +345,7 @@ fn run_streaming(
         .context("Failed to launch agent runtime")?;
 
     if let Some(mut stdin) = child.stdin.take() {
-        let _ = stdin.write_all(trimmed.as_bytes());
+        let _ = stdin.write_all(final_prompt.as_bytes());
     }
 
     let stdout = child.stdout.take().context("Missing stdout pipe")?;
@@ -377,10 +430,12 @@ fn parse_stream_json_value(v: &Value, saw_incremental_delta: &mut bool) -> Vec<S
                 .to_owned();
             let ok = !v.get("is_error").and_then(Value::as_bool).unwrap_or(false);
             let duration_ms = v.get("duration_ms").and_then(Value::as_u64);
+            let output = extract_tool_output(v.get("output").or_else(|| v.get("content")));
             out.push(StreamEvent::ToolFinish {
                 id,
                 ok,
                 duration_ms,
+                output,
             });
             out.push(StreamEvent::Status("Thinking…".into()));
             return out;
@@ -407,8 +462,13 @@ fn parse_stream_json_value(v: &Value, saw_incremental_delta: &mut bool) -> Vec<S
             }
             return out;
         }
-        // Final summary object: only emit text if we did NOT already stream incremental deltas
+        // Final summary object: emit token usage if reported, and text only if no deltas streamed
         "result" => {
+            if let Some(total) = extract_total_tokens(v) {
+                out.push(StreamEvent::Usage {
+                    total_tokens: total,
+                });
+            }
             if !*saw_incremental_delta
                 && let Some(s) = v
                     .get("text")
@@ -514,10 +574,14 @@ fn parse_stream_json_value(v: &Value, saw_incremental_delta: &mut bool) -> Vec<S
                         });
                     } else {
                         let ok = item.get("exit_code").and_then(Value::as_i64).unwrap_or(0) == 0;
+                        let output = extract_tool_output(
+                            item.get("aggregated_output").or_else(|| item.get("output")),
+                        );
                         out.push(StreamEvent::ToolFinish {
                             id,
                             ok,
                             duration_ms: None,
+                            output,
                         });
                     }
                 } else if itype == "reasoning"
@@ -535,7 +599,15 @@ fn parse_stream_json_value(v: &Value, saw_incremental_delta: &mut bool) -> Vec<S
             }
             return out;
         }
-        "system" | "thread.started" | "turn.started" | "turn.completed" => return out,
+        "turn.completed" => {
+            if let Some(total) = extract_total_tokens(v) {
+                out.push(StreamEvent::Usage {
+                    total_tokens: total,
+                });
+            }
+            return out;
+        }
+        "system" | "thread.started" | "turn.started" => return out,
         _ => {}
     }
 
@@ -569,6 +641,56 @@ fn parse_stream_json_value(v: &Value, saw_incremental_delta: &mut bool) -> Vec<S
         }
     }
     out
+}
+
+fn extract_tool_output(val: Option<&Value>) -> String {
+    let Some(v) = val else {
+        return String::new();
+    };
+    let raw = if let Some(s) = v.as_str() {
+        // Hermes wraps terminal stdout in JSON string `{"output": "...", "exit_code": 0}`
+        if let Ok(inner) = serde_json::from_str::<Value>(s)
+            && let Some(out) = inner.get("output").and_then(Value::as_str)
+        {
+            out.to_owned()
+        } else {
+            s.to_owned()
+        }
+    } else {
+        v.to_string()
+    };
+    let trimmed = raw.trim();
+    if trimmed.chars().count() <= 1600 {
+        trimmed.to_owned()
+    } else {
+        let head: String = trimmed.chars().take(1600).collect();
+        format!("{head}\n…")
+    }
+}
+
+fn extract_total_tokens(v: &Value) -> Option<u64> {
+    if let Some(t) = v.pointer("/tokens/total").and_then(Value::as_u64) {
+        return Some(t);
+    }
+    if let Some(u) = v.get("usage").or_else(|| v.get("tokens")) {
+        if let Some(t) = u.get("total_tokens").and_then(Value::as_u64) {
+            return Some(t);
+        }
+        let inp = u
+            .get("input_tokens")
+            .or_else(|| u.get("input"))
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        let out = u
+            .get("output_tokens")
+            .or_else(|| u.get("output"))
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        if inp + out > 0 {
+            return Some(inp + out);
+        }
+    }
+    None
 }
 
 fn summarize_tool_input(tool_name: &str, input: Option<&Value>) -> String {
@@ -681,7 +803,8 @@ mod tests {
             StreamEvent::ToolFinish {
                 id,
                 ok: true,
-                duration_ms: Some(971)
+                duration_ms: Some(971),
+                ..
             } if id == "call_1"
         ));
 

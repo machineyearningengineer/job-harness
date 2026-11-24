@@ -14,12 +14,6 @@ pub fn popover_glass() -> Rgba {
 pub fn dock_glass() -> Rgba {
     rgba(0x16161eff)
 }
-pub fn interview_group_bg() -> Rgba {
-    rgba(0x141222ff)
-}
-pub fn interview_group_border() -> Rgba {
-    rgba(0x8b7cf628)
-}
 pub fn row_hover() -> Rgba {
     rgba(0xffffff0e)
 }
