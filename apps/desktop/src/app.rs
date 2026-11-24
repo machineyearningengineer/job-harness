@@ -539,9 +539,11 @@ impl JobHarnessApp {
             seen_pending_secrets: HashSet::new(),
             known_ready_secrets: HashMap::new(),
         };
+        crate::macos_notify::init();
         app.refresh_snapshot_async(false, cx);
-        // Background ephemeral secret vault watcher: auto-opens Secret Modal on agent requests,
-        // updates live TTL countdown, and confirms when consumed & shredded or expired.
+        // Background ephemeral secret vault + macOS notification click watcher:
+        // auto-opens Secret Modal on agent requests, updates live TTL countdown,
+        // and opens the linked role's Brief when the user clicks a macOS notification.
         cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor()
@@ -551,8 +553,20 @@ impl JobHarnessApp {
                     .background_executor()
                     .spawn(async move { secrets::sweep_expired().unwrap_or_default() })
                     .await;
+                let clicked_rec = crate::macos_notify::take_clicked_record();
                 let ok = this.update(cx, |app, cx| {
                     app.sync_secret_vault_state(swept, cx);
+                    if let Some(rec_path) = clicked_rec
+                        && let Some(card) = app
+                            .snapshot
+                            .active_cards
+                            .iter()
+                            .chain(app.snapshot.archived_cards.iter())
+                            .find(|c| c.record_path == rec_path)
+                            .cloned()
+                    {
+                        app.open_role_drawer(card, DrawerTab::Brief, cx);
+                    }
                 });
                 if ok.is_err() {
                     break;
@@ -1014,33 +1028,19 @@ impl JobHarnessApp {
         .detach();
     }
 
-    fn send_desktop_notification(&self, title: &str, subtitle: &str, body: &str, force: bool) {
+    fn send_desktop_notification(
+        &self,
+        id: &str,
+        title: &str,
+        subtitle: &str,
+        body: &str,
+        record_path: Option<&str>,
+        force: bool,
+    ) {
         if !force && !self.desktop_notifications {
             return;
         }
-        #[cfg(target_os = "macos")]
-        {
-            let esc = |s: &str| {
-                s.replace('\\', "\\\\")
-                    .replace('"', "\\\"")
-                    .replace(['\n', '\r'], " ")
-            };
-            let script = format!(
-                "display notification \"{}\" with title \"{}\" subtitle \"{}\"",
-                esc(&truncate_end(body, 140)),
-                esc(title),
-                esc(subtitle),
-            );
-            std::thread::spawn(move || {
-                let _ = std::process::Command::new("osascript")
-                    .args(["-e", &script])
-                    .output();
-            });
-        }
-        #[cfg(not(target_os = "macos"))]
-        {
-            let _ = (title, subtitle, body);
-        }
+        crate::macos_notify::send(id, title, subtitle, &truncate_end(body, 140), record_path);
     }
 
     /// Loads workspace snapshot strictly on the background executor (zero UI-thread stalls).
@@ -1086,11 +1086,13 @@ impl JobHarnessApp {
                                     .num_minutes();
                                 if (0..=lead_mins).contains(&mins) {
                                     let key = format!("interview:{}:{}", card.record_path, start);
-                                    if app.notified_keys.insert(key) {
+                                    if app.notified_keys.insert(key.clone()) {
                                         app.send_desktop_notification(
+                                            &key,
                                             "Job Harness",
                                             &format!("Interview in {mins} min"),
                                             &format!("{} — {}", card.company, card.title),
+                                            Some(&card.record_path),
                                             false,
                                         );
                                     }
@@ -1691,7 +1693,7 @@ impl JobHarnessApp {
                     Err("Enter a valid email address (or leave blank to inherit default)".into())
                 }
             }
-            "avoid_list" | "notice_period" => Ok(()),
+            "avoid_list" | "notice_period" | "discovery_sources" => Ok(()),
             "timezone" => {
                 if !t.is_empty() && !t.contains(' ') {
                     Ok(())
@@ -1760,6 +1762,9 @@ impl JobHarnessApp {
             "notice_period" => self.snapshot.profile_settings.notice_period = raw.clone(),
             "target_roles" => {
                 self.snapshot.profile_settings.target_roles = split_csv(&raw).join(", ");
+            }
+            "discovery_sources" => {
+                self.snapshot.profile_settings.discovery_sources = split_csv(&raw).join(", ");
             }
             "avoid_list" => {
                 self.snapshot.profile_settings.avoid_list = split_csv(&raw).join(", ");
@@ -1852,6 +1857,19 @@ impl JobHarnessApp {
                         "target_roles" => {
                             cfg["target_roles"] = json!(split_csv(&raw));
                         }
+                        "discovery_sources" => {
+                            let items = split_csv(&raw);
+                            if !cfg["discovery"].is_object() {
+                                cfg["discovery"] = json!({});
+                            }
+                            if items.is_empty() {
+                                if let Some(obj) = cfg["discovery"].as_object_mut() {
+                                    obj.remove("sources");
+                                }
+                            } else {
+                                cfg["discovery"]["sources"] = json!(items);
+                            }
+                        }
                         "avoid_list" => {
                             if !cfg["discovery"].is_object() {
                                 cfg["discovery"] = json!({});
@@ -1882,6 +1900,109 @@ impl JobHarnessApp {
             });
         })
         .detach();
+    }
+
+    fn set_communication_enum(
+        &mut self,
+        field: &'static str,
+        value: &'static str,
+        toast: &'static str,
+        cx: &mut Context<Self>,
+    ) {
+        match field {
+            "cover_letter_mode" => {
+                self.snapshot.profile_settings.cover_letter_mode = value.to_owned();
+            }
+            "post_rejection_reply" => {
+                self.snapshot.profile_settings.post_rejection_reply = value.to_owned();
+            }
+            _ => {}
+        }
+        self.mark_sync_working("Saving…", cx);
+        let client = self.client.clone();
+        cx.spawn(async move |this, cx| {
+            let res = cx
+                .background_executor()
+                .spawn(async move {
+                    client.update_ledger_config(|cfg| {
+                        if !cfg["communication"].is_object() {
+                            cfg["communication"] = json!({});
+                        }
+                        cfg["communication"][field] = json!(value);
+                    })
+                })
+                .await;
+            let _ = this.update(cx, |app, cx| match res {
+                Ok(()) => {
+                    app.mark_sync_saved("Saved", cx);
+                    app.set_toast(toast, cx);
+                }
+                Err(err) => {
+                    app.mark_sync_failed("Save failed", cx);
+                    app.set_toast(format!("Save failed: {err}"), cx);
+                    app.refresh_snapshot_async(false, cx);
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn open_or_create_cover_letter_template(&mut self, cx: &mut Context<Self>) {
+        let Some(root) = self.client.target.local_root().map(|p| p.to_path_buf()) else {
+            self.set_toast("Template editing requires a local workspace", cx);
+            return;
+        };
+        let rel = if self
+            .snapshot
+            .profile_settings
+            .cover_letter_template
+            .trim()
+            .is_empty()
+        {
+            "context/profile/cover-letter-template.md".to_owned()
+        } else {
+            self.snapshot
+                .profile_settings
+                .cover_letter_template
+                .trim()
+                .to_owned()
+        };
+        let full = root.join(&rel);
+        if !full.is_file() {
+            if let Some(parent) = full.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let starter = "# Cover letter template\n\n\
+                Keep cover letters to 3 short paragraphs strictly backed by verified facts in `context/`.\n\
+                Leave empty or set Cover letters to **Skip** if you only want to submit CVs.\n\n\
+                ## Structure\n\
+                1. Why this product or engineering problem caught your eye (1 concrete, public detail).\n\
+                2. Two verified proof points from your career ledger directly relevant to the role.\n\
+                3. Short, direct close with availability.\n";
+            if let Err(err) = std::fs::write(&full, starter) {
+                self.set_toast(format!("Could not create template: {err}"), cx);
+                return;
+            }
+            self.snapshot.profile_settings.cover_letter_template = rel.clone();
+            let client = self.client.clone();
+            let rel_save = rel.clone();
+            cx.spawn(async move |_, cx| {
+                let _ = cx
+                    .background_executor()
+                    .spawn(async move {
+                        client.update_ledger_config(|cfg| {
+                            if !cfg["communication"].is_object() {
+                                cfg["communication"] = json!({});
+                            }
+                            cfg["communication"]["cover_letter_template"] = json!(rel_save);
+                        })
+                    })
+                    .await;
+            })
+            .detach();
+        }
+        open_in_system(&full);
+        self.set_toast(format!("Opened {rel}"), cx);
     }
 
     fn render_editable_kv(
@@ -2152,6 +2273,62 @@ impl JobHarnessApp {
         .detach();
     }
 
+    fn toggle_cv_track(&mut self, track_name: String, cx: &mut Context<Self>) {
+        let mut now_enabled = true;
+        for node in &mut self.snapshot.cv_nodes {
+            if !node.is_master && node.name == track_name {
+                node.enabled = !node.enabled;
+                now_enabled = node.enabled;
+                break;
+            }
+        }
+        let disabled: Vec<String> = self
+            .snapshot
+            .cv_nodes
+            .iter()
+            .filter(|n| !n.is_master && !n.enabled)
+            .map(|n| n.name.clone())
+            .collect();
+        self.mark_sync_working("Saving…", cx);
+        let client = self.client.clone();
+        let name_msg = track_name.clone();
+        cx.spawn(async move |this, cx| {
+            let res = cx
+                .background_executor()
+                .spawn(async move {
+                    client.update_ledger_config(|cfg| {
+                        if disabled.is_empty() {
+                            if let Some(obj) = cfg.as_object_mut() {
+                                obj.remove("disabled_cv_tracks");
+                            }
+                        } else {
+                            cfg["disabled_cv_tracks"] = json!(disabled);
+                        }
+                    })
+                })
+                .await;
+            let _ = this.update(cx, |app, cx| match res {
+                Ok(()) => {
+                    app.mark_sync_saved("Saved", cx);
+                    app.set_toast(
+                        if now_enabled {
+                            format!("Enabled {name_msg} CV track")
+                        } else {
+                            format!("Paused {name_msg} CV track (PDF kept on disk)")
+                        },
+                        cx,
+                    );
+                }
+                Err(err) => {
+                    app.mark_sync_failed("Save failed", cx);
+                    app.set_toast(format!("Save failed: {err}"), cx);
+                    app.refresh_snapshot_async(false, cx);
+                }
+            });
+        })
+        .detach();
+    }
+
     fn open_command_bar(&mut self, cx: &mut Context<Self>) {
         self.command_query.clear();
         self.command_index = 0;
@@ -2373,14 +2550,16 @@ impl JobHarnessApp {
         self.known_ready_secrets = new_ready_map;
         if let Some(req) = newly_pending {
             let key = format!("secret:{}", req.id);
-            if self.notified_keys.insert(key) {
+            if self.notified_keys.insert(key.clone()) {
                 self.send_desktop_notification(
+                    &key,
                     "Job Harness",
                     "Secret requested",
                     &format!(
                         "{} — enter once in the app (auto-shreds after use)",
                         req.label
                     ),
+                    None,
                     false,
                 );
             }
@@ -2845,7 +3024,15 @@ impl JobHarnessApp {
                                 }
                             }
                             if let Some((sub, body)) = notify_turn {
-                                app.send_desktop_notification("Job Harness", sub, &body, false);
+                                let turn_key = format!("turn-{}", app.stream_turn_id);
+                                app.send_desktop_notification(
+                                    &turn_key,
+                                    "Job Harness",
+                                    sub,
+                                    &body,
+                                    None,
+                                    false,
+                                );
                             }
                             app.streaming = false;
                             app.stream_status.clear();
@@ -9348,6 +9535,21 @@ impl JobHarnessApp {
                                             cx,
                                         ))
                                         .child(self.render_editable_kv(
+                                            "discovery_sources",
+                                            "Job boards",
+                                            truncate_end(
+                                                if ps.discovery_sources.is_empty() {
+                                                    "employer ATS, HN, Cord"
+                                                } else {
+                                                    &ps.discovery_sources
+                                                },
+                                                26,
+                                            ),
+                                            ps.discovery_sources.clone(),
+                                            "employer ATS, HN, Cord, LinkedIn",
+                                            cx,
+                                        ))
+                                        .child(self.render_editable_kv(
                                             "avoid_list",
                                             "Avoid list",
                                             truncate_end(
@@ -9377,6 +9579,62 @@ impl JobHarnessApp {
                                             "direct, concise, plain-language",
                                             cx,
                                         ))
+                                        .child({
+                                            let draft_on =
+                                                ps.post_rejection_reply == "draft_after_interview";
+                                            div()
+                                                .py(px(3.0))
+                                                .flex()
+                                                .items_center()
+                                                .justify_between()
+                                                .gap_2()
+                                                .child(
+                                                    div()
+                                                        .text_xs()
+                                                        .text_color(theme::text_muted())
+                                                        .child("Post-interview rejection"),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .id("prof-toggle-post-rej")
+                                                        .px(px(7.0))
+                                                        .py(px(2.0))
+                                                        .rounded(theme::r_xs())
+                                                        .bg(theme::surface_subtle())
+                                                        .hover(|s| s.bg(theme::row_hover()))
+                                                        .cursor_pointer()
+                                                        .text_size(px(11.0))
+                                                        .text_color(if draft_on {
+                                                            theme::emerald()
+                                                        } else {
+                                                            theme::text_secondary()
+                                                        })
+                                                        .on_click(cx.listener(
+                                                            move |this, _, _, cx| {
+                                                                if draft_on {
+                                                                    this.set_communication_enum(
+                                                                        "post_rejection_reply",
+                                                                        "off",
+                                                                        "Post-interview rejection drafts off",
+                                                                        cx,
+                                                                    );
+                                                                } else {
+                                                                    this.set_communication_enum(
+                                                                        "post_rejection_reply",
+                                                                        "draft_after_interview",
+                                                                        "Will draft thank-you + feedback ask after interviews (never auto-sent)",
+                                                                        cx,
+                                                                    );
+                                                                }
+                                                            },
+                                                        ))
+                                                        .child(if draft_on {
+                                                            "Draft thank-you"
+                                                        } else {
+                                                            "Off"
+                                                        }),
+                                                )
+                                        })
                                 })
                                 .children(groups.into_iter().filter_map(|grp| {
                                     let items: Vec<_> = self
@@ -9673,6 +9931,8 @@ impl JobHarnessApp {
                             .unwrap_or_else(|| node.relative_path.clone());
                         let rel_for_replace = node.relative_path.clone();
                         let is_master = node.is_master;
+                        let is_enabled = node.enabled;
+                        let track_for_toggle = node.name.clone();
                         let prefix = if is_master { "" } else { "└ " };
                         let roles_note = node
                             .matched_roles
@@ -9699,7 +9959,11 @@ impl JobHarnessApp {
                                             .child(
                                                 div()
                                                     .text_xs()
-                                                    .text_color(theme::text_primary())
+                                                    .text_color(if is_enabled {
+                                                        theme::text_primary()
+                                                    } else {
+                                                        theme::text_muted()
+                                                    })
                                                     .child(format!("{prefix}{}", node.name)),
                                             )
                                             .when_some(roles_note, |d, note| {
@@ -9711,8 +9975,8 @@ impl JobHarnessApp {
                                                 )
                                             }),
                                     )
-                                    // Subtle 7px green/amber status dot instead of repeated "Ready" text
-                                    .child(
+                                    // Master keeps quiet status dot; child tracks get a subtle clean toggle right in that slot
+                                    .child(if is_master {
                                         div()
                                             .w(px(7.0))
                                             .h(px(7.0))
@@ -9721,8 +9985,18 @@ impl JobHarnessApp {
                                                 theme::emerald()
                                             } else {
                                                 theme::amber_accent()
-                                            }),
-                                    ),
+                                            })
+                                            .into_any_element()
+                                    } else {
+                                        div()
+                                            .id(SharedString::from(format!("cv-toggle-{i}")))
+                                            .cursor_pointer()
+                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                this.toggle_cv_track(track_for_toggle.clone(), cx);
+                                            }))
+                                            .child(switch_pill(is_enabled))
+                                            .into_any_element()
+                                    }),
                             )
                             // Clickable underlined path reveals the PDF in Finder + inline Copy icon
                             .child(
@@ -9878,6 +10152,169 @@ impl JobHarnessApp {
                                         .child("Review in Chat →"),
                                 ),
                         )
+                    })
+                    .child({
+                        let mode = self.snapshot.profile_settings.cover_letter_mode.clone();
+                        let cl_enabled = mode != "never";
+                        let tpl_rel = if self
+                            .snapshot
+                            .profile_settings
+                            .cover_letter_template
+                            .trim()
+                            .is_empty()
+                        {
+                            "context/profile/cover-letter-template.md".to_owned()
+                        } else {
+                            self.snapshot
+                                .profile_settings
+                                .cover_letter_template
+                                .trim()
+                                .to_owned()
+                        };
+                        let tpl_exists = self
+                            .client
+                            .target
+                            .local_root()
+                            .is_some_and(|r| r.join(&tpl_rel).is_file());
+                        let modes: [(&'static str, &'static str, &'static str); 2] = [
+                            (
+                                "only_when_required",
+                                "When required",
+                                "Cover letters: only when portal requires one",
+                            ),
+                            ("always", "Always", "Cover letters: draft for every application"),
+                        ];
+                        div()
+                            .pt_3()
+                            .border_t_1()
+                            .border_color(theme::hairline())
+                            .flex()
+                            .flex_col()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .justify_between()
+                                    .gap_2()
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .font_weight(FontWeight::MEDIUM)
+                                            .text_color(if cl_enabled {
+                                                theme::text_primary()
+                                            } else {
+                                                theme::text_muted()
+                                            })
+                                            .child("Cover letter"),
+                                    )
+                                    .child(
+                                        div()
+                                            .id("cl-master-toggle")
+                                            .cursor_pointer()
+                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                if cl_enabled {
+                                                    this.set_communication_enum(
+                                                        "cover_letter_mode",
+                                                        "never",
+                                                        "Cover letters skipped",
+                                                        cx,
+                                                    );
+                                                } else {
+                                                    this.set_communication_enum(
+                                                        "cover_letter_mode",
+                                                        "only_when_required",
+                                                        "Cover letters enabled when required",
+                                                        cx,
+                                                    );
+                                                }
+                                            }))
+                                            .child(switch_pill(cl_enabled)),
+                                    ),
+                            )
+                            .when(cl_enabled, |d| {
+                                d.child(
+                                    div()
+                                        .p(px(2.0))
+                                        .rounded(theme::r_md())
+                                        .bg(theme::window_glass())
+                                        .border_1()
+                                        .border_color(theme::hairline())
+                                        .flex()
+                                        .items_center()
+                                        .gap(px(2.0))
+                                        .children(modes.into_iter().map(|(val, lbl, toast)| {
+                                            let active = mode == val;
+                                            div()
+                                                .id(SharedString::from(format!("cl-mode-{val}")))
+                                                .flex_1()
+                                                .py(px(4.0))
+                                                .rounded(theme::r_sm())
+                                                .bg(if active {
+                                                    theme::surface_active()
+                                                } else {
+                                                    gpui::rgba(0x00000000)
+                                                })
+                                                .hover(|s| s.bg(theme::row_hover()))
+                                                .cursor_pointer()
+                                                .flex()
+                                                .items_center()
+                                                .justify_center()
+                                                .text_size(px(11.0))
+                                                .text_color(if active {
+                                                    theme::text_primary()
+                                                } else {
+                                                    theme::text_muted()
+                                                })
+                                                .on_click(cx.listener(move |this, _, _, cx| {
+                                                    this.set_communication_enum(
+                                                        "cover_letter_mode",
+                                                        val,
+                                                        toast,
+                                                        cx,
+                                                    );
+                                                }))
+                                                .child(lbl)
+                                        })),
+                                )
+                                .child(
+                                    div()
+                                        .id("cl-template-row")
+                                        .py(px(4.0))
+                                        .flex()
+                                        .items_center()
+                                        .justify_between()
+                                        .gap_2()
+                                        .cursor_pointer()
+                                        .hover(|s| s.bg(theme::row_hover()))
+                                        .rounded(theme::r_sm())
+                                        .px_1()
+                                        .mx(px(-4.0))
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.open_or_create_cover_letter_template(cx);
+                                        }))
+                                        .child(
+                                            div()
+                                                .text_size(px(11.0))
+                                                .text_color(theme::text_secondary())
+                                                .child(if tpl_exists {
+                                                    "Cover letter template"
+                                                } else {
+                                                    "No template (optional skipped)"
+                                                }),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_size(px(11.0))
+                                                .text_color(theme::lavender())
+                                                .child(if tpl_exists {
+                                                    "Edit ↗"
+                                                } else {
+                                                    "Create"
+                                                }),
+                                        ),
+                                )
+                            })
                     })
                     .child(
                         div()
@@ -10664,7 +11101,22 @@ impl JobHarnessApp {
                                             .child("Uses macOS caffeinate only while a run is active; releases immediately when the turn ends."),
                                     )
                                 })
-                                .child(
+                                .child({
+                                    let auth = crate::macos_notify::auth_status();
+                                    let (action_lbl, action_col, action_kind) = match auth {
+                                        crate::macos_notify::NotificationAuthStatus::Authorized => {
+                                            ("Test", theme::text_muted(), 0u8)
+                                        }
+                                        crate::macos_notify::NotificationAuthStatus::NotDetermined => {
+                                            ("Enable", theme::amber_text(), 1u8)
+                                        }
+                                        crate::macos_notify::NotificationAuthStatus::Denied => {
+                                            ("System Settings", theme::amber_text(), 2u8)
+                                        }
+                                        crate::macos_notify::NotificationAuthStatus::Unbundled => {
+                                            ("App bundle only", theme::text_muted(), 3u8)
+                                        }
+                                    };
                                     div()
                                         .py_1()
                                         .flex()
@@ -10688,26 +11140,48 @@ impl JobHarnessApp {
                                                         .px(px(6.0))
                                                         .py(px(1.0))
                                                         .rounded(theme::r_xs())
-                                                        .hover(|s| {
-                                                            s.bg(theme::row_hover())
-                                                                .text_color(theme::text_primary())
+                                                        .when(action_kind < 3, |d| {
+                                                            d.hover(|s| {
+                                                                s.bg(theme::row_hover())
+                                                                    .text_color(theme::text_primary())
+                                                            })
+                                                            .cursor_pointer()
+                                                            .on_click(cx.listener(
+                                                                move |this, _, _, cx| match action_kind {
+                                                                    0 => {
+                                                                        this.send_desktop_notification(
+                                                                            "test-notif",
+                                                                            "Job Harness",
+                                                                            "Notifications active",
+                                                                            "Interviews, secret requests, and finished runs will alert you here.",
+                                                                            None,
+                                                                            true,
+                                                                        );
+                                                                        this.set_toast(
+                                                                            "Sent native macOS notification",
+                                                                            cx,
+                                                                        );
+                                                                    }
+                                                                    1 => {
+                                                                        crate::macos_notify::request_authorization();
+                                                                        this.set_toast(
+                                                                            "Requested macOS notification permission",
+                                                                            cx,
+                                                                        );
+                                                                    }
+                                                                    _ => {
+                                                                        crate::macos_notify::open_system_settings();
+                                                                        this.set_toast(
+                                                                            "Opened macOS Notifications settings",
+                                                                            cx,
+                                                                        );
+                                                                    }
+                                                                },
+                                                            ))
                                                         })
-                                                        .cursor_pointer()
                                                         .text_size(px(10.5))
-                                                        .text_color(theme::text_muted())
-                                                        .on_click(cx.listener(|this, _, _, cx| {
-                                                            this.send_desktop_notification(
-                                                                "Job Harness",
-                                                                "Notifications active",
-                                                                "Interviews, secret requests, and finished runs will alert you here.",
-                                                                true,
-                                                            );
-                                                            this.set_toast(
-                                                                "Sent test macOS notification",
-                                                                cx,
-                                                            );
-                                                        }))
-                                                        .child("Test"),
+                                                        .text_color(action_col)
+                                                        .child(action_lbl),
                                                 ),
                                         )
                                         .child(
@@ -10718,6 +11192,12 @@ impl JobHarnessApp {
                                                     this.desktop_notifications =
                                                         !this.desktop_notifications;
                                                     let on = this.desktop_notifications;
+                                                    if on
+                                                        && crate::macos_notify::auth_status()
+                                                            == crate::macos_notify::NotificationAuthStatus::NotDetermined
+                                                    {
+                                                        crate::macos_notify::request_authorization();
+                                                    }
                                                     this.set_toast(
                                                         if on {
                                                             "macOS notifications enabled"
@@ -10728,8 +11208,8 @@ impl JobHarnessApp {
                                                     );
                                                 }))
                                                 .child(switch_pill(self.desktop_notifications)),
-                                        ),
-                                )
+                                        )
+                                })
                                 .child(
                                     div()
                                         .py_1()
@@ -11551,20 +12031,26 @@ impl JobHarnessApp {
                         })
                         .children(quiet_roles.into_iter().enumerate().map(|(i, card)| {
                             let today = chrono::Utc::now().date_naive();
+                            let short_stage = match card.stage.as_str() {
+                                "introduction" => "Intro",
+                                "screening" => "Screening",
+                                "technical" => "Technical",
+                                "final" => "Final",
+                                "offer" => "Offer",
+                                "applied" => "Applied",
+                                "saved" => "Saved",
+                                "prepared" => "Prepared",
+                                _ => "Active",
+                            };
                             let (days, age_label) = if let Some(d) = card.quiet_days {
-                                let st = title_case_stage(&card.stage);
-                                if d >= 14 {
-                                    (d, format!("{st} thread — no reply {d}d (stale)"))
-                                } else {
-                                    (d, format!("{st} thread — no reply {d}d (follow up)"))
-                                }
+                                (d, format!("{short_stage} {d}d"))
                             } else if let Ok(checked) =
                                 chrono::NaiveDate::parse_from_str(&card.checked, "%Y-%m-%d")
                             {
                                 let d = (today - checked).num_days().max(0) as u64;
-                                (d, format!("{} lead — untouched {d}d", title_case_stage(&card.stage)))
+                                (d, format!("{short_stage} {d}d"))
                             } else {
-                                (0, title_case_stage(&card.stage))
+                                (0, short_stage.to_owned())
                             };
                             let card_archive = card.clone();
                             let company_follow = card.company.clone();
@@ -12517,18 +13003,92 @@ impl JobHarnessApp {
                 };
 
                 let step_body: AnyElement = match step {
-                    0 => div()
-                        .flex()
-                        .flex_col()
-                        .gap_3()
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(theme::text_secondary())
-                                .child("Pick your local agent runtime. Job Harness keeps all career files locally and never locks you into one model."),
-                        )
-                        .child(self.render_agent_controls("wiz", false, cx))
-                        .into_any_element(),
+                    0 => {
+                        let auth = crate::macos_notify::auth_status();
+                        let (perm_txt, perm_col, perm_kind) = match auth {
+                            crate::macos_notify::NotificationAuthStatus::Authorized => {
+                                ("Allowed", theme::emerald(), 0u8)
+                            }
+                            crate::macos_notify::NotificationAuthStatus::NotDetermined => {
+                                ("Enable", theme::lavender(), 1u8)
+                            }
+                            crate::macos_notify::NotificationAuthStatus::Denied => {
+                                ("System Settings", theme::amber_text(), 2u8)
+                            }
+                            crate::macos_notify::NotificationAuthStatus::Unbundled => {
+                                ("Ready in .app", theme::text_muted(), 0u8)
+                            }
+                        };
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_3()
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(theme::text_secondary())
+                                    .child("Pick your local agent runtime. Job Harness keeps all career files locally and never locks you into one model."),
+                            )
+                            .child(self.render_agent_controls("wiz", false, cx))
+                            .child(
+                                div()
+                                    .pt_2()
+                                    .border_t_1()
+                                    .border_color(theme::hairline())
+                                    .flex()
+                                    .items_center()
+                                    .justify_between()
+                                    .gap_2()
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .flex_col()
+                                            .gap(px(2.0))
+                                            .child(
+                                                div()
+                                                    .text_xs()
+                                                    .text_color(theme::text_primary())
+                                                    .child("macOS notifications"),
+                                            )
+                                            .child(
+                                                div()
+                                                    .text_size(px(11.0))
+                                                    .text_color(theme::text_muted())
+                                                    .child("Optional alerts for interviews & secrets. No Accessibility or Full Disk Access needed."),
+                                            ),
+                                    )
+                                    .child(
+                                        div()
+                                            .id("wiz-notif-perm")
+                                            .flex_shrink_0()
+                                            .px_2()
+                                            .py(px(4.0))
+                                            .rounded(theme::r_sm())
+                                            .when(perm_kind > 0, |d| {
+                                                d.bg(theme::surface_subtle())
+                                                    .hover(|s| s.bg(theme::row_hover()))
+                                                    .cursor_pointer()
+                                                    .on_click(cx.listener(
+                                                        move |this, _, _, cx| {
+                                                            if perm_kind == 1 {
+                                                                crate::macos_notify::request_authorization();
+                                                                this.set_toast(
+                                                                    "Requested macOS notification permission",
+                                                                    cx,
+                                                                );
+                                                            } else {
+                                                                crate::macos_notify::open_system_settings();
+                                                            }
+                                                        },
+                                                    ))
+                                            })
+                                            .text_xs()
+                                            .text_color(perm_col)
+                                            .child(perm_txt),
+                                    ),
+                            )
+                            .into_any_element()
+                    }
                     1 => {
                         let cv_count = self.snapshot.cv_nodes.len();
                         div()

@@ -1,0 +1,29 @@
+# Job Harness
+
+> Local-first AI job search workbench, job application tracker, and MCP server written in Rust (with a native GPUI desktop app). Works with Claude Code, Codex, Hermes, Cursor, Pi, or any MCP/CLI agent.
+
+Job Harness gives AI agents durable career memory and hard safety rails while keeping all data private on your machine in plain Markdown, JSON, and local SQLite.
+
+## What Job Harness solves
+- **One truthful career ledger:** Master CV (`content/baseline.json`), role-focused child CV tracks (Typst/PDF), approved screening answers, CARL story bank, interview debriefs, and submitted packets in one local folder.
+- **Transactional submission safety:** Freezes immutable SHA-256 packets (`prepare_application`), enforces daily caps, checks live Sent mail before sending, and blocks duplicate retries when an outcome is unconfirmed.
+- **Agent- and model-agnostic:** Runs as a local stdio MCP server (`jh mcp`) and CLI (`jh`). Switch between Claude Code, Codex, Hermes, Cursor, Pi, or local models without losing history.
+- **Native desktop workbench (GPUI):** Instant Kanban board, interactive Sankey funnel (distinguishing Rejected, Withdrawn, Expired, and Ghosted), 2-layer company + round interview briefs, inline profile/delegation settings, and live streaming agent chat.
+- **Zero credentials in workspace:** Uses host CLI OAuth and an owner-only (`0600`) 1-use self-destructing ephemeral secret vault (`jh secret`) with TTL expiry.
+
+## Quick start
+- Install CLI: `curl -fsSL https://raw.githubusercontent.com/machineyearningengineer/job-harness/main/scripts/get.sh | sh`
+- Initialize workspace: `jh setup --workspace "$HOME/Career/workspace"`
+- Print MCP config: `jh --root "$HOME/Career/workspace" connect mcp`
+- Try desktop demo: `make desktop-demo`
+- Agent one-shot setup guide: https://raw.githubusercontent.com/machineyearningengineer/job-harness/main/docs/AGENT-SETUP.md
+
+## Key documentation
+- [README.md](README.md): Overview, comparison with Career-Ops, ApplyPilot, AIHawk, and spreadsheets, delegation modes, FAQ.
+- [docs/AGENT-SETUP.md](docs/AGENT-SETUP.md): Automated setup instructions for AI coding agents.
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md): Rust crate structure, invariants, SQLite ledger, and MCP v2 contract.
+- [docs/AUTOMATION.md](docs/AUTOMATION.md): Delegation modes (Drafts only, Assisted, Autonomous) and fail-closed permissions.
+- [docs/SECRETS.md](docs/SECRETS.md): 1-use ephemeral secret handoff (`jh secret`) and email-OTP-first policy.
+- [docs/TOOLING.md](docs/TOOLING.md): Recommended connectors for mail, calendar, web search, and browser automation.
+- [docs/CV.md](docs/CV.md): Evidence-backed master CV and child tracks with Typst.
+- [resources/guides/career-operations.md](resources/guides/career-operations.md): Daily career operating contract for agents.

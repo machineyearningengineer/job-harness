@@ -4,8 +4,10 @@ Job Harness **never** stores passwords, portal logins, or API tokens in your car
 
 When an agent legitimately needs a short-lived credential (for example, a Workday portal email + password or a one-time verification code):
 
-1. **Inside an ADE with native secrets (e.g. T3 Code):** Use the host ADE's built-in `request_secret` card first.
-2. **Inside Job Harness Desktop or standalone CLI (`Claude`, `Codex`, `Hermes`):** Use `jh secret` — an owner-only (`0700` dir / `0600` files) ephemeral vault in OS temp storage (`$TMPDIR/job-harness-secrets-<user>/`) with automatic self-destruction.
+1. **Self-serve email OTPs first:** If a verification code is sent to a mailbox the agent already has read access to (for example via connected Gmail/IMAP), the agent **must fetch the code from email itself first** rather than interrupting the user.
+2. **Escalate only when unreachable, with a bounded lease:** Only request human intervention when the credential is a password, SMS/authenticator code, or sent to an unlinked inbox. Requests carry a strict TTL/lease (default `300s`) — if unanswered within the wait window, the agent pauses only that single role and continues other work cleanly instead of stalling the whole batch.
+3. **Inside an ADE with native secrets (e.g. T3 Code):** Use the host ADE's built-in `request_secret` card first.
+4. **Inside Job Harness Desktop or standalone CLI (`Claude`, `Codex`, `Hermes`):** Use `jh secret` — an owner-only (`0700` dir / `0600` files) ephemeral vault in OS temp storage (`$TMPDIR/job-harness-secrets-<user>/`) with automatic self-destruction.
 
 ---
 

@@ -149,6 +149,7 @@ pub struct CvNode {
     pub relative_path: String,
     pub full_path: Option<PathBuf>,
     pub is_master: bool,
+    pub enabled: bool,
     pub matched_roles: Option<u64>,
     pub exists: bool,
 }
@@ -172,8 +173,12 @@ pub struct ProfileSettings {
     pub location_preferences: String,
     pub notice_period: String,
     pub target_roles: String,
+    pub discovery_sources: String,
     pub avoid_list: String,
     pub tone: String,
+    pub cover_letter_mode: String,
+    pub cover_letter_template: String,
+    pub post_rejection_reply: String,
     pub applied_ghost_days: u64,
 }
 
@@ -385,10 +390,23 @@ impl WorkspaceClient {
                 .unwrap_or("")
                 .to_owned(),
             target_roles: join_str_array(settings.get("target_roles")),
+            discovery_sources: join_str_array(disc.and_then(|d| d.get("sources"))),
             avoid_list: join_str_array(disc.and_then(|d| d.get("avoid_list"))),
             tone: comm
                 .and_then(|c| c["tone"].as_str())
                 .unwrap_or("")
+                .to_owned(),
+            cover_letter_mode: comm
+                .and_then(|c| c["cover_letter_mode"].as_str())
+                .unwrap_or("only_when_required")
+                .to_owned(),
+            cover_letter_template: comm
+                .and_then(|c| c["cover_letter_template"].as_str())
+                .unwrap_or("")
+                .to_owned(),
+            post_rejection_reply: comm
+                .and_then(|c| c["post_rejection_reply"].as_str())
+                .unwrap_or("off")
                 .to_owned(),
             applied_ghost_days: reminders
                 .and_then(|r| r["applied_ghost_days"].as_u64())
@@ -1309,11 +1327,7 @@ fn concise_reason(reason: &str) -> String {
         } else {
             "Active"
         };
-        return if days >= 14 {
-            format!("Stale {days}d ({stage} thread)")
-        } else {
-            format!("Follow up {days}d ({stage} thread)")
-        };
+        return format!("{stage} {days}d");
     }
     if reason.contains("within 24 hours") {
         return "Interview within 24h".into();
@@ -1333,9 +1347,20 @@ fn build_cv_tree(local_root: Option<&Path>, settings: &Value, track_fit: &Value)
         exists: primary_full.as_ref().is_some_and(|p| p.is_file()),
         full_path: primary_full,
         is_master: true,
+        enabled: true,
         matched_roles: None,
     });
 
+    let disabled: std::collections::HashSet<String> = settings
+        .get("disabled_cv_tracks")
+        .and_then(Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default();
     let matched = track_fit.get("matched_by_track").and_then(Value::as_object);
     let tracks: Vec<String> = match settings.get("cv_tracks") {
         Some(Value::Array(arr)) => arr
@@ -1359,6 +1384,7 @@ fn build_cv_tree(local_root: Option<&Path>, settings: &Value, track_fit: &Value)
             exists: full.as_ref().is_some_and(|p| p.is_file()),
             full_path: full,
             is_master: false,
+            enabled: !disabled.contains(&track),
             matched_roles: matched.and_then(|m| m.get(&track)).and_then(Value::as_u64),
         });
     }

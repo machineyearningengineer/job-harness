@@ -1,8 +1,8 @@
 <div align="center">
   <img src="docs/assets/icon.svg" width="72" height="72" alt="Job Harness">
   <h1>Job Harness</h1>
-  <p><strong>Local career ledger, safety guardrails, and native desktop workbench for any AI agent.</strong><br>
-  Track every role and CV track, prep 2-layer interview briefs, and keep your job search private on disk.</p>
+  <p><strong>Local-first AI job search workbench, job application tracker, and MCP server in Rust.</strong><br>
+  Track every application, tailor verified CVs, prep 2-layer interview briefs, and block duplicate applies with Claude Code, Codex, Hermes, Cursor, or any AI agent.</p>
   <p>
     <a href="https://github.com/machineyearningengineer/job-harness/releases"><img alt="Releases" src="https://img.shields.io/badge/releases-GitHub-4965ae?style=flat-square&logo=github"></a>
     <img alt="Claude Code" src="https://img.shields.io/badge/Claude_Code-18181b?style=flat-square&logo=anthropic&logoColor=white">
@@ -17,6 +17,7 @@
     <a href="#job-harness-vs-the-alternatives">Compare</a> ·
     <a href="#how-it-works">How It Works</a> ·
     <a href="#delegation--safety">Safety</a> ·
+    <a href="#frequently-asked-questions">FAQ</a> ·
     <a href="#documentation">Docs</a>
   </p>
 </div>
@@ -61,16 +62,16 @@ AI agents are great at researching companies, tailoring CVs, and drafting recrui
 
 Most open-source job bots optimize for blasting applications. Serious job searches break *after* you click submit — duplicate outreach, fabricated CV claims, forgotten recruiter threads, and zero interview prep.
 
-| Capability | Job Harness | Auto-apply bots *(ApplyPilot, AIHawk)* | Spreadsheets / Notion |
-|---|---|---|---|
-| **Core job** | End-to-end search memory, safety rails, inbox triage & interview prep | High-volume scraping & portal form-filling | Manual row tracking |
-| **Agent & model lock-in** | **Any agent via MCP / CLI** *(Hermes, Claude Code, Codex, Pi, Cursor, local models)* | Tied to one Python bot loop & provider stack | None |
-| **CV integrity** | **Verified master + child tracks**, SHA-256 frozen per submission — never invents facts | Per-job LLM rewrites (risk of drift or unverified metrics) | Manual copy-paste |
-| **Double-apply & email safety** | **Hard transactional lock** — blocks retries on unconfirmed submits, checks live Sent mail | Best-effort local logs | Human memory |
-| **Interview prep & debriefs** | **2-layer company + round briefs**, pre-call reminders, CARL story bank & transcripts | Not covered | Unstructured docs |
-| **Funnel truth** | Native Kanban + **Sankey flow** separating Rejected, Withdrawn & Ghosted | Raw apply counter | Manual formulas |
-| **Privacy & secrets** | **100% local Markdown + SQLite**, 1-use self-destructing secret handoff | Plaintext YAML / env configs | Cloud-hosted |
-| **License** | **MIT** | AGPL-3.0 / MIT | Proprietary |
+| Capability | Job Harness | Career-Ops | Auto-apply bots *(ApplyPilot, AIHawk)* | Spreadsheets / Notion |
+|---|---|---|---|---|
+| **Core architecture** | **Typed Rust MCP server + SQLite ledger + native GPUI desktop app** | Prompt/skill pipeline + Go TUI | Python scraping & form-fill bot | Manual row tracking |
+| **Agent & model lock-in** | **Any MCP/CLI agent** *(Claude Code, Codex, Hermes, Cursor, Pi, local)* | Claude Code / Codex / OpenCode CLI | Tied to one bot loop & provider | None |
+| **CV integrity** | **Verified master + child tracks**, SHA-256 frozen per submit — zero invented facts | Per-job tailored PDF from master CV | Per-job LLM rewrites (drift risk) | Manual copy-paste |
+| **Double-apply & email safety** | **Hard transactional lock** — blocks unconfirmed retries & checks live Sent mail | Human-in-the-loop (manual submit) | Best-effort local logs | Human memory |
+| **Interview prep & inbox** | **2-layer company + round briefs**, native macOS alerts, inbox triage & debriefs | Scoring rubric, STAR stories & negotiation | Not covered | Unstructured docs |
+| **Funnel visibility** | Native Kanban + **Sankey flow** *(Rejected vs Withdrawn vs Ghosted)* | Terminal pipeline TUI | Raw apply counter | Manual formulas |
+| **Privacy & secrets** | **100% local Markdown + SQLite**, 1-use self-destructing secret handoff | 100% local files | Plaintext YAML / env configs | Cloud-hosted |
+| **License** | **MIT** | MIT | AGPL-3.0 / MIT | Proprietary |
 
 ---
 
@@ -126,6 +127,25 @@ Download the latest macOS app from [GitHub Releases](https://github.com/machiney
 ```sh
 make desktop-demo
 ```
+
+---
+
+## Frequently Asked Questions
+
+**How is Job Harness different from Career-Ops, ApplyPilot, or AIHawk?**  
+Auto-apply bots like ApplyPilot and AIHawk focus on scraping job boards and mass-submitting forms through one Python script. Career-Ops is a great Claude Code skill workflow and Go TUI focused on rubric scoring and tailored PDFs. **Job Harness** goes further as a **typed Rust MCP server, transactional SQLite ledger, and native GPUI desktop workbench** that works with *any* agent — adding hard double-apply locks, live Sent-mail verification, inbox triage, 2-layer company + round interview briefs, native macOS alerts, interactive Sankey analytics, and a 1-use self-destructing secret handoff.
+
+**Which AI agents and models can I use?**  
+Any MCP- or CLI-compatible agent works out of the box — including **Claude Code**, **OpenAI Codex**, **Hermes**, **Cursor**, **Pi**, **OpenCode**, and local OpenAI-compatible models (Ollama, llama.cpp, LM Studio). Because all state lives in your local folder rather than chat memory, you can switch agents or models at any time with zero migration.
+
+**Does Job Harness upload my resume, emails, or passwords to a cloud server?**  
+No. Your career facts, CV PDFs, application records, and SQLite operational ledger stay 100% on your machine in plain Markdown and JSON. Credentials and one-time logins are never written to your workspace or chat history — if an agent needs a short-lived login or code it cannot retrieve from connected mail, it uses an owner-only (`0600`) 1-use secret handoff (`jh secret`) in OS temp storage that auto-shreds after read or TTL expiry.
+
+**How does Job Harness prevent duplicate applications and hallucinated CV claims?**  
+Every application goes through a transactional state machine (`prepare_application` → `begin_submission` → `finish_submission`) backed by file locks, SHA-256 frozen packets, daily submission caps, and live Sent-mail checks. If a submission outcome is uncertain, Job Harness blocks retries until verified. CV tracks inherit facts strictly from one verified master JSON (`content/baseline.json`) and never invent metrics or ownership.
+
+**Is Job Harness free and open source?**  
+Yes — Job Harness is MIT-licensed, local-first, and free to use with your own agent or local model.
 
 ---
 

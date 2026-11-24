@@ -192,6 +192,32 @@
           "type": "string",
           "minLength": 1,
           "maxLength": 200
+        },
+        "cover_letter_mode": {
+          "type": "string",
+          "enum": [
+            "only_when_required",
+            "always",
+            "never"
+          ]
+        },
+        "cover_letter_template": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 500
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "post_rejection_reply": {
+          "type": "string",
+          "enum": [
+            "off",
+            "draft_after_interview"
+          ]
         }
       },
       "required": [],
@@ -220,6 +246,16 @@
     "cv_tracks": {
       "type": "array",
       "description": "Named child CV tracks derived from the master CV (e.g. backend, product, ai).",
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 64
+      },
+      "maxItems": 20
+    },
+    "disabled_cv_tracks": {
+      "type": "array",
+      "description": "Child CV track names temporarily toggled off without deleting their PDFs.",
       "items": {
         "type": "string",
         "minLength": 1,

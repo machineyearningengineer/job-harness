@@ -2,6 +2,7 @@
 mod app;
 mod chat_bridge;
 mod icons;
+mod macos_notify;
 mod markdown;
 mod sankey;
 mod theme;
