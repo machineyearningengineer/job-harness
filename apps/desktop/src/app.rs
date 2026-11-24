@@ -183,6 +183,7 @@ struct ChatMessage {
     total_tokens: Option<u64>,
     steps_expanded: bool,
     is_error: bool,
+    fast_mode: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -317,7 +318,7 @@ impl JobHarnessApp {
             .agent_kind
             .as_deref()
             .and_then(|k| available_runtimes.iter().find(|r| r.kind() == k).cloned());
-        let agent_opts = if saved_runtime.is_some() {
+        let mut agent_opts = if saved_runtime.is_some() {
             saved.agent.clone()
         } else {
             AgentOptions::default()
@@ -328,6 +329,12 @@ impl JobHarnessApp {
                 .cloned()
                 .unwrap_or(AgentRuntime::Unconfigured)
         });
+        if let Some(cfg_fast) = runtime.read_configured_fast_mode() {
+            agent_opts.fast_mode = cfg_fast;
+        }
+        // Start each desktop launch on a clean session so stale multi-hundred-K-token
+        // threads never stall simple turns.
+        agent_opts.session_name = Some(format!("career-gui-{}", chrono::Utc::now().timestamp()));
         let collapsed_cols: HashSet<&'static str> = ["Saved", "Applied", "Screening"]
             .into_iter()
             .filter(|c| saved.collapsed_cols.iter().any(|s| s == c))
@@ -1027,6 +1034,14 @@ impl JobHarnessApp {
             .cloned()
         {
             self.selected_role = Some(card);
+        }
+        if self.chat_fullscreen {
+            self.chat_fullscreen = false;
+        }
+        if normalized.contains("/briefs/") || normalized.starts_with("briefs/") {
+            self.drawer_tab = DrawerTab::Brief;
+        } else if normalized.starts_with("applications/") {
+            self.drawer_tab = DrawerTab::Notes;
         }
         if self.right_drawer == RightDrawer::Closed {
             self.drawer_resized = false;
@@ -1889,6 +1904,8 @@ impl JobHarnessApp {
             trimmed.clone()
         };
         let user_len = display_user.len();
+        let turn_fast =
+            self.agent_opts.fast_mode && self.runtime.supports_fast_mode(&self.agent_opts);
         self.chat_messages.push(ChatMessage {
             is_user: true,
             text: display_user,
@@ -1903,6 +1920,7 @@ impl JobHarnessApp {
             total_tokens: None,
             steps_expanded: false,
             is_error: false,
+            fast_mode: false,
         });
         self.chat_messages.push(ChatMessage {
             is_user: false,
@@ -1918,6 +1936,7 @@ impl JobHarnessApp {
             total_tokens: None,
             steps_expanded: true,
             is_error: false,
+            fast_mode: turn_fast,
         });
         self.chat_follow = true;
         self.chat_scroll.scroll_to_bottom();
@@ -2961,30 +2980,30 @@ impl JobHarnessApp {
             let cmds: [(&str, &str, &str); 6] = [
                 (
                     "/digest",
-                    "Inbox, calendar & what needs attention today",
+                    "Today's priorities",
                     "What needs attention today? Check recent inbox & calendar changes.",
                 ),
                 (
                     "/brief",
-                    "Prepare a 2-layer interview brief",
+                    "Interview brief",
                     "Prepare a 2-layer brief for my next interview.",
                 ),
                 (
                     "/drill",
-                    "1-question-at-a-time mock interview drill",
+                    "Mock prep drill",
                     "Run a 1-question-at-a-time mock prep drill for my next interview.",
                 ),
                 (
                     "/draft",
-                    "Draft a reply in your voice (save to Drafts)",
+                    "Draft email reply",
                     "Draft a short reply email in my voice (check Gmail Sent first; save as draft only): ",
                 ),
                 (
                     "/reconcile",
-                    "Check unconfirmed submission guards",
+                    "Check pending guards",
                     "Reconcile unknown submission outcomes against Gmail Sent.",
                 ),
-                ("/new", "Start a fresh chat", "__CLEAR__"),
+                ("/new", "Start fresh chat", "__CLEAR__"),
             ];
             return cmds
                 .into_iter()
@@ -3053,6 +3072,8 @@ impl JobHarnessApp {
         if insert_text == "__CLEAR__" {
             self.chat_input.clear();
             self.chat_messages.clear();
+            self.agent_opts.session_name =
+                Some(format!("career-gui-{}", chrono::Utc::now().timestamp()));
             self.quoted_reply = None;
             self.chat_attachments.clear();
             self.pasted_snippets.clear();
@@ -3146,50 +3167,137 @@ impl JobHarnessApp {
                     .gap_2()
                     .child(
                         div()
-                            .id("chat-agent-picker-btn")
-                            .px_2()
-                            .py_1()
-                            .mx(px(-6.0))
-                            .rounded(px(7.0))
-                            .when(agent_pop_open, |d| d.bg(theme::surface_active()))
-                            .hover(|s| s.bg(theme::row_hover()))
-                            .cursor_pointer()
                             .flex()
                             .items_center()
-                            .gap_2()
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.active_popover = if this.active_popover == ActivePopover::Agent
-                                {
-                                    ActivePopover::None
-                                } else {
-                                    this.cmd_anim_epoch = this.cmd_anim_epoch.wrapping_add(1);
-                                    this.model_draft =
-                                        this.agent_opts.model.clone().unwrap_or_default();
-                                    ActivePopover::Agent
-                                };
-                                cx.notify();
-                            }))
-                            .child(div().w(px(6.0)).h(px(6.0)).rounded(px(99.0)).bg(
-                                if self.streaming {
-                                    theme::lavender()
-                                } else if self.runtime.is_ready() {
-                                    theme::emerald()
-                                } else {
-                                    theme::amber_accent()
-                                },
-                            ))
+                            .gap_1()
+                            .min_w_0()
+                            .overflow_hidden()
                             .child(
                                 div()
-                                    .text_xs()
-                                    .text_color(theme::text_primary())
-                                    .child(self.runtime.short_name().to_owned()),
+                                    .id("chat-agent-picker-btn")
+                                    .px_2()
+                                    .py_1()
+                                    .mx(px(-6.0))
+                                    .rounded(px(7.0))
+                                    .when(agent_pop_open, |d| d.bg(theme::surface_active()))
+                                    .hover(|s| s.bg(theme::row_hover()))
+                                    .cursor_pointer()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .min_w_0()
+                                    .overflow_hidden()
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.active_popover = if this.active_popover
+                                            == ActivePopover::Agent
+                                        {
+                                            ActivePopover::None
+                                        } else {
+                                            this.cmd_anim_epoch =
+                                                this.cmd_anim_epoch.wrapping_add(1);
+                                            this.model_draft =
+                                                this.agent_opts.model.clone().unwrap_or_default();
+                                            ActivePopover::Agent
+                                        };
+                                        cx.notify();
+                                    }))
+                                    .child(
+                                        div()
+                                            .w(px(6.0))
+                                            .h(px(6.0))
+                                            .flex_shrink_0()
+                                            .rounded(px(99.0))
+                                            .bg(if self.streaming {
+                                                theme::lavender()
+                                            } else if self.runtime.is_ready() {
+                                                theme::emerald()
+                                            } else {
+                                                theme::amber_accent()
+                                            }),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex_shrink_0()
+                                            .text_xs()
+                                            .text_color(theme::text_primary())
+                                            .child(self.runtime.short_name().to_owned()),
+                                    )
+                                    .child(
+                                        div()
+                                            .min_w_0()
+                                            .overflow_hidden()
+                                            .text_xs()
+                                            .text_color(theme::text_muted())
+                                            .child(format!("· {model_badge} ▾")),
+                                    ),
                             )
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(theme::text_muted())
-                                    .child(format!("· {model_badge} ▾")),
-                            ),
+                            .when(self.runtime.supports_fast_mode(&self.agent_opts), |r| {
+                                let fast_on = self.agent_opts.fast_mode;
+                                r.child(
+                                    div()
+                                        .id("chat-fast-toggle")
+                                        .ml_1()
+                                        .px(px(6.0))
+                                        .py(px(3.0))
+                                        .rounded(px(6.0))
+                                        .flex_shrink_0()
+                                        .bg(if fast_on {
+                                            theme::amber_wash()
+                                        } else {
+                                            gpui::rgba(0x00000000)
+                                        })
+                                        .border_1()
+                                        .border_color(if fast_on {
+                                            gpui::rgba(0xfacc1540)
+                                        } else {
+                                            theme::hairline()
+                                        })
+                                        .hover(|s| s.bg(theme::row_hover()))
+                                        .cursor_pointer()
+                                        .flex()
+                                        .items_center()
+                                        .gap(px(3.0))
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            let next = !this.agent_opts.fast_mode;
+                                            this.agent_opts.fast_mode = next;
+                                            this.runtime.sync_fast_mode(next);
+                                            this.set_toast(
+                                                if next {
+                                                    "Fast mode enabled (priority tier)"
+                                                } else {
+                                                    "Standard speed restored"
+                                                },
+                                                cx,
+                                            );
+                                        }))
+                                        .child(
+                                            svg().path("icons/zap.svg").size(px(11.0)).text_color(
+                                                if fast_on {
+                                                    theme::amber_text()
+                                                } else {
+                                                    theme::text_muted()
+                                                },
+                                            ),
+                                        )
+                                        .when(is_full || self.chat_width >= 340.0, |b| {
+                                            b.child(
+                                                div()
+                                                    .text_size(px(10.5))
+                                                    .font_weight(if fast_on {
+                                                        FontWeight::MEDIUM
+                                                    } else {
+                                                        FontWeight::NORMAL
+                                                    })
+                                                    .text_color(if fast_on {
+                                                        theme::amber_text()
+                                                    } else {
+                                                        theme::text_muted()
+                                                    })
+                                                    .child("Fast"),
+                                            )
+                                        }),
+                                )
+                            }),
                     )
                     .child(
                         div()
@@ -3210,6 +3318,10 @@ impl JobHarnessApp {
                                         .hover(|s| s.bg(theme::row_hover()))
                                         .on_click(cx.listener(|this, _, _, cx| {
                                             this.chat_messages.clear();
+                                            this.agent_opts.session_name = Some(format!(
+                                                "career-gui-{}",
+                                                chrono::Utc::now().timestamp()
+                                            ));
                                             this.quoted_reply = None;
                                             this.chat_attachments.clear();
                                             this.pasted_snippets.clear();
@@ -3446,16 +3558,61 @@ impl JobHarnessApp {
                                             }
                                         }))
                                         .child(
-                                            div().flex().items_center().gap_2().child(dot).child(
-                                                div()
-                                                    .text_xs()
-                                                    .text_color(if actively_writing {
-                                                        theme::text_secondary()
-                                                    } else {
-                                                        theme::text_muted()
-                                                    })
-                                                    .child(header_label),
-                                            ),
+                                            div()
+                                                .flex()
+                                                .items_center()
+                                                .gap_2()
+                                                .min_w_0()
+                                                .overflow_hidden()
+                                                .child(dot)
+                                                .when(msg.fast_mode, |r| {
+                                                    r.child(
+                                                            div()
+                                                                .px(px(5.0))
+                                                                .py(px(1.0))
+                                                                .rounded(px(4.0))
+                                                                .bg(theme::amber_wash())
+                                                                .border_1()
+                                                                .border_color(gpui::rgba(
+                                                                    0xfacc1538,
+                                                                ))
+                                                                .flex_shrink_0()
+                                                                .flex()
+                                                                .items_center()
+                                                                .gap(px(3.0))
+                                                                .child(
+                                                                    svg()
+                                                                        .path("icons/zap.svg")
+                                                                        .size(px(10.0))
+                                                                        .text_color(
+                                                                            theme::amber_text(),
+                                                                        ),
+                                                                )
+                                                                .child(
+                                                                    div()
+                                                                        .text_size(px(10.0))
+                                                                        .font_weight(
+                                                                            FontWeight::MEDIUM,
+                                                                        )
+                                                                        .text_color(
+                                                                            theme::amber_text(),
+                                                                        )
+                                                                        .child("Fast"),
+                                                                ),
+                                                        )
+                                                })
+                                                .child(
+                                                    div()
+                                                        .min_w_0()
+                                                        .overflow_hidden()
+                                                        .text_xs()
+                                                        .text_color(if actively_writing {
+                                                            theme::text_secondary()
+                                                        } else {
+                                                            theme::text_muted()
+                                                        })
+                                                        .child(header_label),
+                                                ),
                                         )
                                         .when(has_trace, |r| {
                                             r.child(
@@ -3542,13 +3699,14 @@ impl JobHarnessApp {
                                             let dur_tag = step
                                                 .duration_ms
                                                 .map(|ms| format!("{:.1}s", ms as f32 / 1000.0));
+                                            let detail_cap = if is_full { 60 } else { 24 };
                                             let line_txt = if step.detail.is_empty() {
                                                 step.name.clone()
                                             } else {
                                                 format!(
                                                     "{} · {}",
                                                     step.name,
-                                                    truncate_end(&step.detail, 34)
+                                                    truncate_end(&step.detail, detail_cap)
                                                 )
                                             };
                                             let can_expand =
@@ -3685,6 +3843,9 @@ impl JobHarnessApp {
                                                 } else {
                                                     step_wrap = step_wrap.child(
                                                         div()
+                                                            .w_full()
+                                                            .min_w_0()
+                                                            .overflow_hidden()
                                                             .p_2()
                                                             .rounded(px(6.0))
                                                             .bg(theme::window_glass())
@@ -3735,16 +3896,19 @@ impl JobHarnessApp {
                                     let copy_u = copy_text.clone();
                                     let reply_u = reply_text.clone();
                                     let user_max_w = if is_full {
-                                        580.0
+                                        560.0
                                     } else {
-                                        (self.chat_width - 52.0).max(170.0)
+                                        (self.chat_width - 40.0).max(160.0)
                                     };
                                     let mut bubble = div()
                                         .relative()
+                                        .flex_shrink_0()
                                         .max_w(px(user_max_w))
+                                        .min_w_0()
+                                        .overflow_hidden()
                                         .px_3()
                                         .py_2()
-                                        .rounded(px(11.0))
+                                        .rounded(px(12.0))
                                         .bg(theme::surface_subtle())
                                         .border_1()
                                         .border_color(theme::hairline())
@@ -3839,15 +4003,16 @@ impl JobHarnessApp {
                                                         .text_color(theme::text_muted()),
                                                 ),
                                         );
+                                    // Stack hover toolbar cleanly below the bubble so no horizontal sibling ever steals bubble width!
                                     block = block.child(
                                         div()
                                             .w_full()
                                             .flex()
-                                            .items_center()
-                                            .justify_end()
-                                            .gap_2()
-                                            .child(hover_tools)
-                                            .child(bubble),
+                                            .flex_col()
+                                            .items_end()
+                                            .gap(px(2.0))
+                                            .child(bubble)
+                                            .child(hover_tools),
                                     );
                                 } else if !shown.is_empty() {
                                     let display_str = if actively_writing {
@@ -4074,7 +4239,7 @@ impl JobHarnessApp {
                                 block
                             })),
                     )
-                    // T3 Code left-edge Prompt Ruler / Minimap (only when Chat has breathing room: full-screen or rail >= 420px!)
+                    // T3 Code left-edge Prompt Ruler / Minimap with Gaussian neighbor magnification & tick-anchored preview!
                     .when(show_ruler, |d| {
                         let turns: Vec<(usize, String, String)> = self
                             .chat_messages
@@ -4091,17 +4256,17 @@ impl JobHarnessApp {
                                 (mi, m.text.clone(), reply)
                             })
                             .collect();
-                        let hovered_ix = self.chat_ruler_hover;
-                        let hovered_turn = hovered_ix
-                            .and_then(|hi| turns.iter().find(|(mi, _, _)| *mi == hi).cloned());
+                        let hovered_ti = self
+                            .chat_ruler_hover
+                            .and_then(|hi| turns.iter().position(|(mi, _, _)| *mi == hi));
                         let total_msgs = self.chat_messages.len();
                         let ruler_left = if is_full { 14.0 } else { 6.0 };
-                        let preview_left = ruler_left + 20.0;
                         let preview_w = if is_full {
-                            270.0
+                            280.0
                         } else {
-                            (self.chat_width - 44.0).clamp(200.0, 270.0)
+                            (self.chat_width - 48.0).clamp(200.0, 270.0)
                         };
+                        let reduce_motion = self.reduce_motion;
                         d.child(
                             div()
                                 .id("chat-prompt-ruler")
@@ -4109,11 +4274,11 @@ impl JobHarnessApp {
                                 .left(px(ruler_left))
                                 .top_4()
                                 .bottom_4()
-                                .w(px(16.0))
+                                .w(px(24.0))
                                 .flex()
                                 .flex_col()
                                 .justify_center()
-                                .gap(px(5.0))
+                                .gap(px(4.0))
                                 .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
                                     if !*hovered && this.chat_ruler_hover.is_some() {
                                         this.chat_ruler_hover = None;
@@ -4121,17 +4286,37 @@ impl JobHarnessApp {
                                     }
                                 }))
                                 .children(turns.into_iter().enumerate().map(
-                                    |(ti, (msg_idx, _, _))| {
-                                        let is_hov = hovered_ix == Some(msg_idx);
-                                        div()
+                                    |(ti, (msg_idx, prompt_txt, reply_txt))| {
+                                        let dist = hovered_ti.map(|h| ti.abs_diff(h));
+                                        let is_hov = dist == Some(0);
+                                        // Smooth macOS-Dock / T3 Code Gaussian wave magnification!
+                                        let tick_w = match dist {
+                                            Some(0) => 20.0,
+                                            Some(1) => 13.0,
+                                            Some(2) => 9.5,
+                                            _ => 6.5,
+                                        };
+                                        let tick_col = match dist {
+                                            Some(0) => theme::text_primary(),
+                                            Some(1) => theme::text_secondary(),
+                                            Some(2) => theme::text_muted(),
+                                            _ => theme::hairline_strong(),
+                                        };
+                                        let clean_reply = reply_txt
+                                            .replace("**", "")
+                                            .replace("__", "")
+                                            .replace('`', "")
+                                            .replace('\n', " ");
+                                        let mut tick_row = div()
                                             .id(SharedString::from(format!("ruler-tick-{ti}")))
-                                            .w(px(16.0))
-                                            .py(px(3.0))
+                                            .relative()
+                                            .w(px(24.0))
+                                            .py(px(3.5))
                                             .flex()
                                             .items_center()
                                             .cursor_pointer()
                                             .on_hover(cx.listener(move |this, h: &bool, _, cx| {
-                                                if *h {
+                                                if *h && this.chat_ruler_hover != Some(msg_idx) {
                                                     this.chat_ruler_hover = Some(msg_idx);
                                                     cx.notify();
                                                 }
@@ -4145,64 +4330,68 @@ impl JobHarnessApp {
                                             .child(
                                                 div()
                                                     .h(px(if is_hov { 2.0 } else { 1.5 }))
-                                                    .w(px(if is_hov { 14.0 } else { 7.0 }))
+                                                    .w(px(tick_w))
                                                     .rounded(px(1.0))
-                                                    .bg(if is_hov {
-                                                        theme::lavender()
-                                                    } else {
-                                                        theme::hairline_strong()
-                                                    }),
-                                            )
+                                                    .bg(tick_col),
+                                            );
+                                        if is_hov {
+                                            let card = div()
+                                                .absolute()
+                                                .left(px(28.0))
+                                                .top(px(-26.0))
+                                                .w(px(preview_w))
+                                                .p_3()
+                                                .rounded(px(10.0))
+                                                .bg(theme::popover_glass())
+                                                .border_1()
+                                                .border_color(theme::hairline_strong())
+                                                .shadow_lg()
+                                                .overflow_hidden()
+                                                .flex()
+                                                .flex_col()
+                                                .gap_1()
+                                                .child(
+                                                    div()
+                                                        .text_xs()
+                                                        .font_weight(FontWeight::SEMIBOLD)
+                                                        .text_color(theme::text_primary())
+                                                        .child(truncate_end(
+                                                            prompt_txt
+                                                                .lines()
+                                                                .next()
+                                                                .unwrap_or(&prompt_txt),
+                                                            44,
+                                                        )),
+                                                )
+                                                .when(!clean_reply.trim().is_empty(), |c| {
+                                                    c.child(
+                                                        div()
+                                                            .text_size(px(11.0))
+                                                            .line_height(px(15.5))
+                                                            .text_color(theme::text_muted())
+                                                            .child(truncate_end(
+                                                                clean_reply.trim(),
+                                                                96,
+                                                            )),
+                                                    )
+                                                });
+                                            tick_row = tick_row.child(if reduce_motion {
+                                                card.into_any_element()
+                                            } else {
+                                                card.with_animation(
+                                                    SharedString::from(format!(
+                                                        "ruler-pop-{msg_idx}"
+                                                    )),
+                                                    Animation::new(Duration::from_millis(120))
+                                                        .with_easing(ease_out_quint()),
+                                                    |el, t| el.opacity(t).ml(px(-6.0 * (1.0 - t))),
+                                                )
+                                                .into_any_element()
+                                            });
+                                        }
+                                        tick_row
                                     },
                                 )),
-                        )
-                        .when_some(
-                            hovered_turn,
-                            |d2, (_, prompt_txt, reply_txt)| {
-                                let clean_reply = reply_txt
-                                    .replace("**", "")
-                                    .replace("__", "")
-                                    .replace('`', "")
-                                    .replace('\n', " ");
-                                d2.child(
-                                    div()
-                                        .absolute()
-                                        .left(px(preview_left))
-                                        .top(px(28.0))
-                                        .w(px(preview_w))
-                                        .p_3()
-                                        .rounded(px(10.0))
-                                        .bg(theme::popover_glass())
-                                        .border_1()
-                                        .border_color(theme::hairline_strong())
-                                        .shadow_lg()
-                                        .flex()
-                                        .flex_col()
-                                        .gap_1()
-                                        .child(
-                                            div()
-                                                .text_xs()
-                                                .font_weight(FontWeight::SEMIBOLD)
-                                                .text_color(theme::text_primary())
-                                                .child(truncate_end(
-                                                    prompt_txt
-                                                        .lines()
-                                                        .next()
-                                                        .unwrap_or(&prompt_txt),
-                                                    44,
-                                                )),
-                                        )
-                                        .when(!clean_reply.trim().is_empty(), |c| {
-                                            c.child(
-                                                div()
-                                                    .text_size(px(11.0))
-                                                    .line_height(px(15.5))
-                                                    .text_color(theme::text_muted())
-                                                    .child(truncate_end(clean_reply.trim(), 96)),
-                                            )
-                                        }),
-                                )
-                            },
                         )
                     })
                     // Emma-style floating jump-to-bottom button anchored cleanly inside the scroll pane
@@ -4300,7 +4489,11 @@ impl JobHarnessApp {
                                             .min_w_0()
                                             .overflow_hidden()
                                             .text_color(theme::text_secondary())
-                                            .child(truncate_end(item, 28)),
+                                            .child(truncate_end(
+                                                item,
+                                                ((inner_composer_w - 135.0) / 7.0).clamp(12.0, 64.0)
+                                                    as usize,
+                                            )),
                                     )
                                     .child(
                                         div()
@@ -4314,10 +4507,10 @@ impl JobHarnessApp {
                                                     .px(px(5.0))
                                                     .py(px(1.0))
                                                     .rounded(px(4.0))
-                                                    .hover(|s| s.bg(theme::lavender_wash()))
+                                                    .hover(|s| s.bg(theme::row_hover()))
                                                     .cursor_pointer()
                                                     .text_size(px(11.0))
-                                                    .text_color(theme::lavender())
+                                                    .text_color(theme::text_primary())
                                                     .on_click(cx.listener(move |this, _, _, cx| {
                                                         if qi < this.queued_prompts.len() {
                                                             this.queued_prompts.remove(qi);
@@ -4390,6 +4583,7 @@ impl JobHarnessApp {
                                 .border_1()
                                 .border_color(theme::hairline_strong())
                                 .shadow_lg()
+                                .overflow_hidden()
                                 .flex()
                                 .flex_col()
                                 .gap(px(1.0))
@@ -4397,17 +4591,22 @@ impl JobHarnessApp {
                                     let active = pi == sel;
                                     let insert_txt = item.insert_text;
                                     let role_att = item.role_attach;
+                                    let meta_cap = ((inner_composer_w - 132.0) / 6.8)
+                                        .clamp(10.0, 52.0)
+                                        as usize;
                                     div()
                                         .id(SharedString::from(format!("cpick-{pi}")))
+                                        .w_full()
                                         .px_2()
                                         .py(px(6.0))
                                         .rounded(px(7.0))
-                                        .when(active, |r| r.bg(theme::lavender_wash()))
+                                        .when(active, |r| r.bg(theme::surface_active()))
                                         .hover(|s| s.bg(theme::row_hover()))
                                         .flex()
                                         .items_center()
                                         .justify_between()
                                         .gap_2()
+                                        .overflow_hidden()
                                         .cursor_pointer()
                                         .on_click(cx.listener(move |this, _, _, cx| {
                                             this.apply_chat_picker_item(
@@ -4418,6 +4617,7 @@ impl JobHarnessApp {
                                         }))
                                         .child(
                                             div()
+                                                .flex_shrink_0()
                                                 .text_xs()
                                                 .font_weight(if active {
                                                     FontWeight::MEDIUM
@@ -4425,17 +4625,26 @@ impl JobHarnessApp {
                                                     FontWeight::NORMAL
                                                 })
                                                 .text_color(if active {
-                                                    theme::lavender()
-                                                } else {
                                                     theme::text_primary()
+                                                } else {
+                                                    theme::text_secondary()
                                                 })
                                                 .child(item.label),
                                         )
                                         .child(
                                             div()
+                                                .flex_1()
+                                                .min_w_0()
+                                                .overflow_hidden()
+                                                .flex()
+                                                .justify_end()
                                                 .text_size(px(11.0))
-                                                .text_color(theme::text_muted())
-                                                .child(item.meta),
+                                                .text_color(if active {
+                                                    theme::text_secondary()
+                                                } else {
+                                                    theme::text_muted()
+                                                })
+                                                .child(truncate_end(&item.meta, meta_cap)),
                                         )
                                 })),
                         ),
@@ -4641,6 +4850,11 @@ impl JobHarnessApp {
                                 d.child(div().flex().flex_wrap().gap_1().children(
                                     self.pasted_snippets.iter().enumerate().map(|(pi, txt)| {
                                         let lines = txt.lines().count().max(1);
+                                        let paste_label = if lines > 1 {
+                                            format!("Pasted · {lines} lines")
+                                        } else {
+                                            format!("Pasted · {} chars", txt.chars().count())
+                                        };
                                         div()
                                             .px_2()
                                             .py(px(3.0))
@@ -4648,12 +4862,13 @@ impl JobHarnessApp {
                                             .bg(theme::window_glass())
                                             .border_1()
                                             .border_color(theme::hairline())
+                                            .overflow_hidden()
                                             .flex()
                                             .items_center()
                                             .gap_2()
                                             .text_size(px(11.0))
                                             .text_color(theme::text_secondary())
-                                            .child(format!("Pasted text · {lines} lines"))
+                                            .child(paste_label)
                                             .child(
                                                 div()
                                                     .id(SharedString::from(format!(
@@ -4701,14 +4916,24 @@ impl JobHarnessApp {
                                         self.reduce_motion,
                                     )),
                             )
-                            // Bottom action bar: paperclip attach on left, circular Stop / Send icon on right
-                            .child(
+                            // Bottom action bar: paperclip attach on left, mutually-exclusive hints OR draft Steer/Queue + Stop/Send on right
+                            .child({
+                                let has_draft = !self.chat_input.trim().is_empty()
+                                    || !self.chat_attachments.is_empty()
+                                    || !self.pasted_snippets.is_empty();
                                 div()
+                                    .w_full()
+                                    .min_w_0()
+                                    .overflow_hidden()
                                     .flex()
                                     .items_center()
                                     .justify_between()
+                                    .gap_2()
                                     .child(
                                         div()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .overflow_hidden()
                                             .flex()
                                             .items_center()
                                             .gap_2()
@@ -4717,6 +4942,7 @@ impl JobHarnessApp {
                                                     .id("chat-attach-btn")
                                                     .w(px(24.0))
                                                     .h(px(24.0))
+                                                    .flex_shrink_0()
                                                     .rounded(px(6.0))
                                                     .hover(|s| s.bg(theme::row_hover()))
                                                     .flex()
@@ -4734,13 +4960,16 @@ impl JobHarnessApp {
                                                     ),
                                             )
                                             .when(
-                                                self.streaming && self.chat_input.trim().is_empty(),
+                                                self.streaming
+                                                    && !has_draft
+                                                    && inner_composer_w >= 265.0,
                                                 |r| {
                                                     r.child(
                                                         div()
                                                             .flex()
                                                             .items_center()
                                                             .gap_2()
+                                                            .overflow_hidden()
                                                             .text_size(px(10.5))
                                                             .text_color(theme::text_muted())
                                                             .child(
@@ -4792,10 +5021,8 @@ impl JobHarnessApp {
                                             ),
                                     )
                                     .child(if self.streaming {
-                                        let has_draft = !self.chat_input.trim().is_empty()
-                                            || !self.chat_attachments.is_empty()
-                                            || !self.pasted_snippets.is_empty();
                                         div()
+                                            .flex_shrink_0()
                                             .flex()
                                             .items_center()
                                             .gap_1()
@@ -4816,7 +5043,11 @@ impl JobHarnessApp {
                                                         .on_click(cx.listener(|this, _, _, cx| {
                                                             this.submit_chat_input(false, cx);
                                                         }))
-                                                        .child("Queue ⌘⏎"),
+                                                        .child(if inner_composer_w >= 300.0 {
+                                                            "Queue ⌘⏎"
+                                                        } else {
+                                                            "Queue"
+                                                        }),
                                                 )
                                                 .child(
                                                     div()
@@ -4824,17 +5055,20 @@ impl JobHarnessApp {
                                                         .px_2()
                                                         .py(px(3.0))
                                                         .rounded(px(6.0))
-                                                        .bg(theme::lavender_wash())
-                                                        .border_1()
-                                                        .border_color(theme::lavender_border())
-                                                        .hover(|s| s.bg(theme::surface_active()))
+                                                        .bg(theme::white_solid())
+                                                        .hover(|s| s.opacity(0.9))
                                                         .cursor_pointer()
                                                         .text_size(px(11.0))
-                                                        .text_color(theme::lavender())
+                                                        .font_weight(FontWeight::MEDIUM)
+                                                        .text_color(theme::ink_dark())
                                                         .on_click(cx.listener(|this, _, _, cx| {
                                                             this.submit_chat_input(true, cx);
                                                         }))
-                                                        .child("Steer ⏎"),
+                                                        .child(if inner_composer_w >= 300.0 {
+                                                            "Steer ⏎"
+                                                        } else {
+                                                            "Steer"
+                                                        }),
                                                 )
                                             })
                                             .child(
@@ -4842,6 +5076,7 @@ impl JobHarnessApp {
                                                     .id("stop-stream")
                                                     .w(px(26.0))
                                                     .h(px(26.0))
+                                                    .flex_shrink_0()
                                                     .rounded(px(99.0))
                                                     .bg(theme::surface_active())
                                                     .border_1()
@@ -4863,14 +5098,12 @@ impl JobHarnessApp {
                                             )
                                             .into_any_element()
                                     } else {
-                                        let ready = !self.chat_input.trim().is_empty()
-                                            || self.attached_role.is_some()
-                                            || !self.chat_attachments.is_empty()
-                                            || !self.pasted_snippets.is_empty();
+                                        let ready = has_draft || self.attached_role.is_some();
                                         div()
                                             .id("chat-send-btn")
                                             .w(px(26.0))
                                             .h(px(26.0))
+                                            .flex_shrink_0()
                                             .rounded(px(99.0))
                                             .bg(if ready {
                                                 theme::lavender()
@@ -4895,8 +5128,8 @@ impl JobHarnessApp {
                                                     }),
                                             )
                                             .into_any_element()
-                                    }),
-                            ),
+                                    })
+                            }),
                     ),
             )
     }
@@ -5109,8 +5342,13 @@ impl JobHarnessApp {
                                         .items_center()
                                         .justify_center()
                                         .text_xs()
+                                        .font_weight(if on {
+                                            FontWeight::MEDIUM
+                                        } else {
+                                            FontWeight::NORMAL
+                                        })
                                         .text_color(if on {
-                                            theme::lavender()
+                                            theme::text_primary()
                                         } else {
                                             theme::text_muted()
                                         })
@@ -5120,6 +5358,118 @@ impl JobHarnessApp {
                                         }))
                                         .child(label)
                                 })),
+                        ),
+                )
+            })
+            // 3b. Priority / Fast mode toggle — shown ONLY when the active model & provider supports it
+            .when(self.runtime.supports_fast_mode(&self.agent_opts), |d| {
+                let fast_on = self.agent_opts.fast_mode;
+                d.child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(theme::text_muted())
+                                .child("Speed"),
+                        )
+                        .child(
+                            div()
+                                .w_full()
+                                .p(px(2.0))
+                                .rounded(px(8.0))
+                                .bg(theme::surface_subtle())
+                                .flex()
+                                .items_center()
+                                .gap(px(2.0))
+                                .child(
+                                    div()
+                                        .id(SharedString::from(format!("{scope}-speed-std")))
+                                        .flex_1()
+                                        .py(px(4.0))
+                                        .rounded(px(6.0))
+                                        .bg(if !fast_on {
+                                            theme::surface_active()
+                                        } else {
+                                            gpui::rgba(0x00000000)
+                                        })
+                                        .hover(|s| {
+                                            if !fast_on {
+                                                s
+                                            } else {
+                                                s.bg(theme::row_hover())
+                                            }
+                                        })
+                                        .cursor_pointer()
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .text_xs()
+                                        .font_weight(if !fast_on {
+                                            FontWeight::MEDIUM
+                                        } else {
+                                            FontWeight::NORMAL
+                                        })
+                                        .text_color(if !fast_on {
+                                            theme::text_primary()
+                                        } else {
+                                            theme::text_muted()
+                                        })
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.agent_opts.fast_mode = false;
+                                            this.runtime.sync_fast_mode(false);
+                                            this.set_toast("Standard speed restored", cx);
+                                        }))
+                                        .child("Standard"),
+                                )
+                                .child(
+                                    div()
+                                        .id(SharedString::from(format!("{scope}-speed-fast")))
+                                        .flex_1()
+                                        .py(px(4.0))
+                                        .rounded(px(6.0))
+                                        .bg(if fast_on {
+                                            theme::amber_wash()
+                                        } else {
+                                            gpui::rgba(0x00000000)
+                                        })
+                                        .hover(
+                                            |s| if fast_on { s } else { s.bg(theme::row_hover()) },
+                                        )
+                                        .cursor_pointer()
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .gap(px(4.0))
+                                        .text_xs()
+                                        .font_weight(if fast_on {
+                                            FontWeight::MEDIUM
+                                        } else {
+                                            FontWeight::NORMAL
+                                        })
+                                        .text_color(if fast_on {
+                                            theme::amber_text()
+                                        } else {
+                                            theme::text_muted()
+                                        })
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.agent_opts.fast_mode = true;
+                                            this.runtime.sync_fast_mode(true);
+                                            this.set_toast("Fast mode enabled (priority tier)", cx);
+                                        }))
+                                        .child(
+                                            svg().path("icons/zap.svg").size(px(11.0)).text_color(
+                                                if fast_on {
+                                                    theme::amber_text()
+                                                } else {
+                                                    theme::text_muted()
+                                                },
+                                            ),
+                                        )
+                                        .child("Fast"),
+                                ),
                         ),
                 )
             })
@@ -8447,7 +8797,7 @@ impl JobHarnessApp {
                                                 .path("icons/search.svg")
                                                 .size(px(15.0))
                                                 .flex_shrink_0()
-                                                .text_color(theme::lavender()),
+                                                .text_color(theme::text_muted()),
                                         )
                                         .child(input_line(
                                             &self.command_query,
@@ -8506,13 +8856,8 @@ impl JobHarnessApp {
                                                     .px_3()
                                                     .py(px(8.0))
                                                     .rounded(px(8.0))
-                                                    .border_l_2()
-                                                    .border_color(if active {
-                                                        theme::lavender()
-                                                    } else {
-                                                        gpui::rgba(0x00000000)
-                                                    })
-                                                    .when(active, |d| d.bg(theme::lavender_wash()))
+                                                    .overflow_hidden()
+                                                    .when(active, |d| d.bg(theme::surface_active()))
                                                     .hover(|s| s.bg(theme::row_hover()))
                                                     .flex()
                                                     .items_center()
@@ -8535,7 +8880,7 @@ impl JobHarnessApp {
                                                                     .size(px(13.0))
                                                                     .flex_shrink_0()
                                                                     .text_color(if active {
-                                                                        theme::lavender()
+                                                                        theme::text_primary()
                                                                     } else {
                                                                         theme::text_muted()
                                                                     }),
@@ -8546,6 +8891,11 @@ impl JobHarnessApp {
                                                                     .min_w_0()
                                                                     .overflow_hidden()
                                                                     .text_xs()
+                                                                    .font_weight(if active {
+                                                                        FontWeight::MEDIUM
+                                                                    } else {
+                                                                        FontWeight::NORMAL
+                                                                    })
                                                                     .text_color(if active {
                                                                         theme::text_primary()
                                                                     } else {
@@ -8563,14 +8913,14 @@ impl JobHarnessApp {
                                                             .px(px(6.0))
                                                             .py(px(2.0))
                                                             .rounded(px(5.0))
-                                                            .bg(if active {
-                                                                theme::surface_active()
-                                                            } else {
-                                                                gpui::rgba(0x00000000)
+                                                            .when(active, |d| {
+                                                                d.bg(theme::surface_subtle())
+                                                                    .border_1()
+                                                                    .border_color(theme::hairline())
                                                             })
                                                             .text_size(px(11.0))
                                                             .text_color(if active {
-                                                                theme::lavender()
+                                                                theme::text_secondary()
                                                             } else {
                                                                 theme::text_muted()
                                                             })

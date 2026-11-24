@@ -55,10 +55,15 @@ pub fn is_image_path(path: &Path) -> bool {
 
 /// Per-turn model controls forwarded to the host agent CLI (never stored in the ledger).
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct AgentOptions {
     pub model: Option<String>,
     pub provider: Option<String>,
     pub reasoning: Option<String>,
+    pub fast_mode: bool,
+    /// Ephemeral per-chat session key rotated on New Chat so fresh threads start clean.
+    #[serde(skip)]
+    pub session_name: Option<String>,
 }
 
 /// A selectable model preset discovered from the runtime's own configuration.
@@ -140,7 +145,83 @@ impl AgentRuntime {
     }
 
     pub fn supports_reasoning(&self) -> bool {
-        matches!(self, Self::Hermes { .. })
+        matches!(
+            self,
+            Self::Hermes { .. } | Self::ClaudeCode { .. } | Self::Codex { .. }
+        )
+    }
+
+    /// True when the selected runtime + model + provider supports priority / fast-mode tiering.
+    pub fn supports_fast_mode(&self, opts: &AgentOptions) -> bool {
+        match self {
+            Self::Hermes { profile, .. } => {
+                let presets = hermes_presets(profile);
+                let default_preset = presets.first();
+                let model = opts
+                    .model
+                    .as_deref()
+                    .filter(|s| !s.trim().is_empty())
+                    .or_else(|| default_preset.and_then(|p| p.model.as_deref()))
+                    .unwrap_or("");
+                let provider = opts
+                    .provider
+                    .as_deref()
+                    .filter(|s| !s.trim().is_empty())
+                    .or_else(|| default_preset.and_then(|p| p.provider.as_deref()))
+                    .unwrap_or("");
+                model_route_supports_fast_mode(model, provider)
+            }
+            Self::Codex { .. } => true,
+            Self::ClaudeCode { .. } => {
+                let m = opts
+                    .model
+                    .as_deref()
+                    .unwrap_or("")
+                    .trim()
+                    .to_ascii_lowercase();
+                m.is_empty() || m.contains("opus")
+            }
+            Self::Custom { .. } | Self::Unconfigured => false,
+        }
+    }
+
+    /// Reads whether Hermes's profile config currently has a fast/priority `service_tier`.
+    pub fn read_configured_fast_mode(&self) -> Option<bool> {
+        let Self::Hermes { profile, .. } = self else {
+            return None;
+        };
+        let home = std::env::var("HOME").ok()?;
+        let path = PathBuf::from(home)
+            .join(".hermes/profiles")
+            .join(profile)
+            .join("config.yaml");
+        let text = std::fs::read_to_string(path).ok()?;
+        for line in text.lines() {
+            if let Some(v) = yaml_value(line, "service_tier") {
+                let low = v.to_ascii_lowercase();
+                return Some(matches!(
+                    low.as_str(),
+                    "fast" | "priority" | "ultrafast" | "auto"
+                ));
+            }
+        }
+        Some(false)
+    }
+
+    /// Persists Hermes's `agent.service_tier` asynchronously when toggled from the UI.
+    pub fn sync_fast_mode(&self, enabled: bool) {
+        if let Self::Hermes { binary, profile } = self {
+            let bin = binary.clone();
+            let prof = profile.clone();
+            let tier = if enabled { "priority" } else { "normal" };
+            std::thread::spawn(move || {
+                let mut cmd = Command::new(bin);
+                cmd.args(["-p", &prof, "config", "set", "agent.service_tier", tier])
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null());
+                let _ = cmd.status();
+            });
+        }
     }
 
     /// Model presets read from the runtime's own config (Hermes profile) or CLI aliases.
@@ -230,6 +311,11 @@ fn run_streaming(
     let (mut cmd, json_stream) = match runtime {
         AgentRuntime::Hermes { binary, profile } => {
             let mut c = Command::new(binary);
+            let session_key = opts
+                .session_name
+                .as_deref()
+                .filter(|s| !s.is_empty())
+                .unwrap_or("career-gui");
             c.args([
                 "-p",
                 profile,
@@ -241,7 +327,7 @@ fn run_streaming(
                 "--format",
                 "stream-json",
                 "--continue",
-                "career-gui",
+                session_key,
                 "--create-if-missing",
             ]);
             if let Some(dir) = workspace {
@@ -278,6 +364,12 @@ fn run_streaming(
             if let Some(m) = opts.model.as_deref().filter(|m| !m.is_empty()) {
                 c.args(["--model", m]);
             }
+            if let Some(r) = opts.reasoning.as_deref().filter(|r| !r.is_empty()) {
+                c.args(["--effort", r]);
+            }
+            if opts.fast_mode && runtime.supports_fast_mode(opts) {
+                c.args(["--settings", r#"{"fastMode":true}"#]);
+            }
             if let Some(dir) = workspace {
                 c.current_dir(dir);
             }
@@ -289,6 +381,12 @@ fn run_streaming(
             c.args(["exec", "--json"]);
             if let Some(m) = opts.model.as_deref().filter(|m| !m.is_empty()) {
                 c.args(["-m", m]);
+            }
+            if let Some(r) = opts.reasoning.as_deref().filter(|r| !r.is_empty()) {
+                c.args(["-c", &format!("model_reasoning_effort=\"{r}\"")]);
+            }
+            if opts.fast_mode {
+                c.args(["-c", "service_tier=\"fast\""]);
             }
             c.arg("-");
             if let Some(dir) = workspace {
@@ -336,6 +434,23 @@ fn run_streaming(
         final_prompt = "Inspect the attached image(s).".into();
     }
 
+    // macOS .app bundles launched via Finder/LaunchServices receive a stripped PATH;
+    // prepend standard local tool dirs so agent CLIs, mcporter, node, and jh always resolve.
+    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+        let mut dirs: Vec<PathBuf> = vec![
+            home.join(".local/bin"),
+            home.join(".cargo/bin"),
+            PathBuf::from("/opt/homebrew/bin"),
+            PathBuf::from("/usr/local/bin"),
+        ];
+        if let Some(existing) = std::env::var_os("PATH") {
+            dirs.extend(std::env::split_paths(&existing));
+        }
+        if let Ok(joined) = std::env::join_paths(dirs) {
+            cmd.env("PATH", joined);
+        }
+    }
+
     let _ = tx.send(StreamEvent::Status("Thinking…".into()));
     let mut child = cmd
         .stdin(Stdio::piped())
@@ -343,6 +458,37 @@ fn run_streaming(
         .stderr(Stdio::piped())
         .spawn()
         .context("Failed to launch agent runtime")?;
+
+    // Immediate cancel watchdog: kills the child within 50ms even while `reader.lines()`
+    // is blocked waiting for stdout (fixes Steer/Stop leaving zombie agent processes).
+    let child_pid = child.id();
+    let watchdog_done = Arc::new(AtomicBool::new(false));
+    {
+        let cancel_w = cancel.clone();
+        let done_w = watchdog_done.clone();
+        std::thread::spawn(move || {
+            while !done_w.load(Ordering::Relaxed) {
+                if cancel_w.load(Ordering::Relaxed) {
+                    let pid_s = child_pid.to_string();
+                    let _ = Command::new("kill")
+                        .args(["-TERM", &pid_s])
+                        .stdout(Stdio::null())
+                        .stderr(Stdio::null())
+                        .status();
+                    std::thread::sleep(std::time::Duration::from_millis(250));
+                    if !done_w.load(Ordering::Relaxed) {
+                        let _ = Command::new("kill")
+                            .args(["-KILL", &pid_s])
+                            .stdout(Stdio::null())
+                            .stderr(Stdio::null())
+                            .status();
+                    }
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+        });
+    }
 
     if let Some(mut stdin) = child.stdin.take() {
         let _ = stdin.write_all(final_prompt.as_bytes());
@@ -356,6 +502,8 @@ fn run_streaming(
     for line in reader.lines() {
         if cancel.load(Ordering::Relaxed) {
             let _ = child.kill();
+            let _ = child.wait();
+            watchdog_done.store(true, Ordering::Relaxed);
             let _ = tx.send(StreamEvent::Status("Stopped.".into()));
             return Ok(());
         }
@@ -377,6 +525,7 @@ fn run_streaming(
     }
 
     let status = child.wait()?;
+    watchdog_done.store(true, Ordering::Relaxed);
     if !status.success() && !cancel.load(Ordering::Relaxed) {
         let mut err_buf = String::new();
         if let Some(mut se) = child.stderr.take() {
@@ -1019,6 +1168,36 @@ fn yaml_value(line: &str, key: &str) -> Option<String> {
     let rest = line.trim().strip_prefix(key)?.strip_prefix(':')?.trim();
     let v = rest.trim_matches(|c| c == '"' || c == '\'');
     (!v.is_empty()).then(|| v.to_owned())
+}
+
+fn model_route_supports_fast_mode(model_id: &str, provider: &str) -> bool {
+    let raw = model_id.trim().to_ascii_lowercase();
+    let base = raw.split('/').next_back().unwrap_or(&raw);
+    let base = base.split(':').next().unwrap_or(base);
+    if base.is_empty() {
+        return false;
+    }
+    let prov = provider.trim().to_ascii_lowercase();
+    let is_first_party = prov.is_empty()
+        || matches!(
+            prov.as_str(),
+            "openai" | "openai-api" | "openai-codex" | "anthropic" | "xai" | "auto"
+        );
+    if !is_first_party {
+        return false;
+    }
+    let is_openai_fast = !base.contains("codex")
+        && (base.starts_with("gpt-6")
+            || base.starts_with("gpt-5")
+            || base.starts_with("gpt-4.1")
+            || base.starts_with("o3")
+            || base.starts_with("o4"));
+    let is_anthropic_fast = base == "opus"
+        || base.starts_with("claude-opus-4-6")
+        || base.starts_with("claude-opus-4-8")
+        || base.starts_with("claude-opus-5");
+    let is_xai_fast = base.starts_with("grok-4.6") || base.starts_with("grok-4-6");
+    is_openai_fast || is_anthropic_fast || is_xai_fast
 }
 
 pub(crate) fn parse_hermes_presets(text: &str) -> Vec<ModelPreset> {

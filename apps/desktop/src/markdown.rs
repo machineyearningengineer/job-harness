@@ -445,6 +445,7 @@ pub fn render_markdown(
         } else {
             blocks.push(
                 div()
+                    .min_w_0()
                     .text_size(body_size)
                     .line_height(body_lh)
                     .text_color(theme::text_secondary())
@@ -471,6 +472,7 @@ pub fn render_markdown(
     }
 
     div()
+        .min_w_0()
         .flex()
         .flex_col()
         .gap(if spacious { px(10.0) } else { px(7.0) })
@@ -549,6 +551,9 @@ pub fn render_syntax_code(
 
     card.child(
         div()
+            .w_full()
+            .min_w_0()
+            .overflow_hidden()
             .p_3()
             .cursor_text()
             .text_size(if spacious { px(12.5) } else { px(11.5) })
@@ -1141,6 +1146,7 @@ fn render_inline(
     };
 
     div()
+        .min_w_0()
         .cursor_text()
         .on_mouse_down(MouseButton::Left, move |ev: &MouseDownEvent, window, cx| {
             let idx = match layout_down.index_for_position(ev.position) {

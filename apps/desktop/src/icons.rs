@@ -48,6 +48,8 @@ const SQUARE_PEN: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="14" h
 
 const MESSAGE_SQUARE: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>"#;
 
+const ZAP: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 14a1 1 0 0 1-.78-1.63l9.9-10.2a.5.5 0 0 1 .86.46l-1.92 6.02A1 1 0 0 0 13 10h7a1 1 0 0 1 .78 1.63l-9.9 10.2a.5.5 0 0 1-.86-.46l1.92-6.02A1 1 0 0 0 11 14z"/></svg>"#;
+
 impl AssetSource for EmbeddedIcons {
     fn load(&self, path: &str) -> Result<Option<Cow<'static, [u8]>>> {
         let bytes = match path {
@@ -73,6 +75,7 @@ impl AssetSource for EmbeddedIcons {
             "icons/minimize.svg" => Some(MINIMIZE.as_bytes()),
             "icons/square-pen.svg" => Some(SQUARE_PEN.as_bytes()),
             "icons/message-square.svg" => Some(MESSAGE_SQUARE.as_bytes()),
+            "icons/zap.svg" => Some(ZAP.as_bytes()),
             _ => None,
         };
         Ok(bytes.map(Cow::Borrowed))
@@ -102,6 +105,7 @@ impl AssetSource for EmbeddedIcons {
             "icons/minimize.svg".into(),
             "icons/square-pen.svg".into(),
             "icons/message-square.svg".into(),
+            "icons/zap.svg".into(),
         ])
     }
 }
