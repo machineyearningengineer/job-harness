@@ -1505,7 +1505,7 @@ impl JobHarnessApp {
                             })
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 if this.editing_config_key.is_some() {
-                                    this.commit_inline_config(cx);
+                                    this.cancel_inline_config(cx);
                                 }
                                 this.start_inline_config(key, edit_initial.clone(), cx);
                             }))
@@ -5324,8 +5324,29 @@ impl JobHarnessApp {
                                         ),
                                     SyncIndicator::Idle => div(),
                                 };
+                                let is_ephemeral = matches!(
+                                    self.sync_state,
+                                    SyncIndicator::Saved(_, _) | SyncIndicator::Failed(_, _)
+                                );
                                 d.child(if self.reduce_motion {
                                     pill.into_any_element()
+                                } else if is_ephemeral {
+                                    // Fade in smoothly -> hold crisp -> dissolve gently back to nothing!
+                                    pill.with_animation(
+                                        SharedString::from(format!("sync-pill-{epoch}")),
+                                        Animation::new(Duration::from_millis(2350)),
+                                        |el, t| {
+                                            let op = if t < 0.08 {
+                                                t / 0.08
+                                            } else if t > 0.78 {
+                                                ((1.0 - t) / 0.22).clamp(0.0, 1.0)
+                                            } else {
+                                                1.0
+                                            };
+                                            el.opacity(op)
+                                        },
+                                    )
+                                    .into_any_element()
                                 } else {
                                     pill.with_animation(
                                         SharedString::from(format!("sync-pill-{epoch}")),
@@ -7860,7 +7881,7 @@ impl Render for JobHarnessApp {
                         dirty = true;
                     }
                     if this.editing_config_key.is_some() {
-                        this.commit_inline_config(cx);
+                        this.cancel_inline_config(cx);
                     }
                     if this.active_input == ActiveInput::QuickAsk && this.quick_input.is_empty() {
                         this.active_input = ActiveInput::None;
