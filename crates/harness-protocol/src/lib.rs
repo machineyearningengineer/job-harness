@@ -13,6 +13,7 @@ pub const FOCUSED_TOOLS: &[&str] = &[
     "read_record",
     "query_batch",
     "execute_batch",
+    "update_application",
     "get_run",
     "prepare_application",
     "begin_submission",

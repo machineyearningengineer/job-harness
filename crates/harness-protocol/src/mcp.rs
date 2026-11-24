@@ -12,7 +12,7 @@ use rmcp::{
 use serde_json::{Value, json};
 use std::{path::Path, sync::Arc};
 
-const INSTRUCTIONS: &str = "First call bootstrap and read its focused skill. Batch related local work; load specialized schemas with inspect_tools. Canonical vacancy records and sourced answers control facts. A run or capability does not grant authority. Host connectors own browser, email, calendar and credentials. Freeze/reserve, begin once, submit externally once, finish with verified evidence. Never repeat a submitting or outcome_unknown attempt. These tools only mutate local records; they cannot submit forms, send mail or book meetings.";
+const INSTRUCTIONS: &str = "First call bootstrap once per session (do not re-read guides on simple follow-ups). Never read applications/pipeline.md or pipeline.json directly; use query_batch or read_record instead. For single-role stage moves or archiving, call update_application directly (it rebuilds the pipeline automatically; skip reconcile_tracker). Load other specialized schemas with inspect_tools(names=[...], include_schemas=true) and batch related local work. Canonical vacancy records and sourced answers control facts. A run or capability does not grant authority. Host connectors own browser, email, calendar and credentials. Freeze/reserve, begin once, submit externally once, finish with verified evidence. Never repeat a submitting or outcome_unknown attempt. These tools only mutate local records; they cannot submit forms, send mail or book meetings.";
 
 #[derive(Clone)]
 pub struct McpServer {

@@ -7,7 +7,7 @@ Job Harness is designed to stay **lightweight and battery-friendly** — it does
 ## How Background Runs Work (Zero-Daemon Pattern)
 
 1. **OS Scheduler or Host Cron triggers a `$0`-token check:**
-   - **macOS (`launchd`) / Linux (`systemd` timers)** or your host runtime's scheduler (`hermes cron`, T3 Code scheduled tasks) runs `jh daily check --json` on your schedule (e.g. every 15 minutes during work hours, plus morning/evening desks).
+   - **macOS (`launchd`) / Linux (`systemd` timers)** or your host runtime's scheduler (`hermes cron`, T3 Code scheduled tasks) runs `jh call daily_check --input '{}'` on your schedule (e.g. every 15 minutes during work hours, plus morning/evening desks).
    - That check is pure local Rust/SQLite (~15 ms, **0 LLM tokens**).
 2. **Wake the agent only when something actually changed:**
    - If an urgent interview is within 90 minutes, an inbound email needs triage, or a scheduled window opens, the scheduler invokes your chosen agent runtime (Hermes, Claude Code, Codex, or Pi) for one bounded run.
@@ -18,15 +18,15 @@ Job Harness is designed to stay **lightweight and battery-friendly** — it does
 
 ---
 
-## Delegation Modes (Settings → Automation Mode)
+## Delegation Modes (Settings → Delegation)
 
-Every workspace starts in **Review only**. Switching modes sets the underlying fail-closed flags in `config/career-ledger.json` transparently:
+Every workspace starts in **Drafts only**. Switching modes sets the underlying fail-closed flags in `config/career-ledger.json` transparently:
 
 | Mode | Portal submits | First-contact emails | Recruiter replies | Inbox archive |
 |---|---|---|---|---|
-| **Review only** *(Default)* | Draft / prep only | Draft only | Draft only | Off |
-| **Assisted apply** | Auto within daily cap | Draft only | Draft only | Optional |
-| **Autonomous** | Auto within daily cap | Auto (0 prior Sent check) | Auto (live Sent check) | Optional |
+| **Drafts only** *(Default)* | Draft / prep only | Draft only | Draft only | Off |
+| **Assisted** *(Recommended)* | Auto within daily cap | Draft only | Draft only | On (verified receipts) |
+| **Autonomous** | Auto within daily cap | Auto (0 prior Sent check) | Auto (live Sent check) | On (verified receipts) |
 
 ### Always Human-Confirmed (In Every Mode)
 - Picking or changing interview times

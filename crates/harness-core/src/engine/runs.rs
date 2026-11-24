@@ -65,7 +65,7 @@ impl Engine {
         let offset = n(args, "offset", 0);
         let limit = n(args, "limit", 10);
         Ok(
-            json!({"events":rows.iter().skip(offset).take(limit).collect::<Vec<_>>(),"total_matches":rows.len()}),
+            json!({"events":rows.iter().rev().skip(offset).take(limit).collect::<Vec<_>>(),"total_matches":rows.len()}),
         )
     }
     pub(super) fn finish_run(&self, args: &Value, state: &mut Value) -> Result<Value> {

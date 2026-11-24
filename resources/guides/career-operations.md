@@ -62,13 +62,19 @@ Never put credentials, OTPs, cookies, private session tokens, transport headers 
 ## Fast path for single-role updates (keep tokens low)
 
 - **Never open `applications/pipeline.md` or `applications/pipeline.json` with a file reader.** They are generated views that can exceed 1,000+ rows. Query roles through `query_batch` (`read_record`, `list_roles`, `list_attention`) instead.
-- **Archive, close, or update a single role in 1–2 tool calls:** when the user confirms a single-role change (for example, archiving an expired role), do **not** re-read repository guides, `AGENTS.md`, or run `reconcile_tracker` across the whole ledger. Call `update_application` once (it updates the canonical record and rebuilds the pipeline automatically):
+- **Archive, close, or update a single role in 1–2 tool calls:** when the user confirms a single-role change (for example, archiving an expired role), do **not** re-read repository guides, `AGENTS.md`, or run `reconcile_tracker` across the whole ledger. `update_application` is directly available in the default `focused` MCP profile (it updates the canonical record and rebuilds the pipeline automatically):
   ```json
   {
-    "path": "applications/<slug>.md",
-    "stage": "closed",
-    "next_action": "Archive — expired before submission",
-    "record_evidence": "User confirmed closing expired lead on YYYY-MM-DD."
+    "run_id": "<active-run-id>",
+    "record": "applications/<slug>.md",
+    "tracking": {
+      "stage": "closed",
+      "checked": "YYYY-MM-DD",
+      "next_action": "none"
+    },
+    "summary": "Closed expired lead before submission.",
+    "evidence": ["User confirmed closing expired lead on YYYY-MM-DD."],
+    "idempotency_key": "close-<slug>-YYYY-MM-DD"
   }
   ```
 - **Delete/remove means archive:** removing a role marks it `closed` while preserving cooldown notes, receipts, and audit history. Never `rm` canonical evidence files.

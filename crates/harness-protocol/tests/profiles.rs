@@ -8,7 +8,7 @@ fn focused_profile_defers_specialized_tools_with_actionable_next_step() {
     workspace::initialize(temp.path()).unwrap();
     let specs = Value::Object(contracts::specs().clone());
     let server = McpServer::new(temp.path(), "focused", &specs).unwrap();
-    assert_eq!(FOCUSED_TOOLS.len(), 12);
+    assert_eq!(FOCUSED_TOOLS.len(), 13);
     assert!(contracts::specs().len() >= 30);
     assert_eq!(server.invoke("bootstrap", &json!({}))["ok"], true);
     let deferred = server.invoke("find_application", &json!({}));

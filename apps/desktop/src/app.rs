@@ -107,6 +107,8 @@ enum ActivePopover {
     Agent,
     Sessions,
     Secret,
+    SetupWizard,
+    Tour,
     Budget,
     Health,
 }
@@ -145,6 +147,8 @@ enum CommandAction {
     PassSecret,
     CopyTranscript,
     ExportTranscript,
+    OpenSetupWizard,
+    StartTour,
     AskAgent(String),
 }
 
@@ -220,6 +224,8 @@ pub struct JobHarnessApp {
     resumed_session_label: Option<String>,
     show_connect_help: bool,
     show_mcp_servers: bool,
+    setup_step: usize,
+    tour_step: usize,
     copied_flash: Option<(SharedString, u64)>,
     copied_flash_epoch: u64,
     agent_opts: AgentOptions,
@@ -393,6 +399,8 @@ impl JobHarnessApp {
             resumed_session_label: None,
             show_connect_help: false,
             show_mcp_servers: false,
+            setup_step: 0,
+            tour_step: 0,
             copied_flash: None,
             copied_flash_epoch: 0,
             agent_opts,
@@ -703,13 +711,39 @@ impl JobHarnessApp {
     fn mark_sync_saved(&mut self, label: impl Into<String>, cx: &mut Context<Self>) {
         self.sync_state = SyncIndicator::Saved(label.into(), Instant::now());
         self.sync_epoch = self.sync_epoch.wrapping_add(1);
+        let epoch = self.sync_epoch;
         cx.notify();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(2360))
+                .await;
+            let _ = this.update(cx, |app, cx| {
+                if app.sync_epoch == epoch {
+                    app.sync_state = SyncIndicator::Idle;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
     }
 
     fn mark_sync_failed(&mut self, label: impl Into<String>, cx: &mut Context<Self>) {
         self.sync_state = SyncIndicator::Failed(label.into(), Instant::now());
         self.sync_epoch = self.sync_epoch.wrapping_add(1);
+        let epoch = self.sync_epoch;
         cx.notify();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(2600))
+                .await;
+            let _ = this.update(cx, |app, cx| {
+                if app.sync_epoch == epoch {
+                    app.sync_state = SyncIndicator::Idle;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
     }
 
     fn md_link_handler(&self, cx: &mut Context<Self>) -> markdown::LinkHandler {
@@ -1825,9 +1859,14 @@ impl JobHarnessApp {
                             theme::lavender()
                         })
                         .cursor_text()
-                        .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                            cx.stop_propagation();
-                        })
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, _, window, cx| {
+                                window.focus(&this.focus_handle);
+                                this.active_input = ActiveInput::InlineConfig;
+                                cx.stop_propagation();
+                            }),
+                        )
                         .on_scroll_wheel(|_, _, cx| {
                             cx.stop_propagation();
                         })
@@ -1884,9 +1923,14 @@ impl JobHarnessApp {
                                 theme::lavender()
                             })
                             .cursor_text()
-                            .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                                cx.stop_propagation();
-                            })
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|this, _, window, cx| {
+                                    window.focus(&this.focus_handle);
+                                    this.active_input = ActiveInput::InlineConfig;
+                                    cx.stop_propagation();
+                                }),
+                            )
                             .child(inline_editable_text(
                                 &self.config_draft,
                                 placeholder,
@@ -1940,7 +1984,8 @@ impl JobHarnessApp {
                             })
                             .on_mouse_down(
                                 MouseButton::Left,
-                                cx.listener(move |this, ev: &gpui::MouseDownEvent, _, cx| {
+                                cx.listener(move |this, ev: &gpui::MouseDownEvent, window, cx| {
+                                    window.focus(&this.focus_handle);
                                     cx.stop_propagation();
                                     if scrub_spec.is_some()
                                         && let Ok(v) = init_for_down.trim().parse::<i64>()
@@ -2129,6 +2174,8 @@ impl JobHarnessApp {
                 "Save",
                 CommandAction::ExportTranscript,
             ),
+            ("Run setup wizard…", "Setup", CommandAction::OpenSetupWizard),
+            ("Start quick UI tour", "Guide", CommandAction::StartTour),
             (
                 "Import / Replace Master CV PDF",
                 "CV",
@@ -2190,6 +2237,18 @@ impl JobHarnessApp {
             CommandAction::PassSecret => self.open_proactive_secret_modal(cx),
             CommandAction::CopyTranscript => self.copy_chat_transcript(cx),
             CommandAction::ExportTranscript => self.export_chat_transcript(cx),
+            CommandAction::OpenSetupWizard => {
+                self.setup_step = 0;
+                self.active_popover = ActivePopover::SetupWizard;
+                self.cmd_anim_epoch = self.cmd_anim_epoch.wrapping_add(1);
+                cx.notify();
+            }
+            CommandAction::StartTour => {
+                self.tour_step = 0;
+                self.active_popover = ActivePopover::Tour;
+                self.cmd_anim_epoch = self.cmd_anim_epoch.wrapping_add(1);
+                cx.notify();
+            }
             CommandAction::AskAgent(prompt) => self.submit_prompt(prompt, false, cx),
         }
     }
@@ -3198,11 +3257,8 @@ impl JobHarnessApp {
                         }
                         buf.push_str(ch);
                         self.input_all_selected = false;
-                        if active_in == ActiveInput::InlineConfig
-                            && let Some(k) = self.editing_config_key
-                        {
-                            self.config_error =
-                                Self::validate_inline_config(k, &self.config_draft).err();
+                        if active_in == ActiveInput::InlineConfig {
+                            self.config_error = None;
                         }
                         cx.notify();
                     }
@@ -3388,6 +3444,15 @@ impl JobHarnessApp {
                                 .items_center()
                                 .gap_2()
                                 .cursor_text()
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(|this, _, window, cx| {
+                                        window.focus(&this.focus_handle);
+                                        this.active_input = ActiveInput::Search;
+                                        cx.stop_propagation();
+                                        cx.notify();
+                                    }),
+                                )
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.active_input = ActiveInput::Search;
                                     cx.notify();
@@ -3406,7 +3471,36 @@ impl JobHarnessApp {
                                     self.reduce_motion,
                                     "search",
                                     44,
-                                )),
+                                ))
+                                .when(!self.search_query.is_empty(), |box_d| {
+                                    box_d.child(
+                                        div()
+                                            .id("search-clear-btn")
+                                            .flex_shrink_0()
+                                            .w(px(18.0))
+                                            .h(px(18.0))
+                                            .rounded(px(99.0))
+                                            .hover(|s| {
+                                                s.bg(theme::row_hover())
+                                                    .text_color(theme::text_primary())
+                                            })
+                                            .flex()
+                                            .items_center()
+                                            .justify_center()
+                                            .cursor_pointer()
+                                            .text_size(px(11.0))
+                                            .text_color(theme::text_muted())
+                                            .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                                cx.stop_propagation();
+                                            })
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                this.search_query.clear();
+                                                this.active_input = ActiveInput::None;
+                                                cx.notify();
+                                            }))
+                                            .child("✕"),
+                                    )
+                                }),
                         ),
                 )
             })
@@ -6632,6 +6726,7 @@ impl JobHarnessApp {
                             .child("Archive  ›")
                             .into_any_element()
                     } else if collapse_archive_inline {
+                        let is_rej = col_name == "Rejected";
                         div()
                             .id("collapse-archive-col")
                             .flex()
@@ -6639,7 +6734,11 @@ impl JobHarnessApp {
                             .gap_1()
                             .cursor_pointer()
                             .text_xs()
-                            .text_color(theme::text_secondary())
+                            .text_color(if is_rej {
+                                theme::rose_text()
+                            } else {
+                                theme::text_secondary()
+                            })
                             .hover(|s| s.text_color(theme::text_primary()))
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.archive_expanded = false;
@@ -6653,7 +6752,11 @@ impl JobHarnessApp {
                     } else {
                         div()
                             .text_xs()
-                            .text_color(theme::text_secondary())
+                            .text_color(if col_name == "Rejected" {
+                                theme::rose_text()
+                            } else {
+                                theme::text_secondary()
+                            })
                             .child(col_name)
                             .into_any_element()
                     })
@@ -6675,7 +6778,7 @@ impl JobHarnessApp {
                                     && !collapse_archive_inline
                                     && !matches!(
                                         col_name,
-                                        "Final" | "Offer" | "Withdrawn" | "Other closed"
+                                        "Final" | "Offer" | "Withdrawn" | "Closed / expired"
                                     ),
                                 |d| {
                                     d.child(
@@ -6799,6 +6902,12 @@ impl JobHarnessApp {
                                                         .text_xs()
                                                         .text_color(if is_urgent {
                                                             theme::amber_text()
+                                                        } else if let Some(d) = card.quiet_days {
+                                                            if d >= 14 {
+                                                                theme::rose_text()
+                                                            } else {
+                                                                theme::amber_text()
+                                                            }
                                                         } else if is_quiet {
                                                             theme::rose_text()
                                                         } else {
@@ -7336,187 +7445,304 @@ impl JobHarnessApp {
                 )
             } else {
                 let q = self.search_query.trim().to_ascii_lowercase();
-                let mut board_scroller = div()
-                    .id("kanban-scroll-x")
-                    .track_scroll(&self.board_scroll_x)
-                    .on_scroll_wheel(cx.listener(|this, ev: &ScrollWheelEvent, _, cx| {
-                        this.handle_board_scroll(None, ev, cx);
-                    }))
-                    .flex_1()
-                    .min_h_0()
-                    .min_w_0()
-                    .overflow_x_scroll()
-                    .flex();
-                board_scroller.style().restrict_scroll_to_axis = Some(true);
-                let board_el = board_scroller
-                    .children(base_columns.into_iter().map(|col_name| {
-                        let col_cards: Vec<&RoleCard> = cards
-                            .iter()
-                            .copied()
-                            .filter(|c| c.column == col_name)
-                            .take(28)
-                            .collect();
-                        let col_total = cards.iter().filter(|c| c.column == col_name).count();
-                        self.render_kanban_column(
-                            col_name,
-                            col_cards,
-                            col_total,
-                            ColumnMode::Standard,
-                            16.0,
-                            cx,
-                        )
-                    }))
-                    // Standardized ZERO-SHIFT Interviews expand/collapse:
-                    // Primary column (`Interviews ›` / `‹ Technical`) stays at the exact same (x, y) pixel,
-                    // while `Final` & `Offer` glide in/out using the exact same `clip_column_slide` primitive!
-                    .child(if !self.interviews_expanded {
-                        let col_cards: Vec<&RoleCard> = cards
-                            .iter()
-                            .copied()
-                            .filter(|c| c.column == "Interviews")
-                            .take(28)
-                            .collect();
-                        self.render_kanban_column(
+                if !q.is_empty() {
+                    // Smart search board: hide 0-count columns, auto-include Archive matches, and sort most-populated/most-relevant columns first!
+                    let search_buckets: [(&'static str, Vec<&RoleCard>); 5] = [
+                        (
                             "Interviews",
-                            col_cards,
-                            interviews_total,
-                            ColumnMode::ExpandInterviews,
-                            16.0,
-                            cx,
-                        )
+                            cards
+                                .iter()
+                                .copied()
+                                .filter(|c| c.column == "Interviews")
+                                .collect(),
+                        ),
+                        (
+                            "Screening",
+                            cards
+                                .iter()
+                                .copied()
+                                .filter(|c| c.column == "Screening")
+                                .collect(),
+                        ),
+                        (
+                            "Applied",
+                            cards
+                                .iter()
+                                .copied()
+                                .filter(|c| c.column == "Applied")
+                                .collect(),
+                        ),
+                        (
+                            "Saved",
+                            cards
+                                .iter()
+                                .copied()
+                                .filter(|c| c.column == "Saved")
+                                .collect(),
+                        ),
+                        (
+                            "Archive",
+                            self.snapshot
+                                .archived_cards
+                                .iter()
+                                .filter(|c| c.search_blob.contains(&q))
+                                .collect(),
+                        ),
+                    ];
+                    let mut non_empty: Vec<(&'static str, Vec<&RoleCard>)> = search_buckets
+                        .into_iter()
+                        .filter(|(_, list)| !list.is_empty())
+                        .collect();
+                    non_empty.sort_by_key(|(_, list)| std::cmp::Reverse(list.len()));
+
+                    let mut search_scroller = div()
+                        .id("kanban-search-scroll-x")
+                        .track_scroll(&self.board_scroll_x)
+                        .on_scroll_wheel(cx.listener(|this, ev: &ScrollWheelEvent, _, cx| {
+                            this.handle_board_scroll(None, ev, cx);
+                        }))
+                        .flex_1()
+                        .min_h_0()
+                        .min_w_0()
+                        .overflow_x_scroll()
+                        .flex();
+                    search_scroller.style().restrict_scroll_to_axis = Some(true);
+
+                    if non_empty.is_empty() {
+                        div()
+                            .flex_1()
+                            .min_h_0()
+                            .flex()
+                            .flex_col()
+                            .items_center()
+                            .justify_center()
+                            .gap_2()
+                            .child(div().text_sm().text_color(theme::text_secondary()).child(
+                                format!("No roles matching \"{}\"", self.search_query.trim()),
+                            ))
+                            .child(
+                                div()
+                                    .id("search-empty-clear")
+                                    .px_3()
+                                    .py(px(5.0))
+                                    .rounded(theme::r_sm())
+                                    .bg(theme::surface_subtle())
+                                    .hover(|s| s.bg(theme::row_hover()))
+                                    .cursor_pointer()
+                                    .text_xs()
+                                    .text_color(theme::lavender())
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.search_query.clear();
+                                        this.active_input = ActiveInput::None;
+                                        cx.notify();
+                                    }))
+                                    .child("Clear filter"),
+                            )
+                            .into_any_element()
                     } else {
-                        let tech_cards: Vec<&RoleCard> = cards
-                            .iter()
-                            .copied()
-                            .filter(|c| c.stage == "technical")
-                            .take(28)
-                            .collect();
-                        let tech_total = cards.iter().filter(|c| c.stage == "technical").count();
-                        self.render_kanban_column(
-                            "Technical",
-                            tech_cards,
-                            tech_total,
-                            ColumnMode::CollapseInterviews,
-                            16.0,
-                            cx,
-                        )
-                    })
-                    .children(interview_stages[1..].iter().map(|&(label, stage)| {
-                        let stage_cards: Vec<&RoleCard> = cards
-                            .iter()
-                            .copied()
-                            .filter(|c| c.stage == stage)
-                            .take(28)
-                            .collect();
-                        let total = cards.iter().filter(|c| c.stage == stage).count();
-                        let inner = self.render_kanban_column(
-                            label,
-                            stage_cards,
-                            total,
-                            ColumnMode::Standard,
-                            0.0,
-                            cx,
-                        );
-                        clip_column_slide(
-                            inner,
-                            label,
-                            268.0,
-                            16.0,
-                            !self.interviews_expanded,
-                            self.interviews_toggled && !self.reduce_motion,
-                            self.interviews_anim_epoch,
-                        )
-                    }))
-                    .child({
-                        let inner = if !self.archive_expanded {
+                        search_scroller
+                            .children(non_empty.into_iter().map(|(col_name, list)| {
+                                let total = list.len();
+                                let mode = match col_name {
+                                    "Interviews" => ColumnMode::ExpandInterviews,
+                                    "Archive" => ColumnMode::ExpandArchive,
+                                    _ => ColumnMode::Standard,
+                                };
+                                self.render_kanban_column(
+                                    col_name,
+                                    list.into_iter().take(40).collect(),
+                                    total,
+                                    mode,
+                                    16.0,
+                                    cx,
+                                )
+                            }))
+                            .into_any_element()
+                    }
+                } else {
+                    let mut board_scroller = div()
+                        .id("kanban-scroll-x")
+                        .track_scroll(&self.board_scroll_x)
+                        .on_scroll_wheel(cx.listener(|this, ev: &ScrollWheelEvent, _, cx| {
+                            this.handle_board_scroll(None, ev, cx);
+                        }))
+                        .flex_1()
+                        .min_h_0()
+                        .min_w_0()
+                        .overflow_x_scroll()
+                        .flex();
+                    board_scroller.style().restrict_scroll_to_axis = Some(true);
+                    let board_el = board_scroller
+                        .children(base_columns.into_iter().map(|col_name| {
+                            let col_cards: Vec<&RoleCard> = cards
+                                .iter()
+                                .copied()
+                                .filter(|c| c.column == col_name)
+                                .take(28)
+                                .collect();
+                            let col_total = cards.iter().filter(|c| c.column == col_name).count();
                             self.render_kanban_column(
-                                "Archive",
-                                archive_cards.clone(),
-                                archive_total,
-                                ColumnMode::ExpandArchive,
-                                0.0,
+                                col_name,
+                                col_cards,
+                                col_total,
+                                ColumnMode::Standard,
+                                16.0,
+                                cx,
+                            )
+                        }))
+                        // Standardized ZERO-SHIFT Interviews expand/collapse:
+                        // Primary column (`Interviews ›` / `‹ Technical`) stays at the exact same (x, y) pixel,
+                        // while `Final` & `Offer` glide in/out using the exact same `clip_column_slide` primitive!
+                        .child(if !self.interviews_expanded {
+                            let col_cards: Vec<&RoleCard> = cards
+                                .iter()
+                                .copied()
+                                .filter(|c| c.column == "Interviews")
+                                .take(28)
+                                .collect();
+                            self.render_kanban_column(
+                                "Interviews",
+                                col_cards,
+                                interviews_total,
+                                ColumnMode::ExpandInterviews,
+                                16.0,
                                 cx,
                             )
                         } else {
-                            let rej_all: Vec<&RoleCard> = self
+                            let tech_cards: Vec<&RoleCard> = cards
+                                .iter()
+                                .copied()
+                                .filter(|c| c.stage == "technical")
+                                .take(28)
+                                .collect();
+                            let tech_total =
+                                cards.iter().filter(|c| c.stage == "technical").count();
+                            self.render_kanban_column(
+                                "Technical",
+                                tech_cards,
+                                tech_total,
+                                ColumnMode::CollapseInterviews,
+                                16.0,
+                                cx,
+                            )
+                        })
+                        .children(interview_stages[1..].iter().map(|&(label, stage)| {
+                            let stage_cards: Vec<&RoleCard> = cards
+                                .iter()
+                                .copied()
+                                .filter(|c| c.stage == stage)
+                                .take(28)
+                                .collect();
+                            let total = cards.iter().filter(|c| c.stage == stage).count();
+                            let inner = self.render_kanban_column(
+                                label,
+                                stage_cards,
+                                total,
+                                ColumnMode::Standard,
+                                0.0,
+                                cx,
+                            );
+                            clip_column_slide(
+                                inner,
+                                label,
+                                268.0,
+                                16.0,
+                                !self.interviews_expanded,
+                                self.interviews_toggled && !self.reduce_motion,
+                                self.interviews_anim_epoch,
+                            )
+                        }))
+                        .child({
+                            let inner = if !self.archive_expanded {
+                                self.render_kanban_column(
+                                    "Archive",
+                                    archive_cards.clone(),
+                                    archive_total,
+                                    ColumnMode::ExpandArchive,
+                                    0.0,
+                                    cx,
+                                )
+                            } else {
+                                let rej_all: Vec<&RoleCard> = self
+                                    .snapshot
+                                    .archived_cards
+                                    .iter()
+                                    .filter(|c| {
+                                        (q.is_empty() || c.search_blob.contains(&q))
+                                            && c.outcome
+                                                .as_deref()
+                                                .is_some_and(|o| o.contains("reject"))
+                                    })
+                                    .collect();
+                                let rej_total = rej_all.len();
+                                self.render_kanban_column(
+                                    "Rejected",
+                                    rej_all.into_iter().take(28).collect(),
+                                    rej_total,
+                                    ColumnMode::CollapseArchive,
+                                    16.0,
+                                    cx,
+                                )
+                            };
+                            clip_column_slide(
+                                inner,
+                                "Archive",
+                                268.0,
+                                if self.archive_expanded { 16.0 } else { 0.0 },
+                                !self.show_archive,
+                                self.archive_toggled && !self.reduce_motion,
+                                self.archive_anim_epoch,
+                            )
+                        })
+                        .children(["Withdrawn", "Closed / expired"].into_iter().map(|label| {
+                            let matching: Vec<&RoleCard> = self
                                 .snapshot
                                 .archived_cards
                                 .iter()
                                 .filter(|c| {
-                                    (q.is_empty() || c.search_blob.contains(&q))
-                                        && c.outcome
-                                            .as_deref()
-                                            .is_some_and(|o| o.contains("reject"))
+                                    if !q.is_empty() && !c.search_blob.contains(&q) {
+                                        return false;
+                                    }
+                                    let out = c.outcome.as_deref().unwrap_or("");
+                                    if label == "Withdrawn" {
+                                        out.contains("withdraw")
+                                    } else {
+                                        !out.contains("reject") && !out.contains("withdraw")
+                                    }
                                 })
                                 .collect();
-                            let rej_total = rej_all.len();
-                            self.render_kanban_column(
-                                "Rejected",
-                                rej_all.into_iter().take(28).collect(),
-                                rej_total,
-                                ColumnMode::CollapseArchive,
-                                16.0,
+                            let total = matching.len();
+                            let inner = self.render_kanban_column(
+                                label,
+                                matching.into_iter().take(28).collect(),
+                                total,
+                                ColumnMode::Standard,
+                                0.0,
                                 cx,
+                            );
+                            clip_column_slide(
+                                inner,
+                                label,
+                                268.0,
+                                16.0,
+                                !(self.show_archive && self.archive_expanded),
+                                self.archive_split_toggled && !self.reduce_motion,
+                                self.archive_split_anim_epoch,
                             )
-                        };
-                        clip_column_slide(
-                            inner,
-                            "Archive",
-                            268.0,
-                            if self.archive_expanded { 16.0 } else { 0.0 },
-                            !self.show_archive,
-                            self.archive_toggled && !self.reduce_motion,
-                            self.archive_anim_epoch,
-                        )
-                    })
-                    .children(["Withdrawn", "Other closed"].into_iter().map(|label| {
-                        let matching: Vec<&RoleCard> = self
-                            .snapshot
-                            .archived_cards
-                            .iter()
-                            .filter(|c| {
-                                if !q.is_empty() && !c.search_blob.contains(&q) {
-                                    return false;
-                                }
-                                let out = c.outcome.as_deref().unwrap_or("");
-                                if label == "Withdrawn" {
-                                    out.contains("withdraw")
-                                } else {
-                                    !out.contains("reject") && !out.contains("withdraw")
-                                }
-                            })
-                            .collect();
-                        let total = matching.len();
-                        let inner = self.render_kanban_column(
-                            label,
-                            matching.into_iter().take(28).collect(),
-                            total,
-                            ColumnMode::Standard,
-                            0.0,
-                            cx,
-                        );
-                        clip_column_slide(
-                            inner,
-                            label,
-                            268.0,
-                            16.0,
-                            !(self.show_archive && self.archive_expanded),
-                            self.archive_split_toggled && !self.reduce_motion,
-                            self.archive_split_anim_epoch,
-                        )
-                    }));
-                if !self.reduce_motion && self.flow_anim_epoch > 0 {
-                    let fe = self.flow_anim_epoch;
-                    board_el
-                        .with_animation(
-                            SharedString::from(format!("board-enter-{fe}")),
-                            Animation::new(Duration::from_millis(180))
-                                .with_easing(ease_out_quint()),
-                            |el, t| el.opacity(0.25 + 0.75 * t).mt(px(4.0 * (1.0 - t))),
-                        )
-                        .into_any_element()
-                } else {
-                    board_el.into_any_element()
+                        }));
+                    if !self.reduce_motion && self.flow_anim_epoch > 0 {
+                        let fe = self.flow_anim_epoch;
+                        board_el
+                            .with_animation(
+                                SharedString::from(format!("board-enter-{fe}")),
+                                Animation::new(Duration::from_millis(180))
+                                    .with_easing(ease_out_quint()),
+                                |el, t| el.opacity(0.25 + 0.75 * t).mt(px(4.0 * (1.0 - t))),
+                            )
+                            .into_any_element()
+                    } else {
+                        board_el.into_any_element()
+                    }
                 }
             })
             // Quick-Ask upward reply popover
@@ -7618,17 +7844,19 @@ impl JobHarnessApp {
                         let bar = div()
                             .id("quick-ask-bar")
                             .w(px(300.0))
-                            .px_3()
-                            .py(px(7.0))
-                            .rounded(theme::r_md())
-                            .bg(theme::dock_glass())
+                            .h(px(34.0))
+                            .pl(px(10.0))
+                            .pr_3()
+                            .rounded(px(99.0))
+                            .bg(theme::popover_glass())
                             .border_1()
                             .border_color(if quick_active {
-                                theme::hairline_strong()
+                                theme::lavender_border()
                             } else {
-                                gpui::rgba(0x00000000)
+                                theme::hairline_strong()
                             })
                             .shadow_md()
+                            .overflow_hidden()
                             .flex()
                             .items_center()
                             .justify_between()
@@ -7642,7 +7870,7 @@ impl JobHarnessApp {
                             .child(
                                 svg()
                                     .path("icons/message-square.svg")
-                                    .size(px(13.5))
+                                    .size(px(14.0))
                                     .flex_shrink_0()
                                     .text_color(theme::lavender()),
                             )
@@ -7657,6 +7885,7 @@ impl JobHarnessApp {
                             .child(
                                 div()
                                     .id("quick-send-btn")
+                                    .flex_shrink_0()
                                     .px(px(4.0))
                                     .rounded(theme::r_xs())
                                     .cursor_pointer()
@@ -7680,16 +7909,17 @@ impl JobHarnessApp {
                                 "quick-expand-open",
                                 Animation::new(Duration::from_millis(140))
                                     .with_easing(ease_out_quint()),
-                                |el, t| el.w(px(34.0 + 266.0 * t)).opacity(0.6 + 0.4 * t),
+                                |el, t| el.w(px(34.0 + 266.0 * t)),
                             )
                             .into_any_element()
                         }
                     } else {
-                        // Bespoke circular lavender-accented Quick Chat button on bottom-left (expands cleanly on click!)
+                        // Bespoke circular lavender-accented Quick Chat button on bottom-left (exact same 34px height & icon x/y!)
                         div()
                             .id("quick-ask-trigger")
                             .w(px(34.0))
                             .h(px(34.0))
+                            .pl(px(10.0))
                             .rounded(px(99.0))
                             .bg(theme::popover_glass())
                             .border_1()
@@ -7698,7 +7928,6 @@ impl JobHarnessApp {
                             .shadow_md()
                             .flex()
                             .items_center()
-                            .justify_center()
                             .cursor_pointer()
                             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                             .on_click(cx.listener(|this, _, _, cx| {
@@ -9723,6 +9952,9 @@ impl JobHarnessApp {
                                             let path_opt = act.record_path.clone();
                                             let summary_copy = act.summary.clone();
                                             let at_copy = act.at.clone();
+                                            let is_human = act.is_human;
+                                            let has_modal_detail =
+                                                path_opt.is_some() || act.summary.len() > 120;
                                             div()
                                                 .id(SharedString::from(format!("act-ev-{i}")))
                                                 .px_2()
@@ -9732,22 +9964,26 @@ impl JobHarnessApp {
                                                 .when(i > 0, |d| {
                                                     d.border_t_1().border_color(theme::hairline())
                                                 })
-                                                .hover(|s| s.bg(theme::row_hover()))
+                                                .when(has_modal_detail, |d| {
+                                                    d.hover(|s| s.bg(theme::row_hover()))
+                                                        .cursor_pointer()
+                                                        .on_click(cx.listener(
+                                                            move |this, _, _, cx| {
+                                                                if let Some(p) = &path_opt {
+                                                                    this.open_citation(p, cx);
+                                                                } else {
+                                                                    this.expanded_reader = Some((
+                                                                        format!("Digest ({at_copy})"),
+                                                                        summary_copy.clone(),
+                                                                    ));
+                                                                    cx.notify();
+                                                                }
+                                                            },
+                                                        ))
+                                                })
                                                 .flex()
                                                 .flex_col()
                                                 .gap_1()
-                                                .cursor_pointer()
-                                                .on_click(cx.listener(move |this, _, _, cx| {
-                                                    if let Some(p) = &path_opt {
-                                                        this.open_citation(p, cx);
-                                                    } else {
-                                                        this.expanded_reader = Some((
-                                                            format!("Digest ({at_copy})"),
-                                                            summary_copy.clone(),
-                                                        ));
-                                                        cx.notify();
-                                                    }
-                                                }))
                                                 .child(
                                                     div()
                                                         .flex()
@@ -9757,8 +9993,44 @@ impl JobHarnessApp {
                                                         .text_xs()
                                                         .child(
                                                             div()
-                                                                .text_color(theme::text_muted())
-                                                                .child(act.tool.clone()),
+                                                                .flex()
+                                                                .items_center()
+                                                                .gap(px(6.0))
+                                                                .child(
+                                                                    div()
+                                                                        .w(px(5.5))
+                                                                        .h(px(5.5))
+                                                                        .rounded(px(99.0))
+                                                                        .bg(if is_human {
+                                                                            theme::emerald()
+                                                                        } else {
+                                                                            theme::lavender()
+                                                                        }),
+                                                                )
+                                                                .child(
+                                                                    div()
+                                                                        .text_size(px(10.5))
+                                                                        .font_weight(
+                                                                            FontWeight::MEDIUM,
+                                                                        )
+                                                                        .text_color(if is_human {
+                                                                            theme::emerald()
+                                                                        } else {
+                                                                            theme::lavender()
+                                                                        })
+                                                                        .child(if is_human {
+                                                                            "You"
+                                                                        } else {
+                                                                            "Agent"
+                                                                        }),
+                                                                )
+                                                                .child(
+                                                                    div()
+                                                                        .text_color(
+                                                                            theme::text_muted(),
+                                                                        )
+                                                                        .child(act.tool.clone()),
+                                                                ),
                                                         )
                                                         .child(
                                                             div()
@@ -9769,8 +10041,13 @@ impl JobHarnessApp {
                                                 .child(
                                                     div()
                                                         .text_xs()
+                                                        .line_height(px(17.5))
                                                         .text_color(theme::text_secondary())
-                                                        .child(truncate_end(&act.summary, 96)),
+                                                        .child(if has_modal_detail {
+                                                            truncate_end(&act.summary, 140)
+                                                        } else {
+                                                            act.summary.clone()
+                                                        }),
                                                 )
                                         }),
                                 ),
@@ -10583,6 +10860,65 @@ impl JobHarnessApp {
                                     })
                                 })
                         })
+                        // Section 5: Setup Wizard & Spotlight UI Tour (re-runnable anytime)
+                        .child(
+                            div()
+                                .pt_3()
+                                .border_t_1()
+                                .border_color(theme::hairline())
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .gap_2()
+                                .child(
+                                    div()
+                                        .id("set-rerun-wizard")
+                                        .flex_1()
+                                        .px_2()
+                                        .py(px(6.0))
+                                        .rounded(theme::r_sm())
+                                        .bg(theme::surface_subtle())
+                                        .hover(|s| s.bg(theme::row_hover()))
+                                        .cursor_pointer()
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .text_xs()
+                                        .text_color(theme::text_primary())
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.setup_step = 0;
+                                            this.active_popover = ActivePopover::SetupWizard;
+                                            this.cmd_anim_epoch =
+                                                this.cmd_anim_epoch.wrapping_add(1);
+                                            cx.notify();
+                                        }))
+                                        .child("Setup wizard"),
+                                )
+                                .child(
+                                    div()
+                                        .id("set-start-tour")
+                                        .flex_1()
+                                        .px_2()
+                                        .py(px(6.0))
+                                        .rounded(theme::r_sm())
+                                        .bg(theme::surface_subtle())
+                                        .hover(|s| s.bg(theme::row_hover()))
+                                        .cursor_pointer()
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .text_xs()
+                                        .text_color(theme::text_secondary())
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.tour_step = 0;
+                                            this.active_popover = ActivePopover::Tour;
+                                            this.cmd_anim_epoch =
+                                                this.cmd_anim_epoch.wrapping_add(1);
+                                            cx.notify();
+                                        }))
+                                        .child("Quick UI tour"),
+                                ),
+                        )
                         .into_any_element(),
                 )
             }
@@ -10654,12 +10990,17 @@ impl JobHarnessApp {
                         .children(quiet_roles.into_iter().enumerate().map(|(i, card)| {
                             let today = chrono::Utc::now().date_naive();
                             let (days, age_label) = if let Some(d) = card.quiet_days {
-                                (d, format!("Quiet {d}d  {}", title_case_stage(&card.stage)))
+                                let st = title_case_stage(&card.stage);
+                                if d >= 14 {
+                                    (d, format!("{st} thread — no reply {d}d (stale)"))
+                                } else {
+                                    (d, format!("{st} thread — no reply {d}d (follow up)"))
+                                }
                             } else if let Ok(checked) =
                                 chrono::NaiveDate::parse_from_str(&card.checked, "%Y-%m-%d")
                             {
                                 let d = (today - checked).num_days().max(0) as u64;
-                                (d, format!("Stale {d}d  {}", title_case_stage(&card.stage)))
+                                (d, format!("{} lead — untouched {d}d", title_case_stage(&card.stage)))
                             } else {
                                 (0, title_case_stage(&card.stage))
                             };
@@ -10966,6 +11307,10 @@ impl JobHarnessApp {
                                                     CommandAction::ExportTranscript => {
                                                         "icons/file-text.svg"
                                                     }
+                                                    CommandAction::OpenSetupWizard => {
+                                                        "icons/settings.svg"
+                                                    }
+                                                    CommandAction::StartTour => "icons/eye.svg",
                                                     CommandAction::AskAgent(_) => {
                                                         "icons/terminal.svg"
                                                     }
@@ -11571,6 +11916,678 @@ impl JobHarnessApp {
                         .into_any_element(),
                 )
             }
+            ActivePopover::SetupWizard => {
+                let epoch = self.cmd_anim_epoch;
+                let step = self.setup_step.min(3);
+                let step_titles = [
+                    "1. Agent & tools",
+                    "2. Master CV",
+                    "3. Defaults & guardrails",
+                    "4. Delegation mode",
+                ];
+                let ps = &self.snapshot.profile_settings;
+                let cur = if ps.currency.is_empty() {
+                    "GBP"
+                } else {
+                    ps.currency.as_str()
+                };
+                let p = &self.snapshot.permissions;
+                let active_preset = if !p.auto_apply_portal
+                    && !p.auto_send_first_contact_email
+                    && !p.auto_reply_threads
+                    && !p.auto_archive_mail
+                {
+                    "drafts"
+                } else if p.auto_apply_portal
+                    && !p.auto_send_first_contact_email
+                    && !p.auto_reply_threads
+                    && p.auto_archive_mail
+                {
+                    "assisted"
+                } else if p.auto_apply_portal
+                    && p.auto_send_first_contact_email
+                    && p.auto_reply_threads
+                    && p.auto_archive_mail
+                {
+                    "autonomous"
+                } else {
+                    "custom"
+                };
+
+                let step_body: AnyElement = match step {
+                    0 => div()
+                        .flex()
+                        .flex_col()
+                        .gap_3()
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(theme::text_secondary())
+                                .child("Pick your local agent runtime. Job Harness keeps all career files locally and never locks you into one model."),
+                        )
+                        .child(self.render_agent_controls("wiz", false, cx))
+                        .into_any_element(),
+                    1 => {
+                        let cv_count = self.snapshot.cv_nodes.len();
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_3()
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(theme::text_secondary())
+                                    .child("Your Master CV is the single source of truth for facts; track CVs only change emphasis."),
+                            )
+                            .child(
+                                div()
+                                    .p_3()
+                                    .rounded(theme::r_md())
+                                    .bg(theme::window_glass())
+                                    .border_1()
+                                    .border_color(theme::hairline())
+                                    .flex()
+                                    .items_center()
+                                    .justify_between()
+                                    .gap_3()
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .flex_col()
+                                            .gap(px(2.0))
+                                            .child(
+                                                div()
+                                                    .text_xs()
+                                                    .font_weight(FontWeight::MEDIUM)
+                                                    .text_color(theme::text_primary())
+                                                    .child(if cv_count > 0 {
+                                                        format!("{cv_count} CV document(s) detected")
+                                                    } else {
+                                                        "No Master CV imported yet".to_owned()
+                                                    }),
+                                            )
+                                            .child(
+                                                div()
+                                                    .text_size(px(11.0))
+                                                    .text_color(theme::text_muted())
+                                                    .child("Import a PDF anytime to populate or refresh your baseline."),
+                                            ),
+                                    )
+                                    .child(
+                                        div()
+                                            .id("wiz-import-cv")
+                                            .px_3()
+                                            .py(px(6.0))
+                                            .rounded(theme::r_sm())
+                                            .bg(theme::surface_active())
+                                            .hover(|s| s.bg(theme::row_hover()))
+                                            .cursor_pointer()
+                                            .text_xs()
+                                            .text_color(theme::text_primary())
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                this.import_cv_dialog(cx);
+                                            }))
+                                            .child("Import PDF…"),
+                                    ),
+                            )
+                            .into_any_element()
+                    }
+                    2 => div()
+                        .flex()
+                        .flex_col()
+                        .gap_2()
+                        .child(
+                            div()
+                                .pb_1()
+                                .text_xs()
+                                .text_color(theme::text_secondary())
+                                .child("Click any value to edit — saved straight to config/career-ledger.json and shared by every connected agent."),
+                        )
+                        .child(self.render_editable_kv(
+                            "application_email",
+                            "Application email",
+                            if ps.application_email.is_empty() {
+                                "Set form email".into()
+                            } else {
+                                truncate_label(&ps.application_email, 28)
+                            },
+                            ps.application_email.clone(),
+                            "cv@domain.com",
+                            cx,
+                        ))
+                        .child(self.render_editable_kv(
+                            "sender_email",
+                            "Reply email",
+                            if ps.sender_email.is_empty() {
+                                "Set reply email".into()
+                            } else {
+                                truncate_label(&ps.sender_email, 28)
+                            },
+                            ps.sender_email.clone(),
+                            "you@domain.com",
+                            cx,
+                        ))
+                        .child(self.render_editable_kv(
+                            "min_base_salary",
+                            "Min salary",
+                            format!("{cur} {}", ps.min_base_salary),
+                            ps.min_base_salary.to_string(),
+                            "80000",
+                            cx,
+                        ))
+                        .child(self.render_editable_kv(
+                            "target_base_salary",
+                            "Target salary",
+                            format!("{cur} {}", ps.target_base_salary),
+                            ps.target_base_salary.to_string(),
+                            "100000",
+                            cx,
+                        ))
+                        .child(self.render_editable_kv(
+                            "location_preferences",
+                            "Location",
+                            truncate_end(
+                                if ps.location_preferences.is_empty() {
+                                    "Set preference"
+                                } else {
+                                    &ps.location_preferences
+                                },
+                                30,
+                            ),
+                            ps.location_preferences.clone(),
+                            "UK remote, London hybrid",
+                            cx,
+                        ))
+                        .child(self.render_editable_kv(
+                            "notice_period",
+                            "Notice period",
+                            truncate_end(
+                                if ps.notice_period.is_empty() {
+                                    "Set notice period"
+                                } else {
+                                    &ps.notice_period
+                                },
+                                30,
+                            ),
+                            ps.notice_period.clone(),
+                            "1 month / Immediate",
+                            cx,
+                        ))
+                        .child(self.render_editable_kv(
+                            "avoid_list",
+                            "Avoid list",
+                            truncate_end(
+                                if ps.avoid_list.is_empty() {
+                                    "Companies or sectors to skip"
+                                } else {
+                                    &ps.avoid_list
+                                },
+                                30,
+                            ),
+                            ps.avoid_list.clone(),
+                            "gambling, defence, agencies",
+                            cx,
+                        ))
+                        .into_any_element(),
+                    _ => {
+                        let modes: [(&'static str, &'static str, &'static str, bool); 3] = [
+                            (
+                                "drafts",
+                                "Drafts only",
+                                "Preps packets and saves Gmail drafts only — you submit and send everything.",
+                                false,
+                            ),
+                            (
+                                "assisted",
+                                "Assisted",
+                                "Auto-submits clean ATS portals within your daily cap and archives verified receipts; cold emails & replies stay drafts.",
+                                true,
+                            ),
+                            (
+                                "autonomous",
+                                "Autonomous",
+                                "Submits portals, sends verified cold emails & routine replies, and archives receipts.",
+                                false,
+                            ),
+                        ];
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_2()
+                            .children(modes.into_iter().map(|(id, title, desc, rec)| {
+                                let on = active_preset == id;
+                                div()
+                                    .id(SharedString::from(format!("wiz-mode-{id}")))
+                                    .p_3()
+                                    .rounded(theme::r_md())
+                                    .bg(if on {
+                                        theme::surface_active()
+                                    } else {
+                                        theme::window_glass()
+                                    })
+                                    .border_1()
+                                    .border_color(if on {
+                                        theme::emerald()
+                                    } else {
+                                        theme::hairline()
+                                    })
+                                    .hover(|s| s.bg(theme::row_hover()))
+                                    .cursor_pointer()
+                                    .flex()
+                                    .flex_col()
+                                    .gap(px(4.0))
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.set_delegation_preset(id, cx);
+                                    }))
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .items_center()
+                                            .justify_between()
+                                            .child(
+                                                div()
+                                                    .text_xs()
+                                                    .font_weight(FontWeight::SEMIBOLD)
+                                                    .text_color(theme::text_primary())
+                                                    .child(title),
+                                            )
+                                            .when(rec, |r| {
+                                                r.child(
+                                                    div()
+                                                        .text_size(px(10.5))
+                                                        .text_color(theme::emerald())
+                                                        .child("Recommended"),
+                                                )
+                                            }),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_size(px(11.5))
+                                            .line_height(px(17.0))
+                                            .text_color(theme::text_muted())
+                                            .child(desc),
+                                    )
+                            }))
+                            .child(
+                                div()
+                                    .pt_1()
+                                    .text_size(px(11.0))
+                                    .text_color(theme::text_muted())
+                                    .child("Always human-confirmed: booking slots, live interviews, offers, CAPTCHAs, and secrets."),
+                            )
+                            .into_any_element()
+                    }
+                };
+
+                let card =
+                    div()
+                        .id("setup-wizard-card")
+                        .occlude()
+                        .w(px(560.0))
+                        .max_h(px(620.0))
+                        .rounded(theme::r_lg())
+                        .bg(theme::popover_glass())
+                        .border_1()
+                        .border_color(theme::hairline_strong())
+                        .shadow_lg()
+                        .overflow_hidden()
+                        .flex()
+                        .flex_col()
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .child(
+                            div()
+                                .px_5()
+                                .py_4()
+                                .border_b_1()
+                                .border_color(theme::hairline())
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .child(
+                                    div()
+                                        .flex()
+                                        .flex_col()
+                                        .gap(px(2.0))
+                                        .child(
+                                            div()
+                                                .text_sm()
+                                                .font_weight(FontWeight::SEMIBOLD)
+                                                .text_color(theme::text_primary())
+                                                .child("Workspace Setup"),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .text_color(theme::text_muted())
+                                                .child(step_titles[step]),
+                                        ),
+                                )
+                                .child(
+                                    div()
+                                        .id("wiz-close")
+                                        .px(px(6.0))
+                                        .py(px(2.0))
+                                        .rounded(theme::r_xs())
+                                        .hover(|s| s.bg(theme::row_hover()))
+                                        .cursor_pointer()
+                                        .text_xs()
+                                        .text_color(theme::text_muted())
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.active_popover = ActivePopover::None;
+                                            cx.notify();
+                                        }))
+                                        .child("✕"),
+                                ),
+                        )
+                        .child(div().px_5().pt_3().flex().items_center().gap_1().children(
+                            (0..4).map(|si| {
+                                div()
+                                    .id(SharedString::from(format!("wiz-tab-{si}")))
+                                    .flex_1()
+                                    .h(px(3.0))
+                                    .rounded(px(99.0))
+                                    .bg(if si <= step {
+                                        theme::lavender()
+                                    } else {
+                                        theme::surface_subtle()
+                                    })
+                                    .cursor_pointer()
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.setup_step = si;
+                                        cx.notify();
+                                    }))
+                            }),
+                        ))
+                        .child(
+                            div()
+                                .id("wiz-body-scroll")
+                                .flex_1()
+                                .min_h_0()
+                                .overflow_y_scroll()
+                                .px_5()
+                                .py_4()
+                                .child(step_body),
+                        )
+                        .child(
+                            div()
+                                .px_5()
+                                .py_3()
+                                .border_t_1()
+                                .border_color(theme::hairline())
+                                .bg(theme::window_glass())
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .child(
+                                    div()
+                                        .id("wiz-prev")
+                                        .px_3()
+                                        .py(px(5.0))
+                                        .rounded(theme::r_sm())
+                                        .when(step > 0, |d| {
+                                            d.hover(|s| s.bg(theme::row_hover())).cursor_pointer()
+                                        })
+                                        .text_xs()
+                                        .text_color(if step > 0 {
+                                            theme::text_secondary()
+                                        } else {
+                                            theme::hairline_strong()
+                                        })
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            if this.setup_step > 0 {
+                                                this.setup_step -= 1;
+                                                cx.notify();
+                                            }
+                                        }))
+                                        .child("Back"),
+                                )
+                                .child(
+                                    div()
+                                        .id("wiz-next")
+                                        .px_3()
+                                        .py(px(5.0))
+                                        .rounded(theme::r_sm())
+                                        .bg(theme::surface_active())
+                                        .hover(|s| s.bg(theme::row_hover()))
+                                        .cursor_pointer()
+                                        .text_xs()
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .text_color(theme::text_primary())
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            if this.setup_step < 3 {
+                                                this.setup_step += 1;
+                                                cx.notify();
+                                            } else {
+                                                this.active_popover = ActivePopover::None;
+                                                this.set_toast("Setup saved", cx);
+                                            }
+                                        }))
+                                        .child(if step < 3 { "Next →" } else { "Done" }),
+                                ),
+                        );
+
+                Some(
+                    div()
+                        .id("setup-wizard-backdrop")
+                        .occlude()
+                        .absolute()
+                        .inset_0()
+                        .bg(gpui::rgba(0x0505089e))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, _, _, cx| {
+                                this.active_popover = ActivePopover::None;
+                                cx.notify();
+                            }),
+                        )
+                        .child(if self.reduce_motion {
+                            card.into_any_element()
+                        } else {
+                            card.with_animation(
+                                SharedString::from(format!("pop-wiz-{epoch}")),
+                                Animation::new(Duration::from_millis(140))
+                                    .with_easing(ease_out_quint()),
+                                |el, t| el.opacity(t).mt(px(-8.0 * (1.0 - t))),
+                            )
+                            .into_any_element()
+                        })
+                        .into_any_element(),
+                )
+            }
+            ActivePopover::Tour => {
+                let epoch = self.cmd_anim_epoch;
+                let step = self.tour_step.min(4);
+                let stops: [(&str, &str, &str); 5] = [
+                    (
+                        "Board & Sankey Flow",
+                        "Top toolbar (right)",
+                        "Toggle between Kanban columns and the 2D-zoomable Sankey funnel. Tap `Interviews ›` or `Archive ›` to expand sub-stages in place without layout shift.",
+                    ),
+                    (
+                        "Attention & Tidy",
+                        "Top bar",
+                        "`Attention` filters to urgent interviews and active conversations that went quiet (`Follow up` 5–13d in amber, `Stale` 14+d in rose). Use the Tidy broom to Archive, Follow up, or Keep active — nothing auto-archives.",
+                    ),
+                    (
+                        "Role Drawer & Chapter Reader",
+                        "Click any card",
+                        "Inspect Overview, 2-layer Briefs, and canonical Record evidence. Expand any brief for the side-rail chapter view and smooth cross-paragraph text selection.",
+                    ),
+                    (
+                        "Chat, Sessions & Ephemeral Secrets",
+                        "Left rail  ⌘\\",
+                        "Talk to Hermes, Claude Code, Codex, or Pi directly over your local ledger. Copy or export full Markdown transcripts from the chat header, or press ⌘K → `Pass a secret` for 1-use auto-shredding logins.",
+                    ),
+                    (
+                        "Delegation & 1-Click Refresh",
+                        "Settings & bottom dock",
+                        "Pick `Drafts only`, `Assisted` (recommended), or `Autonomous` in Settings — plus optional `Keep Mac awake during runs`. Click the refresh icon beside your daily cap anytime for instant sync.",
+                    ),
+                ];
+                let (title, anchor, desc) = stops[step];
+                let card = div()
+                    .id("tour-spotlight-card")
+                    .occlude()
+                    .w(px(460.0))
+                    .rounded(theme::r_lg())
+                    .bg(theme::popover_glass())
+                    .border_1()
+                    .border_color(theme::lavender_border())
+                    .shadow_lg()
+                    .p_5()
+                    .flex()
+                    .flex_col()
+                    .gap_3()
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .child(
+                                div()
+                                    .text_size(px(11.0))
+                                    .text_color(theme::lavender())
+                                    .child(format!("Quick Tour  {} / 5  —  {anchor}", step + 1)),
+                            )
+                            .child(
+                                div()
+                                    .id("tour-skip")
+                                    .text_xs()
+                                    .text_color(theme::text_muted())
+                                    .hover(|s| s.text_color(theme::text_primary()))
+                                    .cursor_pointer()
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.active_popover = ActivePopover::None;
+                                        cx.notify();
+                                    }))
+                                    .child("Skip"),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(theme::text_primary())
+                            .child(title),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .line_height(px(19.0))
+                            .text_color(theme::text_secondary())
+                            .child(desc),
+                    )
+                    .child(
+                        div()
+                            .pt_2()
+                            .border_t_1()
+                            .border_color(theme::hairline())
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(5.0))
+                                    .children((0..5).map(|i| {
+                                        div()
+                                            .w(if i == step { px(16.0) } else { px(6.0) })
+                                            .h(px(6.0))
+                                            .rounded(px(99.0))
+                                            .bg(if i == step {
+                                                theme::lavender()
+                                            } else {
+                                                theme::surface_active()
+                                            })
+                                    })),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .when(step > 0, |r| {
+                                        r.child(
+                                            div()
+                                                .id("tour-back")
+                                                .px_2()
+                                                .py(px(4.0))
+                                                .rounded(theme::r_sm())
+                                                .hover(|s| s.bg(theme::row_hover()))
+                                                .cursor_pointer()
+                                                .text_xs()
+                                                .text_color(theme::text_secondary())
+                                                .on_click(cx.listener(|this, _, _, cx| {
+                                                    if this.tour_step > 0 {
+                                                        this.tour_step -= 1;
+                                                        cx.notify();
+                                                    }
+                                                }))
+                                                .child("Back"),
+                                        )
+                                    })
+                                    .child(
+                                        div()
+                                            .id("tour-next")
+                                            .px_3()
+                                            .py(px(4.0))
+                                            .rounded(theme::r_sm())
+                                            .bg(theme::surface_active())
+                                            .hover(|s| s.bg(theme::row_hover()))
+                                            .cursor_pointer()
+                                            .text_xs()
+                                            .font_weight(FontWeight::MEDIUM)
+                                            .text_color(theme::text_primary())
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                if this.tour_step < 4 {
+                                                    this.tour_step += 1;
+                                                    cx.notify();
+                                                } else {
+                                                    this.active_popover = ActivePopover::None;
+                                                    cx.notify();
+                                                }
+                                            }))
+                                            .child(if step < 4 { "Next →" } else { "Finish" }),
+                                    ),
+                            ),
+                    );
+
+                Some(
+                    div()
+                        .id("tour-backdrop")
+                        .occlude()
+                        .absolute()
+                        .inset_0()
+                        .bg(gpui::rgba(0x05050892))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, _, _, cx| {
+                                this.active_popover = ActivePopover::None;
+                                cx.notify();
+                            }),
+                        )
+                        .child(if self.reduce_motion {
+                            card.into_any_element()
+                        } else {
+                            card.with_animation(
+                                SharedString::from(format!("pop-tour-{epoch}-{step}")),
+                                Animation::new(Duration::from_millis(140))
+                                    .with_easing(ease_out_quint()),
+                                |el, t| el.opacity(t).mt(px(-6.0 * (1.0 - t))),
+                            )
+                            .into_any_element()
+                        })
+                        .into_any_element(),
+                )
+            }
             ActivePopover::Budget => {
                 let b = &self.snapshot.daily_budget;
                 let right_off = self.bottom_popover_right_offset();
@@ -11869,7 +12886,13 @@ impl Render for JobHarnessApp {
                     if this.editing_config_key.is_some() {
                         this.cancel_inline_config(cx);
                     }
-                    if this.active_input == ActiveInput::QuickAsk && this.quick_input.is_empty() {
+                    if matches!(
+                        this.active_input,
+                        ActiveInput::Search
+                            | ActiveInput::QuickAsk
+                            | ActiveInput::SankeyFilter
+                            | ActiveInput::ModelField
+                    ) {
                         this.active_input = ActiveInput::None;
                         dirty = true;
                     }
@@ -12178,13 +13201,18 @@ impl Render for JobHarnessApp {
                     None => body.clone(),
                 };
                 let sec_epoch = self.brief_section_epoch;
+                let has_rail = sec_count >= 2;
+                let word_count = body.split_whitespace().count();
+                let read_mins = ((word_count as f32) / 220.0).round().max(1.0) as usize;
+                let modal_w = if has_rail { 960.0 } else { 760.0 };
+                let modal_h = if has_rail { 680.0 } else { 620.0 };
                 let modal_card = div()
                     .id("md-reader-modal")
                     .on_mouse_down(MouseButton::Left, |_, _, cx| {
                         cx.stop_propagation();
                     })
-                    .w(px(760.0))
-                    .h(px(620.0))
+                    .w(px(modal_w))
+                    .h(px(modal_h))
                     .p_6()
                     .rounded(theme::r_lg())
                     .bg(theme::popover_glass())
@@ -12227,7 +13255,7 @@ impl Render for JobHarnessApp {
                                                         reveal_in_file_manager(&p);
                                                     }))
                                             })
-                                            .child(truncate_label(&title, 50))
+                                            .child(truncate_label(&title, 56))
                                     })
                                     .child({
                                         let copied = self.is_copied_flash("reader-copy-all");
@@ -12355,147 +13383,7 @@ impl Render for JobHarnessApp {
                                     ),
                             ),
                     )
-                    // Clean layer / stage switcher inside Focused Reader
-                    .when(sec_count >= 2, |m| {
-                        m.child(
-                            div()
-                                .pb_3()
-                                .border_b_1()
-                                .border_color(theme::hairline())
-                                .flex()
-                                .items_center()
-                                .justify_between()
-                                .gap_3()
-                                .child(
-                                    div()
-                                        .id("rsec-scroll-x")
-                                        .flex_1()
-                                        .min_w_0()
-                                        .overflow_x_scroll()
-                                        .flex()
-                                        .items_center()
-                                        .gap_1()
-                                        .child(
-                                            div()
-                                                .id("rsec-all")
-                                                .flex_shrink_0()
-                                                .px_2()
-                                                .py(px(3.0))
-                                                .rounded(theme::r_sm())
-                                                .bg(if active_sec.is_none() {
-                                                    theme::surface_active()
-                                                } else {
-                                                    gpui::rgba(0x00000000)
-                                                })
-                                                .text_xs()
-                                                .text_color(if active_sec.is_none() {
-                                                    theme::text_primary()
-                                                } else {
-                                                    theme::text_muted()
-                                                })
-                                                .cursor_pointer()
-                                                .on_click(cx.listener(|this, _, _, cx| {
-                                                    this.brief_section = None;
-                                                    this.brief_section_epoch =
-                                                        this.brief_section_epoch.wrapping_add(1);
-                                                    cx.notify();
-                                                }))
-                                                .child("All"),
-                                        )
-                                        .children(sections.iter().enumerate().map(|(idx, sec)| {
-                                            let on = active_sec == Some(idx);
-                                            div()
-                                                .id(SharedString::from(format!("rsec-{idx}")))
-                                                .flex_shrink_0()
-                                                .px_2()
-                                                .py(px(3.0))
-                                                .rounded(theme::r_sm())
-                                                .bg(if on {
-                                                    theme::surface_active()
-                                                } else {
-                                                    gpui::rgba(0x00000000)
-                                                })
-                                                .hover(|s| s.bg(theme::row_hover()))
-                                                .text_xs()
-                                                .text_color(if on {
-                                                    theme::text_primary()
-                                                } else {
-                                                    theme::text_muted()
-                                                })
-                                                .cursor_pointer()
-                                                .on_click(cx.listener(move |this, _, _, cx| {
-                                                    this.brief_section = Some(idx);
-                                                    this.brief_section_epoch =
-                                                        this.brief_section_epoch.wrapping_add(1);
-                                                    cx.notify();
-                                                }))
-                                                .child(sec.label.clone())
-                                        })),
-                                )
-                                .child(
-                                    div()
-                                        .flex_shrink_0()
-                                        .flex()
-                                        .items_center()
-                                        .gap(px(2.0))
-                                        .text_xs()
-                                        .text_color(theme::text_secondary())
-                                        .child(
-                                            div()
-                                                .id("rsec-prev")
-                                                .w(px(24.0))
-                                                .h(px(24.0))
-                                                .rounded(theme::r_xs())
-                                                .hover(|s| {
-                                                    s.bg(theme::row_hover())
-                                                        .text_color(theme::text_primary())
-                                                })
-                                                .flex()
-                                                .items_center()
-                                                .justify_center()
-                                                .cursor_pointer()
-                                                .on_click(cx.listener(move |this, _, _, cx| {
-                                                    this.brief_section = match this.brief_section {
-                                                        None | Some(0) => {
-                                                            Some(sec_count.saturating_sub(1))
-                                                        }
-                                                        Some(i) => Some(i - 1),
-                                                    };
-                                                    this.brief_section_epoch =
-                                                        this.brief_section_epoch.wrapping_add(1);
-                                                    cx.notify();
-                                                }))
-                                                .child("‹"),
-                                        )
-                                        .child(
-                                            div()
-                                                .id("rsec-next")
-                                                .w(px(24.0))
-                                                .h(px(24.0))
-                                                .rounded(theme::r_xs())
-                                                .hover(|s| {
-                                                    s.bg(theme::row_hover())
-                                                        .text_color(theme::text_primary())
-                                                })
-                                                .flex()
-                                                .items_center()
-                                                .justify_center()
-                                                .cursor_pointer()
-                                                .on_click(cx.listener(move |this, _, _, cx| {
-                                                    this.brief_section = match this.brief_section {
-                                                        None => Some(0),
-                                                        Some(i) if i + 1 < sec_count => Some(i + 1),
-                                                        Some(_) => None,
-                                                    };
-                                                    this.brief_section_epoch =
-                                                        this.brief_section_epoch.wrapping_add(1);
-                                                    cx.notify();
-                                                }))
-                                                .child("›"),
-                                        ),
-                                ),
-                        )
-                    })
+                    // Editorial 2-column body: sticky left Contents chapter rail (owenabel.com StoryLayout pattern) + optimal-measure reading pane
                     .child({
                         let reader_sel = self.active_text_selection();
                         let reader_content: AnyElement = if let Some(json_val) = &parsed_json {
@@ -12560,10 +13448,11 @@ impl Render for JobHarnessApp {
                             .id("md-reader-scroll")
                             .flex_1()
                             .min_h_0()
+                            .min_w_0()
                             .pr_2()
                             .overflow_y_scroll()
-                            .child(reader_content);
-                        if self.reduce_motion {
+                            .child(div().max_w(px(660.0)).w_full().child(reader_content));
+                        let animated_body = if self.reduce_motion {
                             body_view.into_any_element()
                         } else {
                             body_view
@@ -12573,6 +13462,224 @@ impl Render for JobHarnessApp {
                                         .with_easing(ease_out_quint()),
                                     |el, t| el.opacity(0.4 + 0.6 * t),
                                 )
+                                .into_any_element()
+                        };
+                        if !has_rail {
+                            animated_body
+                        } else {
+                            let chapter_rail = div()
+                                .w(px(208.0))
+                                .flex_shrink_0()
+                                .h_full()
+                                .pr_4()
+                                .border_r_1()
+                                .border_color(theme::hairline())
+                                .flex()
+                                .flex_col()
+                                .justify_between()
+                                .gap_3()
+                                .child(
+                                    div()
+                                        .flex()
+                                        .flex_col()
+                                        .gap_1()
+                                        .child(
+                                            div()
+                                                .pb_2()
+                                                .text_size(px(10.5))
+                                                .font_weight(FontWeight::MEDIUM)
+                                                .text_color(theme::text_muted())
+                                                .child("CONTENTS"),
+                                        )
+                                        .child(
+                                            div()
+                                                .id("rsec-all")
+                                                .px_2()
+                                                .py(px(5.0))
+                                                .rounded(theme::r_sm())
+                                                .border_l_2()
+                                                .border_color(if active_sec.is_none() {
+                                                    theme::lavender()
+                                                } else {
+                                                    gpui::rgba(0x00000000)
+                                                })
+                                                .when(active_sec.is_none(), |d| {
+                                                    d.bg(theme::surface_subtle())
+                                                })
+                                                .hover(|s| s.bg(theme::row_hover()))
+                                                .cursor_pointer()
+                                                .text_xs()
+                                                .font_weight(if active_sec.is_none() {
+                                                    FontWeight::MEDIUM
+                                                } else {
+                                                    FontWeight::NORMAL
+                                                })
+                                                .text_color(if active_sec.is_none() {
+                                                    theme::text_primary()
+                                                } else {
+                                                    theme::text_muted()
+                                                })
+                                                .on_click(cx.listener(|this, _, _, cx| {
+                                                    this.brief_section = None;
+                                                    this.brief_section_epoch =
+                                                        this.brief_section_epoch.wrapping_add(1);
+                                                    cx.notify();
+                                                }))
+                                                .child("Full document"),
+                                        )
+                                        .children(sections.iter().enumerate().map(|(idx, sec)| {
+                                            let on = active_sec == Some(idx);
+                                            div()
+                                                .id(SharedString::from(format!("rsec-{idx}")))
+                                                .px_2()
+                                                .py(px(5.0))
+                                                .rounded(theme::r_sm())
+                                                .border_l_2()
+                                                .border_color(if on {
+                                                    theme::lavender()
+                                                } else {
+                                                    gpui::rgba(0x00000000)
+                                                })
+                                                .when(on, |d| d.bg(theme::surface_subtle()))
+                                                .hover(|s| s.bg(theme::row_hover()))
+                                                .cursor_pointer()
+                                                .flex()
+                                                .items_center()
+                                                .gap_2()
+                                                .text_xs()
+                                                .on_click(cx.listener(move |this, _, _, cx| {
+                                                    this.brief_section = Some(idx);
+                                                    this.brief_section_epoch =
+                                                        this.brief_section_epoch.wrapping_add(1);
+                                                    cx.notify();
+                                                }))
+                                                .child(
+                                                    div()
+                                                        .text_size(px(10.5))
+                                                        .text_color(if on {
+                                                            theme::lavender()
+                                                        } else {
+                                                            theme::text_muted()
+                                                        })
+                                                        .child(format!("{}", idx + 1)),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .flex_1()
+                                                        .min_w_0()
+                                                        .font_weight(if on {
+                                                            FontWeight::MEDIUM
+                                                        } else {
+                                                            FontWeight::NORMAL
+                                                        })
+                                                        .text_color(if on {
+                                                            theme::text_primary()
+                                                        } else {
+                                                            theme::text_secondary()
+                                                        })
+                                                        .child(sec.label.clone()),
+                                                )
+                                        })),
+                                )
+                                .child(
+                                    div()
+                                        .pt_3()
+                                        .border_t_1()
+                                        .border_color(theme::hairline())
+                                        .flex()
+                                        .items_center()
+                                        .justify_between()
+                                        .child(
+                                            div()
+                                                .text_size(px(11.0))
+                                                .text_color(theme::text_muted())
+                                                .child(format!("{read_mins} min read")),
+                                        )
+                                        .child(
+                                            div()
+                                                .flex()
+                                                .items_center()
+                                                .gap(px(2.0))
+                                                .text_xs()
+                                                .text_color(theme::text_secondary())
+                                                .child(
+                                                    div()
+                                                        .id("rsec-prev")
+                                                        .w(px(22.0))
+                                                        .h(px(22.0))
+                                                        .rounded(theme::r_xs())
+                                                        .hover(|s| {
+                                                            s.bg(theme::row_hover())
+                                                                .text_color(theme::text_primary())
+                                                        })
+                                                        .flex()
+                                                        .items_center()
+                                                        .justify_center()
+                                                        .cursor_pointer()
+                                                        .on_click(cx.listener(
+                                                            move |this, _, _, cx| {
+                                                                this.brief_section = match this
+                                                                    .brief_section
+                                                                {
+                                                                    None | Some(0) => Some(
+                                                                        sec_count.saturating_sub(1),
+                                                                    ),
+                                                                    Some(i) => Some(i - 1),
+                                                                };
+                                                                this.brief_section_epoch = this
+                                                                    .brief_section_epoch
+                                                                    .wrapping_add(1);
+                                                                cx.notify();
+                                                            },
+                                                        ))
+                                                        .child("‹"),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .id("rsec-next")
+                                                        .w(px(22.0))
+                                                        .h(px(22.0))
+                                                        .rounded(theme::r_xs())
+                                                        .hover(|s| {
+                                                            s.bg(theme::row_hover())
+                                                                .text_color(theme::text_primary())
+                                                        })
+                                                        .flex()
+                                                        .items_center()
+                                                        .justify_center()
+                                                        .cursor_pointer()
+                                                        .on_click(cx.listener(
+                                                            move |this, _, _, cx| {
+                                                                this.brief_section = match this
+                                                                    .brief_section
+                                                                {
+                                                                    None => Some(0),
+                                                                    Some(i)
+                                                                        if i + 1 < sec_count =>
+                                                                    {
+                                                                        Some(i + 1)
+                                                                    }
+                                                                    Some(_) => None,
+                                                                };
+                                                                this.brief_section_epoch = this
+                                                                    .brief_section_epoch
+                                                                    .wrapping_add(1);
+                                                                cx.notify();
+                                                            },
+                                                        ))
+                                                        .child("›"),
+                                                ),
+                                        ),
+                                );
+
+                            div()
+                                .flex_1()
+                                .min_h_0()
+                                .min_w_0()
+                                .flex()
+                                .gap_6()
+                                .child(chapter_rail)
+                                .child(animated_body)
                                 .into_any_element()
                         }
                     });
@@ -13199,11 +14306,13 @@ fn inline_editable_text_left(
     div()
         .w_full()
         .min_w_0()
+        .flex()
+        .items_center()
+        .flex_wrap()
         .text_xs()
         .line_height(px(18.0))
         .child(
             div()
-                .w_full()
                 .min_w_0()
                 .when(all_selected, |d| {
                     d.px(px(2.0))
@@ -13211,12 +14320,15 @@ fn inline_editable_text_left(
                         .bg(theme::lavender_wash())
                 })
                 .text_color(theme::text_primary())
-                .child(if all_selected {
-                    text.to_owned()
-                } else {
-                    format!("{text}▏")
-                }),
+                .child(text.to_owned()),
         )
+        .when(!all_selected, |d| {
+            d.child(
+                div()
+                    .ml(px(1.0))
+                    .child(crisp_caret(id_tag, 14.0, reduce_motion)),
+            )
+        })
         .into_any_element()
 }
 

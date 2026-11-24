@@ -158,7 +158,14 @@ impl Engine {
             if let Some(rel) = merged.get(field).and_then(Value::as_str)
                 && !self.text_path(&format!("applications/{rel}"))?.is_file()
             {
-                return Err(Error::new("missing_resource", format!("Missing {field}")));
+                if object.contains_key(field) {
+                    return Err(Error::new(
+                        "missing_resource",
+                        format!("Missing {field}: applications/{rel} does not exist"),
+                    ));
+                }
+                // Drop stale inherited pointer (e.g. deleted cancelled packet) so archiving/updating isn't blocked
+                merged.as_object_mut().unwrap().remove(field);
             }
         }
         let block = format!(

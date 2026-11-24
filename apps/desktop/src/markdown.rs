@@ -183,6 +183,7 @@ pub fn render_markdown(
                 }
             }
             let weights: Vec<f32> = weights.into_iter().map(|w| w.clamp(14.0, 96.0)).collect();
+            let weight_sum: f32 = weights.iter().sum::<f32>().max(1.0);
 
             let cell_size = if spacious { px(12.5) } else { px(11.5) };
             let cell_lh = if spacious { px(18.5) } else { px(16.5) };
@@ -190,6 +191,7 @@ pub fn render_markdown(
             let mut table_el = div()
                 .my_2()
                 .w_full()
+                .min_w_0()
                 .rounded(theme::r_sm())
                 .bg(theme::window_glass())
                 .border_1()
@@ -200,6 +202,7 @@ pub fn render_markdown(
 
             let mut hdr_row = div()
                 .w_full()
+                .min_w_0()
                 .bg(theme::surface_subtle())
                 .border_b_1()
                 .border_color(theme::hairline_strong())
@@ -210,7 +213,7 @@ pub fn render_markdown(
                 let cell_id = SharedString::from(format!("{id_prefix}-th-{cur_ix}"));
                 let txt = headers.get(ci).map(String::as_str).unwrap_or("");
                 let mut cell = div()
-                    .min_w_0()
+                    .min_w(px(72.0))
                     .px_3()
                     .py_2()
                     .text_size(cell_size)
@@ -231,13 +234,13 @@ pub fn render_markdown(
                     cell = cell.border_l_1().border_color(theme::hairline());
                 }
                 cell.style().flex_grow = Some(*w);
-                cell.style().flex_basis = Some(px(0.0).into());
+                cell.style().flex_basis = Some(gpui::relative(*w / weight_sum).into());
                 hdr_row = hdr_row.child(cell);
             }
             table_el = table_el.child(hdr_row);
 
             for (ri, r) in rows.iter().enumerate() {
-                let mut row_el = div().w_full().flex();
+                let mut row_el = div().w_full().min_w_0().flex();
                 if ri > 0 {
                     row_el = row_el.border_t_1().border_color(theme::hairline());
                 }
@@ -250,7 +253,7 @@ pub fn render_markdown(
                     let cell_id = SharedString::from(format!("{id_prefix}-td-{cur_ix}"));
                     let txt = r.get(ci).map(String::as_str).unwrap_or("");
                     let mut cell = div()
-                        .min_w_0()
+                        .min_w(px(72.0))
                         .px_3()
                         .py_2()
                         .text_size(cell_size)
@@ -274,7 +277,7 @@ pub fn render_markdown(
                         cell = cell.border_l_1().border_color(theme::hairline());
                     }
                     cell.style().flex_grow = Some(*w);
-                    cell.style().flex_basis = Some(px(0.0).into());
+                    cell.style().flex_basis = Some(gpui::relative(*w / weight_sum).into());
                     row_el = row_el.child(cell);
                 }
                 table_el = table_el.child(row_el);
@@ -547,6 +550,7 @@ pub fn render_markdown(
     }
 
     div()
+        .w_full()
         .min_w_0()
         .flex()
         .flex_col()

@@ -107,6 +107,7 @@ pub struct ActivityDigestEntry {
     pub tool: String,
     pub summary: String,
     pub record_path: Option<String>,
+    pub is_human: bool,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -469,22 +470,28 @@ impl WorkspaceClient {
                 .unwrap_or("")
                 .to_ascii_lowercase();
             // Preserve explicit tracking.outcome first; on closed rows without an outcome field,
-            // classify explicit rejection/decline or withdrawal statements from status_detail
+            // classify explicit candidate withdrawals first, then explicit employer rejections
             // (never guessing silence as rejection).
             let outcome = explicit_outcome.or_else(|| {
                 if column != "Archive" && stage != "closed" {
                     return None;
                 }
                 if status_detail_low.contains("withdrawn")
+                    || status_detail_low.contains("withdrew")
                     || status_detail_low.contains("candidate declined")
                     || status_detail_low.contains("candidate withdrew")
+                    || status_detail_low.contains("ended pursuit")
+                    || status_detail_low.contains("pulled out")
+                    || status_detail_low.contains("decided not to proceed")
                 {
                     Some("withdrawn".into())
                 } else if status_detail_low.contains("rejected")
                     || status_detail_low.contains("rejection")
-                    || status_detail_low.contains("employer declined")
-                    || status_detail_low.contains("declined to progress")
-                    || status_detail_low.contains("declined this")
+                    || status_detail_low.contains("declined")
+                    || status_detail_low.contains("declines")
+                    || status_detail_low.contains("not progressing")
+                    || status_detail_low.contains("not moving forward")
+                    || status_detail_low.contains("unsuccessful")
                 {
                     Some("rejected".into())
                 } else {
@@ -585,13 +592,20 @@ impl WorkspaceClient {
 
         let mut recent_activity: Vec<ActivityDigestEntry> = Vec::new();
         if let Some(arr) = events_data["events"].as_array() {
-            for ev in arr.iter().rev() {
+            let mut sorted_events: Vec<&Value> = arr.iter().collect();
+            sorted_events.sort_by(|a, b| {
+                let ta = a["at"].as_str().unwrap_or("");
+                let tb = b["at"].as_str().unwrap_or("");
+                tb.cmp(ta)
+            });
+            for ev in sorted_events {
                 let raw_tool = ev["tool"].as_str().unwrap_or("");
                 let raw_summary = ev["summary"].as_str().unwrap_or("").trim();
                 if raw_summary.is_empty() && raw_tool == "start_run" {
                     continue;
                 }
                 let at = ev["at"].as_str().unwrap_or("").to_owned();
+                let idem_key = ev["idempotency_key"].as_str().unwrap_or("");
                 let record_path = ev["record_path"]
                     .as_str()
                     .filter(|s| !s.is_empty())
@@ -616,6 +630,14 @@ impl WorkspaceClient {
                         display_summary = format!("{company} — application receipt");
                     }
                 }
+                let sum_low = display_summary.to_ascii_lowercase();
+                let is_human = idem_key.starts_with("gui-")
+                    || idem_key.starts_with("manual-")
+                    || idem_key.starts_with("user-")
+                    || sum_low.contains("manual move")
+                    || sum_low.contains("kanban")
+                    || sum_low.contains("user confirmed")
+                    || sum_low.contains("tidy");
                 let age_label = short_time_label(&at);
                 if let Some(prev) = recent_activity.last_mut()
                     && (prev.summary == display_summary
@@ -633,6 +655,7 @@ impl WorkspaceClient {
                     tool: tool_label.to_owned(),
                     summary: display_summary,
                     record_path,
+                    is_human,
                 });
                 if recent_activity.len() >= 12 {
                     break;
@@ -1241,7 +1264,14 @@ fn short_time_label(iso: &str) -> String {
         if d == today.succ_opt().unwrap_or(today) {
             return format!("Tomorrow {}", local.format("%H:%M"));
         }
-        return local.format("%a %H:%M").to_string();
+        if d == today.pred_opt().unwrap_or(today) {
+            return format!("Yesterday {}", local.format("%H:%M"));
+        }
+        let delta_days = (today - d).num_days();
+        if (2..=6).contains(&delta_days) || (-6..=-2).contains(&delta_days) {
+            return local.format("%a %H:%M").to_string();
+        }
+        return local.format("%-d %b %H:%M").to_string();
     }
     iso.chars().take(16).collect()
 }
@@ -1255,7 +1285,11 @@ fn extract_quiet_days(reason: &str) -> Option<u64> {
 
 fn extract_quiet_badge(reason: &str) -> Option<String> {
     let days = extract_quiet_days(reason)?;
-    Some(format!("Quiet {days}d"))
+    if days >= 14 {
+        Some(format!("Stale {days}d"))
+    } else {
+        Some(format!("Follow up {days}d"))
+    }
 }
 
 fn concise_reason(reason: &str) -> String {
@@ -1272,7 +1306,11 @@ fn concise_reason(reason: &str) -> String {
         } else {
             "Active"
         };
-        return format!("Quiet {days}d ({stage})");
+        return if days >= 14 {
+            format!("Stale {days}d ({stage} thread)")
+        } else {
+            format!("Follow up {days}d ({stage} thread)")
+        };
     }
     if reason.contains("within 24 hours") {
         return "Interview within 24h".into();

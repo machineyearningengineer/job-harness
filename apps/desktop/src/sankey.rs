@@ -44,7 +44,7 @@ impl SankeyBucket {
             Self::ClosedAll => "Closed",
             Self::Rejected => "Rejected",
             Self::Withdrawn => "Withdrawn",
-            Self::ClosedOther => "Other closed",
+            Self::ClosedOther => "Closed / expired",
         }
     }
 

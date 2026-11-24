@@ -58,7 +58,7 @@ fn native_stdio_handshake_catalog_and_call_are_protocol_only() {
     .unwrap();
     input.flush().unwrap();
     let list = request(&mut input, &mut output, 2, "tools/list", json!({}));
-    assert_eq!(list["result"]["tools"].as_array().unwrap().len(), 12);
+    assert_eq!(list["result"]["tools"].as_array().unwrap().len(), 13);
     assert!(
         list["result"]["tools"]
             .as_array()
