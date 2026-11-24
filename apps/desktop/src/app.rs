@@ -13,7 +13,7 @@ use crate::{
 };
 use gpui::{
     Animation, AnimationExt, AnyElement, App, AppContext, ClipboardItem, Context, ExternalPaths,
-    FocusHandle, Focusable, InteractiveElement, IntoElement, KeyDownEvent, MouseButton,
+    FocusHandle, Focusable, FontWeight, InteractiveElement, IntoElement, KeyDownEvent, MouseButton,
     MouseMoveEvent, MouseUpEvent, ParentElement, Render, ScrollHandle, ScrollWheelEvent,
     SharedString, StatefulInteractiveElement, Styled, TouchPhase, Window, div, ease_out_quint, img,
     point, prelude::FluentBuilder, px, svg,
@@ -21,7 +21,7 @@ use gpui::{
 use notify::RecommendedWatcher;
 use serde_json::json;
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     path::PathBuf,
     rc::Rc,
     sync::{
@@ -277,7 +277,7 @@ pub struct JobHarnessApp {
     quick_input: String,
     quick_popover_open: bool,
     quick_reply_preview: String,
-    queued_prompt: Option<String>,
+    queued_prompts: VecDeque<String>,
     streaming: bool,
     stream_status: String,
     stream_cancel: Option<Arc<AtomicBool>>,
@@ -425,7 +425,7 @@ impl JobHarnessApp {
             quick_input: String::new(),
             quick_popover_open: false,
             quick_reply_preview: String::new(),
-            queued_prompt: None,
+            queued_prompts: VecDeque::new(),
             streaming: false,
             stream_status: String::new(),
             stream_cancel: None,
@@ -1770,7 +1770,7 @@ impl JobHarnessApp {
         }
     }
 
-    fn submit_chat_input(&mut self, cx: &mut Context<Self>) {
+    fn submit_chat_input(&mut self, steer: bool, cx: &mut Context<Self>) {
         let raw = std::mem::take(&mut self.chat_input);
         self.input_all_selected = false;
         let snippets = std::mem::take(&mut self.pasted_snippets);
@@ -1800,6 +1800,9 @@ impl JobHarnessApp {
         }
         let attachments = std::mem::take(&mut self.chat_attachments);
         if !prompt.is_empty() || !attachments.is_empty() {
+            if steer && self.streaming {
+                self.stop_stream(cx);
+            }
             self.submit_prompt_with_attachments(prompt, attachments, false, cx);
         }
     }
@@ -1820,11 +1823,14 @@ impl JobHarnessApp {
             return;
         }
         if self.streaming {
-            self.queued_prompt = Some(trimmed);
+            if !trimmed.is_empty() {
+                self.queued_prompts.push_back(trimmed);
+            }
             if !attachments.is_empty() {
                 self.chat_attachments.extend(attachments);
             }
-            self.set_toast("Queued — click Steer to send now", cx);
+            let n = self.queued_prompts.len();
+            self.set_toast(format!("Queued ({n}) · ⌘⏎ to Steer immediately"), cx);
             return;
         }
         let now = Instant::now();
@@ -2042,7 +2048,7 @@ impl JobHarnessApp {
                         if dirty {
                             cx.notify();
                         }
-                        if finished && let Some(next_q) = app.queued_prompt.take() {
+                        if finished && let Some(next_q) = app.queued_prompts.pop_front() {
                             app.submit_prompt(next_q, false, cx);
                         }
                         !finished
@@ -2375,6 +2381,7 @@ impl JobHarnessApp {
         }
 
         let shift = event.keystroke.modifiers.shift;
+        let alt = event.keystroke.modifiers.alt;
         let all_sel = self.input_all_selected;
         let active_in = self.active_input;
         let target_buf = match active_in {
@@ -2418,7 +2425,8 @@ impl JobHarnessApp {
                                 self.submit_prompt(q, true, cx);
                             }
                             ActiveInput::Chat => {
-                                self.submit_chat_input(cx);
+                                let steer = (cmd || alt) && self.streaming;
+                                self.submit_chat_input(steer, cx);
                             }
                             ActiveInput::ModelField => {
                                 self.apply_model_draft(cx);
@@ -2752,26 +2760,80 @@ impl JobHarnessApp {
         self.set_toast(format!("Model set to {}", self.active_model_badge()), cx);
     }
 
-    fn suggest_chat_followups(&self, msg: &ChatMessage) -> Vec<(String, String)> {
-        let mut out = Vec::new();
-        if let Some(brief) = msg.citations.iter().find(|c| c.contains("briefs/")) {
-            let short = brief.rsplit('/').next().unwrap_or(brief);
-            out.push((
-                format!("Drill me on {short}"),
-                format!("Run a 1-question-at-a-time mock prep drill from `{brief}`."),
+    fn resolve_company_for_brief(&self, brief_path: &str) -> Option<(String, String)> {
+        if let Some(card) = self.snapshot.active_cards.iter().find(|c| {
+            c.brief_path
+                .as_deref()
+                .is_some_and(|bp| bp == brief_path || bp.ends_with(brief_path))
+        }) {
+            return Some((
+                card.company.clone(),
+                title_case_stage(&card.stage).to_lowercase(),
             ));
         }
+        let stem = brief_path
+            .rsplit('/')
+            .next()
+            .unwrap_or(brief_path)
+            .trim_end_matches(".md");
+        let mut parts = stem.split('-');
+        let raw_co = parts.next().unwrap_or(stem);
+        let stage = parts.next().unwrap_or("interview");
+        let mut chars = raw_co.chars();
+        let c = chars.next()?;
+        let co = format!("{}{}", c.to_uppercase(), chars.as_str());
+        Some((co, stage.to_owned()))
+    }
+
+    fn suggest_chat_followups(&self, msg: &ChatMessage) -> Vec<(String, String)> {
+        let mut out = Vec::new();
         let lower = msg.text.to_ascii_lowercase();
-        if lower.contains("availability") || lower.contains("rsvp") || lower.contains("reply") {
+        if let Some(brief) = msg.citations.iter().find(|c| c.contains("briefs/"))
+            && let Some((company, stage)) = self.resolve_company_for_brief(brief)
+        {
+            let stage_noun = match stage.as_str() {
+                "screen" | "screening" => "screen",
+                "technical" => "technical interview",
+                "final" => "final round",
+                _ => "interview",
+            };
             out.push((
-                "Draft the reply in my voice".into(),
-                "Draft the short reply email in my voice (check Gmail Sent first; save as draft only).".into(),
+                format!("Practise for the {company} {stage_noun}"),
+                format!(
+                    "Run a 1-question-at-a-time mock prep drill for {company} using `{brief}`."
+                ),
             ));
+        }
+        if lower.contains("availability") || lower.contains("rsvp") || lower.contains("reply") {
+            let reply_co = self
+                .snapshot
+                .active_cards
+                .iter()
+                .find(|c| {
+                    let co_low = c.company.to_ascii_lowercase();
+                    !co_low.is_empty()
+                        && lower.contains(&co_low)
+                        && (lower.contains("availability") || lower.contains("waiting"))
+                })
+                .map(|c| c.company.clone());
+            let (label, prompt) = match reply_co {
+                Some(co) => (
+                    format!("Draft reply to {co}"),
+                    format!(
+                        "Draft a short reply to {co} in my voice (check Gmail Sent first; save as draft only)."
+                    ),
+                ),
+                None => (
+                    "Draft the reply email".into(),
+                    "Draft the short reply email in my voice (check Gmail Sent first; save as draft only).".into(),
+                ),
+            };
+            out.push((label, prompt));
         }
         if out.len() < 2 && self.snapshot.unresolved_attempts > 0 && !lower.contains("reconcil") {
             out.push((
                 format!(
-                    "Reconcile {} unknown guard(s)",
+                    "Check {} unconfirmed submission(s)",
                     self.snapshot.unresolved_attempts
                 ),
                 "Reconcile unknown submission outcomes against Gmail Sent.".into(),
@@ -2779,7 +2841,7 @@ impl JobHarnessApp {
         }
         if out.len() < 2 {
             out.push((
-                "What's the next highest-leverage move?".into(),
+                "What's the highest-leverage move next?".into(),
                 "What is the single highest-leverage next action across my active roles right now?"
                     .into(),
             ));
@@ -2793,7 +2855,7 @@ impl JobHarnessApp {
         let agent_pop_open = self.active_popover == ActivePopover::Agent;
         let model_badge = self.active_model_badge();
         let placeholder = if self.streaming {
-            "Queue or steer a follow-up…".to_owned()
+            "⏎ Queue  ·  ⌘⏎ Steer…".to_owned()
         } else if let Some((company, _)) = &self.attached_role {
             format!("Ask about {company} or press ⏎…")
         } else {
@@ -2803,6 +2865,7 @@ impl JobHarnessApp {
         let on_select = self.md_select_handler(cx);
         let active_sel = self.active_text_selection();
 
+        let inner_composer_w = (self.chat_width - 24.0).max(200.0);
         div()
             .id("chat-rail-drop")
             .drag_over::<ExternalPaths>(|s, _, _, _| {
@@ -2823,7 +2886,7 @@ impl JobHarnessApp {
                 }
             }))
             .relative()
-            .w_full()
+            .w(px(self.chat_width))
             .h_full()
             .flex_shrink_0()
             .flex()
@@ -2947,7 +3010,7 @@ impl JobHarnessApp {
                             .py_3()
                             .flex()
                             .flex_col()
-                            .gap_4()
+                            .gap_2()
                             .when(self.chat_messages.is_empty(), |d| {
                                 d.child(
                                     div()
@@ -2958,8 +3021,9 @@ impl JobHarnessApp {
                                         .child(
                                             div()
                                                 .pb_1()
-                                                .text_size(px(11.0))
-                                                .text_color(theme::text_muted())
+                                                .text_size(px(12.0))
+                                                .font_weight(FontWeight::SEMIBOLD)
+                                                .text_color(theme::text_primary())
                                                 .child("Suggested"),
                                         )
                                         .children(
@@ -2978,13 +3042,15 @@ impl JobHarnessApp {
                                                             "chat-starter-{i}"
                                                         )))
                                                         .px_2()
-                                                        .py(px(5.0))
+                                                        .py(px(6.0))
                                                         .mx(px(-6.0))
                                                         .rounded(px(7.0))
                                                         .hover(|s| s.bg(theme::row_hover()))
                                                         .cursor_pointer()
+                                                        .flex()
+                                                        .items_start()
+                                                        .gap_2()
                                                         .text_xs()
-                                                        .text_color(theme::text_muted())
                                                         .on_click(cx.listener(
                                                             move |this, _, _, cx| {
                                                                 this.submit_prompt(
@@ -2994,7 +3060,18 @@ impl JobHarnessApp {
                                                                 );
                                                             },
                                                         ))
-                                                        .child(format!("→  {prompt}"))
+                                                        .child(
+                                                            div()
+                                                                .text_color(theme::lavender())
+                                                                .child("→"),
+                                                        )
+                                                        .child(
+                                                            div()
+                                                                .flex_1()
+                                                                .min_w_0()
+                                                                .text_color(theme::text_secondary())
+                                                                .child(prompt),
+                                                        )
                                                 },
                                             ),
                                         ),
@@ -3031,8 +3108,12 @@ impl JobHarnessApp {
                                     || self.agent_opts.provider.is_some();
                                 let group_name = SharedString::from(format!("chat-msg-grp-{idx}"));
 
-                                let mut block =
-                                    div().group(group_name.clone()).flex().flex_col().gap_2();
+                                let mut block = div()
+                                    .group(group_name.clone())
+                                    .when(msg.is_user && idx > 0, |d| d.pt_3())
+                                    .flex()
+                                    .flex_col()
+                                    .gap_1();
 
                                 // Live / collapsible inline Activity Trace with tappable steps + real token count
                                 if !msg.is_user && (actively_writing || has_trace) {
@@ -3277,23 +3358,81 @@ impl JobHarnessApp {
                                                         ),
                                                 );
                                             if step.expanded && can_expand {
-                                                let preview = if !step.output.is_empty() {
-                                                    truncate_end(&step.output, 320)
+                                                let raw_out = if !step.output.is_empty() {
+                                                    step.output.as_str()
                                                 } else {
-                                                    step.detail.clone()
+                                                    step.detail.as_str()
                                                 };
-                                                step_wrap = step_wrap.child(
-                                                    div()
-                                                        .p_2()
-                                                        .rounded(px(6.0))
-                                                        .bg(theme::window_glass())
-                                                        .border_1()
-                                                        .border_color(theme::hairline())
-                                                        .text_size(px(11.0))
-                                                        .line_height(px(15.5))
-                                                        .text_color(theme::text_muted())
-                                                        .child(preview),
-                                                );
+                                                let trimmed_out = raw_out.trim();
+                                                let is_json_out = trimmed_out.starts_with('{')
+                                                    || trimmed_out.starts_with('[');
+                                                if is_json_out {
+                                                    let step_code_id = SharedString::from(format!(
+                                                        "step-json-{idx}-{si}"
+                                                    ));
+                                                    let step_sel =
+                                                        active_sel.as_ref().and_then(|s| {
+                                                            if s.block_id == step_code_id
+                                                                && s.start != s.end
+                                                            {
+                                                                Some(
+                                                                    s.start.min(s.end)
+                                                                        ..s.start.max(s.end),
+                                                                )
+                                                            } else {
+                                                                None
+                                                            }
+                                                        });
+                                                    step_wrap = step_wrap.child(
+                                                        markdown::render_syntax_code(
+                                                            step_code_id,
+                                                            &truncate_end(trimmed_out, 600),
+                                                            "json",
+                                                            false,
+                                                            step_sel,
+                                                            on_select.clone(),
+                                                        ),
+                                                    );
+                                                } else {
+                                                    step_wrap = step_wrap.child(
+                                                        div()
+                                                            .p_2()
+                                                            .rounded(px(6.0))
+                                                            .bg(theme::window_glass())
+                                                            .border_1()
+                                                            .border_color(theme::hairline())
+                                                            .flex()
+                                                            .flex_col()
+                                                            .gap(px(2.0))
+                                                            .children(
+                                                                trimmed_out.lines().take(8).map(
+                                                                    |ln| {
+                                                                        let col = if ln
+                                                                            .starts_with('✓')
+                                                                        {
+                                                                            theme::emerald()
+                                                                        } else if ln
+                                                                            .starts_with('✕')
+                                                                            || ln.starts_with(
+                                                                                "Error:",
+                                                                            )
+                                                                        {
+                                                                            theme::rose_text()
+                                                                        } else {
+                                                                            theme::text_secondary()
+                                                                        };
+                                                                        div()
+                                                                            .text_size(px(11.0))
+                                                                            .line_height(px(16.0))
+                                                                            .text_color(col)
+                                                                            .child(truncate_end(
+                                                                                ln, 64,
+                                                                            ))
+                                                                    },
+                                                                ),
+                                                            ),
+                                                    );
+                                                }
                                             }
                                             inner = inner.child(step_wrap);
                                         }
@@ -3302,9 +3441,12 @@ impl JobHarnessApp {
                                     block = block.child(trace_box);
                                 }
 
-                                // Message content body (inline thumbnails on user messages & rich Markdown on replies)
+                                // Message content body (inline thumbnails + floating hover toolbar on user bubbles -> zero dead gap!)
                                 if msg.is_user {
+                                    let copy_u = copy_text.clone();
+                                    let reply_u = reply_text.clone();
                                     let mut bubble = div()
+                                        .relative()
                                         .px_3()
                                         .py_2()
                                         .rounded(px(10.0))
@@ -3340,14 +3482,92 @@ impl JobHarnessApp {
                                             ),
                                         );
                                     }
-                                    bubble = bubble.child(markdown::render_markdown(
-                                        &format!("chat-user-{idx}"),
-                                        &msg.text,
-                                        false,
-                                        active_sel.as_ref(),
-                                        on_link.clone(),
-                                        on_select.clone(),
-                                    ));
+                                    bubble = bubble
+                                        .child(markdown::render_markdown(
+                                            &format!("chat-user-{idx}"),
+                                            &msg.text,
+                                            false,
+                                            active_sel.as_ref(),
+                                            on_link.clone(),
+                                            on_select.clone(),
+                                        ))
+                                        .child(
+                                            div()
+                                                .absolute()
+                                                .top(px(4.0))
+                                                .right(px(6.0))
+                                                .px(px(4.0))
+                                                .py(px(2.0))
+                                                .rounded(px(6.0))
+                                                .bg(theme::popover_glass())
+                                                .border_1()
+                                                .border_color(theme::hairline())
+                                                .flex()
+                                                .items_center()
+                                                .gap_1()
+                                                .opacity(0.0)
+                                                .group_hover(group_name.clone(), |s| s.opacity(1.0))
+                                                .child(
+                                                    div()
+                                                        .text_size(px(10.5))
+                                                        .text_color(theme::text_muted())
+                                                        .child(msg.sent_label.clone()),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .id(SharedString::from(format!(
+                                                            "umsg-copy-{idx}"
+                                                        )))
+                                                        .p(px(3.0))
+                                                        .rounded(px(4.0))
+                                                        .cursor_pointer()
+                                                        .hover(|s| s.bg(theme::row_hover()))
+                                                        .on_click(cx.listener(
+                                                            move |this, _, _, cx| {
+                                                                cx.write_to_clipboard(
+                                                                    ClipboardItem::new_string(
+                                                                        copy_u.clone(),
+                                                                    ),
+                                                                );
+                                                                this.set_toast(
+                                                                    "Copied message",
+                                                                    cx,
+                                                                );
+                                                            },
+                                                        ))
+                                                        .child(
+                                                            svg()
+                                                                .path("icons/copy.svg")
+                                                                .size(px(12.0))
+                                                                .text_color(theme::text_muted()),
+                                                        ),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .id(SharedString::from(format!(
+                                                            "umsg-reply-{idx}"
+                                                        )))
+                                                        .p(px(3.0))
+                                                        .rounded(px(4.0))
+                                                        .cursor_pointer()
+                                                        .hover(|s| s.bg(theme::row_hover()))
+                                                        .on_click(cx.listener(
+                                                            move |this, _, _, cx| {
+                                                                this.quoted_reply =
+                                                                    Some(reply_u.clone());
+                                                                this.active_input =
+                                                                    ActiveInput::Chat;
+                                                                cx.notify();
+                                                            },
+                                                        ))
+                                                        .child(
+                                                            svg()
+                                                                .path("icons/reply.svg")
+                                                                .size(px(12.0))
+                                                                .text_color(theme::text_muted()),
+                                                        ),
+                                                ),
+                                        );
                                     block = block.child(bubble);
                                 } else if !shown.is_empty() {
                                     let display_str = if actively_writing {
@@ -3401,8 +3621,8 @@ impl JobHarnessApp {
                                     block = block.child(links);
                                 }
 
-                                // T3 Code hover-reveal message footer: right-aligned timestamp + Lucide icon actions
-                                if !msg.text.is_empty() && !actively_writing {
+                                // T3 Code hover-reveal message footer on assistant turns
+                                if !msg.is_user && !msg.text.is_empty() && !actively_writing {
                                     let mut icon_bar = div()
                                         .flex()
                                         .items_center()
@@ -3617,391 +3837,518 @@ impl JobHarnessApp {
                         )
                     }),
             )
-            // Queued follow-up bar with native `↪ Steer` button (interrupts & sends immediately)
-            .when_some(self.queued_prompt.clone(), |d, queued| {
-                let steer_q = queued.clone();
+            // T3 Code multi-item Queued tray above the composer (Enter queues · ⌘⏎/⌥⏎ steers immediately!)
+            .when(!self.queued_prompts.is_empty(), |d| {
+                let q_count = self.queued_prompts.len();
                 d.child(
                     div()
+                        .w(px(inner_composer_w))
                         .mx_3()
                         .mb_1()
-                        .px_2()
-                        .py(px(5.0))
-                        .rounded(px(8.0))
-                        .bg(theme::surface_subtle())
+                        .rounded(px(10.0))
+                        .bg(theme::window_glass())
                         .border_1()
                         .border_color(theme::hairline())
                         .flex()
-                        .items_center()
-                        .justify_between()
-                        .gap_2()
-                        .text_xs()
+                        .flex_col()
+                        .overflow_hidden()
                         .child(
                             div()
-                                .flex_1()
-                                .min_w_0()
-                                .overflow_hidden()
-                                .text_color(theme::text_secondary())
-                                .child(truncate_end(&format!("Queued: {queued}"), 26)),
-                        )
-                        .child(
-                            div()
-                                .flex_shrink_0()
+                                .px_3()
+                                .py(px(4.0))
+                                .bg(theme::surface_subtle())
+                                .border_b_1()
+                                .border_color(theme::hairline())
                                 .flex()
                                 .items_center()
-                                .gap_2()
+                                .justify_between()
+                                .text_size(px(10.5))
                                 .child(
                                     div()
-                                        .id("steer-queue")
-                                        .cursor_pointer()
-                                        .text_color(theme::lavender())
-                                        .on_click(cx.listener(move |this, _, _, cx| {
-                                            this.queued_prompt = None;
-                                            this.stop_stream(cx);
-                                            let atts = std::mem::take(&mut this.chat_attachments);
-                                            this.submit_prompt_with_attachments(
-                                                steer_q.clone(),
-                                                atts,
-                                                false,
-                                                cx,
-                                            );
-                                        }))
-                                        .child("↪ Steer"),
+                                        .text_color(theme::text_secondary())
+                                        .child(format!("Queued ({q_count})")),
+                                )
+                                .child(div().text_color(theme::text_muted()).child("⌘⏎ Steer")),
+                        )
+                        .children(self.queued_prompts.iter().enumerate().map(|(qi, item)| {
+                            let steer_q = item.clone();
+                            let edit_q = item.clone();
+                            div()
+                                .px_3()
+                                .py(px(5.0))
+                                .when(qi > 0, |r| r.border_t_1().border_color(theme::hairline()))
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .gap_2()
+                                .text_xs()
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .overflow_hidden()
+                                        .text_color(theme::text_secondary())
+                                        .child(truncate_end(item, 28)),
                                 )
                                 .child(
                                     div()
-                                        .id("cancel-queue")
-                                        .cursor_pointer()
-                                        .text_color(theme::text_muted())
-                                        .hover(|s| s.text_color(theme::text_primary()))
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.queued_prompt = None;
-                                            cx.notify();
-                                        }))
-                                        .child("✕"),
-                                ),
-                        ),
+                                        .flex_shrink_0()
+                                        .flex()
+                                        .items_center()
+                                        .gap_2()
+                                        .child(
+                                            div()
+                                                .id(SharedString::from(format!("steer-q-{qi}")))
+                                                .px(px(5.0))
+                                                .py(px(1.0))
+                                                .rounded(px(4.0))
+                                                .hover(|s| s.bg(theme::lavender_wash()))
+                                                .cursor_pointer()
+                                                .text_size(px(11.0))
+                                                .text_color(theme::lavender())
+                                                .on_click(cx.listener(move |this, _, _, cx| {
+                                                    if qi < this.queued_prompts.len() {
+                                                        this.queued_prompts.remove(qi);
+                                                    }
+                                                    this.stop_stream(cx);
+                                                    let atts =
+                                                        std::mem::take(&mut this.chat_attachments);
+                                                    this.submit_prompt_with_attachments(
+                                                        steer_q.clone(),
+                                                        atts,
+                                                        false,
+                                                        cx,
+                                                    );
+                                                }))
+                                                .child("↪ Steer"),
+                                        )
+                                        .child(
+                                            div()
+                                                .id(SharedString::from(format!("edit-q-{qi}")))
+                                                .cursor_pointer()
+                                                .text_size(px(11.0))
+                                                .text_color(theme::text_muted())
+                                                .hover(|s| s.text_color(theme::text_primary()))
+                                                .on_click(cx.listener(move |this, _, _, cx| {
+                                                    if qi < this.queued_prompts.len() {
+                                                        this.queued_prompts.remove(qi);
+                                                    }
+                                                    this.chat_input = edit_q.clone();
+                                                    this.active_input = ActiveInput::Chat;
+                                                    cx.notify();
+                                                }))
+                                                .child("↑"),
+                                        )
+                                        .child(
+                                            div()
+                                                .id(SharedString::from(format!("rm-q-{qi}")))
+                                                .cursor_pointer()
+                                                .text_size(px(11.0))
+                                                .text_color(theme::text_muted())
+                                                .hover(|s| s.text_color(theme::text_primary()))
+                                                .on_click(cx.listener(move |this, _, _, cx| {
+                                                    if qi < this.queued_prompts.len() {
+                                                        this.queued_prompts.remove(qi);
+                                                        cx.notify();
+                                                    }
+                                                }))
+                                                .child("✕"),
+                                        ),
+                                )
+                        })),
                 )
             })
-            // T3 Code-grade unified composer card (full rail width always — zero shrinkage or shift!)
+            // T3 Code-grade unified composer card (mathematically locked to rail width — zero shrinkage!)
             .child(
-                div().w_full().flex_shrink_0().px_3().pb_3().pt_1().child(
-                    div()
-                        .id("chat-input-box")
-                        .w_full()
-                        .p(px(8.0))
-                        .rounded(px(12.0))
-                        .bg(if input_active {
-                            theme::surface_active()
-                        } else {
-                            theme::surface_subtle()
-                        })
-                        .border_1()
-                        .border_color(if input_active {
-                            theme::lavender_border()
-                        } else {
-                            theme::hairline()
-                        })
-                        .flex()
-                        .flex_col()
-                        .gap_2()
-                        .cursor_text()
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.active_input = ActiveInput::Chat;
-                            cx.notify();
-                        }))
-                        // Clean inline reply quote chip (NO curved left border!)
-                        .when_some(self.quoted_reply.clone(), |d, q| {
-                            d.child(
-                                div()
-                                    .px_2()
-                                    .py(px(3.0))
-                                    .rounded(px(6.0))
-                                    .bg(theme::window_glass())
-                                    .flex()
-                                    .items_center()
-                                    .justify_between()
-                                    .gap_2()
-                                    .child(
-                                        div()
-                                            .flex_1()
-                                            .min_w_0()
-                                            .overflow_hidden()
-                                            .text_size(px(11.5))
-                                            .text_color(theme::text_muted())
-                                            .child(truncate_end(&format!("↩  {q}"), 34)),
-                                    )
-                                    .child(
-                                        div()
-                                            .id("clear-quote-chip")
-                                            .flex_shrink_0()
-                                            .text_xs()
-                                            .text_color(theme::text_muted())
-                                            .hover(|s| s.text_color(theme::text_primary()))
-                                            .cursor_pointer()
-                                            .on_click(cx.listener(|this, _, _, cx| {
-                                                this.quoted_reply = None;
-                                                cx.notify();
-                                            }))
-                                            .child("✕"),
-                                    ),
-                            )
-                        })
-                        // Attached role chip
-                        .when_some(self.attached_role.clone(), |d, (company, path)| {
-                            let short =
-                                truncate_label(path.rsplit('/').next().unwrap_or(&path), 20);
-                            d.child(
-                                div()
-                                    .px_2()
-                                    .py(px(3.0))
-                                    .rounded(px(6.0))
-                                    .bg(theme::lavender_wash())
-                                    .flex()
-                                    .items_center()
-                                    .justify_between()
-                                    .gap_2()
-                                    .child(
-                                        div()
-                                            .min_w_0()
-                                            .overflow_hidden()
-                                            .text_size(px(11.5))
-                                            .text_color(theme::lavender())
-                                            .child(format!("{company} · {short}")),
-                                    )
-                                    .child(
-                                        div()
-                                            .id("clear-role-chip")
-                                            .flex_shrink_0()
-                                            .text_xs()
-                                            .text_color(theme::text_muted())
-                                            .hover(|s| s.text_color(theme::text_primary()))
-                                            .cursor_pointer()
-                                            .on_click(cx.listener(|this, _, _, cx| {
-                                                this.attached_role = None;
-                                                cx.notify();
-                                            }))
-                                            .child("✕"),
-                                    ),
-                            )
-                        })
-                        // Inline image thumbnails & file chips inside composer (T3 Code style!)
-                        .when(!self.chat_attachments.is_empty(), |d| {
-                            d.child(div().flex().flex_wrap().gap_2().children(
-                                self.chat_attachments.iter().enumerate().map(|(ai, p)| {
-                                    if is_image_path(p) {
-                                        div()
-                                            .relative()
-                                            .child(img(p.clone()).size(px(46.0)).rounded(px(7.0)))
-                                            .child(
-                                                div()
-                                                    .id(SharedString::from(format!("rm-att-{ai}")))
-                                                    .absolute()
-                                                    .top(px(2.0))
-                                                    .right(px(2.0))
-                                                    .w(px(16.0))
-                                                    .h(px(16.0))
-                                                    .rounded(px(99.0))
-                                                    .bg(gpui::rgba(0x000000cc))
-                                                    .flex()
-                                                    .items_center()
-                                                    .justify_center()
-                                                    .cursor_pointer()
-                                                    .text_size(px(10.0))
-                                                    .text_color(theme::text_primary())
-                                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                                        if ai < this.chat_attachments.len() {
-                                                            this.chat_attachments.remove(ai);
-                                                            cx.notify();
-                                                        }
-                                                    }))
-                                                    .child("✕"),
-                                            )
-                                            .into_any_element()
-                                    } else {
-                                        let fname = p
-                                            .file_name()
-                                            .and_then(|s| s.to_str())
-                                            .unwrap_or("file");
-                                        div()
-                                            .px_2()
-                                            .py(px(3.0))
-                                            .rounded(px(6.0))
-                                            .bg(theme::window_glass())
-                                            .flex()
-                                            .items_center()
-                                            .gap_2()
-                                            .text_size(px(11.0))
-                                            .text_color(theme::text_secondary())
-                                            .child(truncate_label(fname, 18))
-                                            .child(
-                                                div()
-                                                    .id(SharedString::from(format!("rm-att-{ai}")))
-                                                    .cursor_pointer()
-                                                    .text_color(theme::text_muted())
-                                                    .hover(|s| s.text_color(theme::text_primary()))
-                                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                                        if ai < this.chat_attachments.len() {
-                                                            this.chat_attachments.remove(ai);
-                                                            cx.notify();
-                                                        }
-                                                    }))
-                                                    .child("✕"),
-                                            )
-                                            .into_any_element()
-                                    }
-                                }),
-                            ))
-                        })
-                        // Compact large-paste chips (T3 Code pattern: keeps composer clean!)
-                        .when(!self.pasted_snippets.is_empty(), |d| {
-                            d.child(div().flex().flex_wrap().gap_1().children(
-                                self.pasted_snippets.iter().enumerate().map(|(pi, txt)| {
-                                    let lines = txt.lines().count().max(1);
+                div()
+                    .w(px(self.chat_width))
+                    .flex_shrink_0()
+                    .px_3()
+                    .pb_3()
+                    .pt_1()
+                    .child(
+                        div()
+                            .id("chat-input-box")
+                            .w(px(inner_composer_w))
+                            .p(px(8.0))
+                            .rounded(px(12.0))
+                            .bg(if input_active {
+                                theme::surface_active()
+                            } else {
+                                theme::surface_subtle()
+                            })
+                            .border_1()
+                            .border_color(if input_active {
+                                theme::lavender_border()
+                            } else {
+                                theme::hairline()
+                            })
+                            .flex()
+                            .flex_col()
+                            .gap_2()
+                            .cursor_text()
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.active_input = ActiveInput::Chat;
+                                cx.notify();
+                            }))
+                            // Clean inline reply quote chip (NO curved left border!)
+                            .when_some(self.quoted_reply.clone(), |d, q| {
+                                d.child(
                                     div()
                                         .px_2()
                                         .py(px(3.0))
                                         .rounded(px(6.0))
                                         .bg(theme::window_glass())
-                                        .border_1()
-                                        .border_color(theme::hairline())
                                         .flex()
                                         .items_center()
+                                        .justify_between()
                                         .gap_2()
-                                        .text_size(px(11.0))
-                                        .text_color(theme::text_secondary())
-                                        .child(format!("Pasted text · {lines} lines"))
                                         .child(
                                             div()
-                                                .id(SharedString::from(format!("rm-paste-{pi}")))
-                                                .cursor_pointer()
+                                                .flex_1()
+                                                .min_w_0()
+                                                .overflow_hidden()
+                                                .text_size(px(11.5))
+                                                .text_color(theme::text_muted())
+                                                .child(truncate_end(&format!("↩  {q}"), 34)),
+                                        )
+                                        .child(
+                                            div()
+                                                .id("clear-quote-chip")
+                                                .flex_shrink_0()
+                                                .text_xs()
                                                 .text_color(theme::text_muted())
                                                 .hover(|s| s.text_color(theme::text_primary()))
-                                                .on_click(cx.listener(move |this, _, _, cx| {
-                                                    if pi < this.pasted_snippets.len() {
-                                                        this.pasted_snippets.remove(pi);
-                                                        cx.notify();
-                                                    }
+                                                .cursor_pointer()
+                                                .on_click(cx.listener(|this, _, _, cx| {
+                                                    this.quoted_reply = None;
+                                                    cx.notify();
                                                 }))
                                                 .child("✕"),
-                                        )
-                                }),
-                            ))
-                        })
-                        // Multi-line auto-growing input region (1 line → 136px max, then smooth internal scroll)
-                        .child(
-                            div()
-                                .id("chat-input-scroll")
-                                .w_full()
-                                .min_h(px(22.0))
-                                .max_h(px(136.0))
-                                .overflow_y_scroll()
-                                .on_scroll_wheel({
-                                    let capture = input_active
-                                        && (self.chat_input.len() > 80
-                                            || self.chat_input.contains('\n'));
-                                    move |_, _, cx| {
-                                        if capture {
-                                            cx.stop_propagation();
-                                        }
-                                    }
-                                })
-                                .px_1()
-                                .py(px(2.0))
-                                .child(chat_multiline_input(
-                                    &self.chat_input,
-                                    &placeholder,
-                                    input_active,
-                                    input_active && self.input_all_selected,
-                                    self.reduce_motion,
-                                )),
-                        )
-                        // Bottom action bar: paperclip attach on left, circular Stop / Send icon on right
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .justify_between()
-                                .child(
-                                    div()
-                                        .id("chat-attach-btn")
-                                        .w(px(24.0))
-                                        .h(px(24.0))
-                                        .rounded(px(6.0))
-                                        .hover(|s| s.bg(theme::row_hover()))
-                                        .flex()
-                                        .items_center()
-                                        .justify_center()
-                                        .cursor_pointer()
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.pick_chat_attachments(cx);
-                                        }))
-                                        .child(
-                                            svg()
-                                                .path("icons/paperclip.svg")
-                                                .size(px(14.0))
-                                                .text_color(theme::text_muted()),
                                         ),
                                 )
-                                .child(if self.streaming {
+                            })
+                            // Attached role chip
+                            .when_some(self.attached_role.clone(), |d, (company, path)| {
+                                let short =
+                                    truncate_label(path.rsplit('/').next().unwrap_or(&path), 20);
+                                d.child(
                                     div()
-                                        .id("stop-stream")
-                                        .w(px(26.0))
-                                        .h(px(26.0))
-                                        .rounded(px(99.0))
-                                        .bg(theme::surface_active())
-                                        .border_1()
-                                        .border_color(theme::hairline_strong())
-                                        .hover(|s| s.bg(theme::rose_wash()))
+                                        .px_2()
+                                        .py(px(3.0))
+                                        .rounded(px(6.0))
+                                        .bg(theme::lavender_wash())
                                         .flex()
                                         .items_center()
-                                        .justify_center()
-                                        .cursor_pointer()
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.stop_stream(cx);
-                                        }))
+                                        .justify_between()
+                                        .gap_2()
                                         .child(
-                                            svg()
-                                                .path("icons/stop.svg")
-                                                .size(px(10.0))
-                                                .text_color(theme::text_primary()),
+                                            div()
+                                                .min_w_0()
+                                                .overflow_hidden()
+                                                .text_size(px(11.5))
+                                                .text_color(theme::lavender())
+                                                .child(format!("{company} · {short}")),
                                         )
-                                        .into_any_element()
-                                } else {
-                                    let ready = !self.chat_input.trim().is_empty()
-                                        || self.attached_role.is_some()
-                                        || !self.chat_attachments.is_empty()
-                                        || !self.pasted_snippets.is_empty();
-                                    div()
-                                        .id("chat-send-btn")
-                                        .w(px(26.0))
-                                        .h(px(26.0))
-                                        .rounded(px(99.0))
-                                        .bg(if ready {
-                                            theme::lavender()
+                                        .child(
+                                            div()
+                                                .id("clear-role-chip")
+                                                .flex_shrink_0()
+                                                .text_xs()
+                                                .text_color(theme::text_muted())
+                                                .hover(|s| s.text_color(theme::text_primary()))
+                                                .cursor_pointer()
+                                                .on_click(cx.listener(|this, _, _, cx| {
+                                                    this.attached_role = None;
+                                                    cx.notify();
+                                                }))
+                                                .child("✕"),
+                                        ),
+                                )
+                            })
+                            // Inline image thumbnails & file chips inside composer (T3 Code style!)
+                            .when(!self.chat_attachments.is_empty(), |d| {
+                                d.child(div().flex().flex_wrap().gap_2().children(
+                                    self.chat_attachments.iter().enumerate().map(|(ai, p)| {
+                                        if is_image_path(p) {
+                                            div()
+                                                .relative()
+                                                .child(
+                                                    img(p.clone()).size(px(46.0)).rounded(px(7.0)),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .id(SharedString::from(format!(
+                                                            "rm-att-{ai}"
+                                                        )))
+                                                        .absolute()
+                                                        .top(px(2.0))
+                                                        .right(px(2.0))
+                                                        .w(px(16.0))
+                                                        .h(px(16.0))
+                                                        .rounded(px(99.0))
+                                                        .bg(gpui::rgba(0x000000cc))
+                                                        .flex()
+                                                        .items_center()
+                                                        .justify_center()
+                                                        .cursor_pointer()
+                                                        .text_size(px(10.0))
+                                                        .text_color(theme::text_primary())
+                                                        .on_click(cx.listener(
+                                                            move |this, _, _, cx| {
+                                                                if ai < this.chat_attachments.len()
+                                                                {
+                                                                    this.chat_attachments
+                                                                        .remove(ai);
+                                                                    cx.notify();
+                                                                }
+                                                            },
+                                                        ))
+                                                        .child("✕"),
+                                                )
+                                                .into_any_element()
                                         } else {
-                                            theme::surface_active()
-                                        })
-                                        .flex()
-                                        .items_center()
-                                        .justify_center()
-                                        .cursor_pointer()
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.submit_chat_input(cx);
-                                        }))
-                                        .child(
-                                            svg()
-                                                .path("icons/arrow-up.svg")
-                                                .size(px(13.0))
-                                                .text_color(if ready {
-                                                    theme::ink_dark()
-                                                } else {
-                                                    theme::text_muted()
-                                                }),
-                                        )
-                                        .into_any_element()
-                                }),
-                        ),
-                ),
+                                            let fname = p
+                                                .file_name()
+                                                .and_then(|s| s.to_str())
+                                                .unwrap_or("file");
+                                            div()
+                                                .px_2()
+                                                .py(px(3.0))
+                                                .rounded(px(6.0))
+                                                .bg(theme::window_glass())
+                                                .flex()
+                                                .items_center()
+                                                .gap_2()
+                                                .text_size(px(11.0))
+                                                .text_color(theme::text_secondary())
+                                                .child(truncate_label(fname, 18))
+                                                .child(
+                                                    div()
+                                                        .id(SharedString::from(format!(
+                                                            "rm-att-{ai}"
+                                                        )))
+                                                        .cursor_pointer()
+                                                        .text_color(theme::text_muted())
+                                                        .hover(|s| {
+                                                            s.text_color(theme::text_primary())
+                                                        })
+                                                        .on_click(cx.listener(
+                                                            move |this, _, _, cx| {
+                                                                if ai < this.chat_attachments.len()
+                                                                {
+                                                                    this.chat_attachments
+                                                                        .remove(ai);
+                                                                    cx.notify();
+                                                                }
+                                                            },
+                                                        ))
+                                                        .child("✕"),
+                                                )
+                                                .into_any_element()
+                                        }
+                                    }),
+                                ))
+                            })
+                            // Compact large-paste chips (T3 Code pattern: keeps composer clean!)
+                            .when(!self.pasted_snippets.is_empty(), |d| {
+                                d.child(div().flex().flex_wrap().gap_1().children(
+                                    self.pasted_snippets.iter().enumerate().map(|(pi, txt)| {
+                                        let lines = txt.lines().count().max(1);
+                                        div()
+                                            .px_2()
+                                            .py(px(3.0))
+                                            .rounded(px(6.0))
+                                            .bg(theme::window_glass())
+                                            .border_1()
+                                            .border_color(theme::hairline())
+                                            .flex()
+                                            .items_center()
+                                            .gap_2()
+                                            .text_size(px(11.0))
+                                            .text_color(theme::text_secondary())
+                                            .child(format!("Pasted text · {lines} lines"))
+                                            .child(
+                                                div()
+                                                    .id(SharedString::from(format!(
+                                                        "rm-paste-{pi}"
+                                                    )))
+                                                    .cursor_pointer()
+                                                    .text_color(theme::text_muted())
+                                                    .hover(|s| s.text_color(theme::text_primary()))
+                                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                                        if pi < this.pasted_snippets.len() {
+                                                            this.pasted_snippets.remove(pi);
+                                                            cx.notify();
+                                                        }
+                                                    }))
+                                                    .child("✕"),
+                                            )
+                                    }),
+                                ))
+                            })
+                            // Multi-line auto-growing input region (1 line → 136px max, then smooth internal scroll)
+                            .child(
+                                div()
+                                    .id("chat-input-scroll")
+                                    .w_full()
+                                    .min_h(px(22.0))
+                                    .max_h(px(136.0))
+                                    .overflow_y_scroll()
+                                    .on_scroll_wheel({
+                                        let capture = input_active
+                                            && (self.chat_input.len() > 80
+                                                || self.chat_input.contains('\n'));
+                                        move |_, _, cx| {
+                                            if capture {
+                                                cx.stop_propagation();
+                                            }
+                                        }
+                                    })
+                                    .px_1()
+                                    .py(px(2.0))
+                                    .child(chat_multiline_input(
+                                        &self.chat_input,
+                                        &placeholder,
+                                        input_active,
+                                        input_active && self.input_all_selected,
+                                        self.reduce_motion,
+                                    )),
+                            )
+                            // Bottom action bar: paperclip attach on left, circular Stop / Send icon on right
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .justify_between()
+                                    .child(
+                                        div()
+                                            .id("chat-attach-btn")
+                                            .w(px(24.0))
+                                            .h(px(24.0))
+                                            .rounded(px(6.0))
+                                            .hover(|s| s.bg(theme::row_hover()))
+                                            .flex()
+                                            .items_center()
+                                            .justify_center()
+                                            .cursor_pointer()
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                this.pick_chat_attachments(cx);
+                                            }))
+                                            .child(
+                                                svg()
+                                                    .path("icons/paperclip.svg")
+                                                    .size(px(14.0))
+                                                    .text_color(theme::text_muted()),
+                                            ),
+                                    )
+                                    .child(if self.streaming {
+                                        let has_draft = !self.chat_input.trim().is_empty()
+                                            || !self.chat_attachments.is_empty()
+                                            || !self.pasted_snippets.is_empty();
+                                        div()
+                                            .flex()
+                                            .items_center()
+                                            .gap_1()
+                                            .when(has_draft, |r| {
+                                                r.child(
+                                                    div()
+                                                        .id("chat-queue-btn")
+                                                        .px_2()
+                                                        .py(px(3.0))
+                                                        .rounded(px(6.0))
+                                                        .bg(theme::window_glass())
+                                                        .border_1()
+                                                        .border_color(theme::hairline())
+                                                        .hover(|s| s.bg(theme::row_hover()))
+                                                        .cursor_pointer()
+                                                        .text_size(px(11.0))
+                                                        .text_color(theme::text_secondary())
+                                                        .on_click(cx.listener(|this, _, _, cx| {
+                                                            this.submit_chat_input(false, cx);
+                                                        }))
+                                                        .child("Queue ⏎"),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .id("chat-steer-btn")
+                                                        .px_2()
+                                                        .py(px(3.0))
+                                                        .rounded(px(6.0))
+                                                        .bg(theme::lavender_wash())
+                                                        .border_1()
+                                                        .border_color(theme::lavender_border())
+                                                        .hover(|s| s.bg(theme::surface_active()))
+                                                        .cursor_pointer()
+                                                        .text_size(px(11.0))
+                                                        .text_color(theme::lavender())
+                                                        .on_click(cx.listener(|this, _, _, cx| {
+                                                            this.submit_chat_input(true, cx);
+                                                        }))
+                                                        .child("Steer ⌘⏎"),
+                                                )
+                                            })
+                                            .child(
+                                                div()
+                                                    .id("stop-stream")
+                                                    .w(px(26.0))
+                                                    .h(px(26.0))
+                                                    .rounded(px(99.0))
+                                                    .bg(theme::surface_active())
+                                                    .border_1()
+                                                    .border_color(theme::hairline_strong())
+                                                    .hover(|s| s.bg(theme::rose_wash()))
+                                                    .flex()
+                                                    .items_center()
+                                                    .justify_center()
+                                                    .cursor_pointer()
+                                                    .on_click(cx.listener(|this, _, _, cx| {
+                                                        this.stop_stream(cx);
+                                                    }))
+                                                    .child(
+                                                        svg()
+                                                            .path("icons/stop.svg")
+                                                            .size(px(10.0))
+                                                            .text_color(theme::text_primary()),
+                                                    ),
+                                            )
+                                            .into_any_element()
+                                    } else {
+                                        let ready = !self.chat_input.trim().is_empty()
+                                            || self.attached_role.is_some()
+                                            || !self.chat_attachments.is_empty()
+                                            || !self.pasted_snippets.is_empty();
+                                        div()
+                                            .id("chat-send-btn")
+                                            .w(px(26.0))
+                                            .h(px(26.0))
+                                            .rounded(px(99.0))
+                                            .bg(if ready {
+                                                theme::lavender()
+                                            } else {
+                                                theme::surface_active()
+                                            })
+                                            .flex()
+                                            .items_center()
+                                            .justify_center()
+                                            .when(ready, |b| b.cursor_pointer())
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                this.submit_chat_input(false, cx);
+                                            }))
+                                            .child(
+                                                svg()
+                                                    .path("icons/arrow-up.svg")
+                                                    .size(px(13.0))
+                                                    .text_color(if ready {
+                                                        gpui::rgba(0x0b0b0fff)
+                                                    } else {
+                                                        theme::text_muted()
+                                                    }),
+                                            )
+                                            .into_any_element()
+                                    }),
+                            ),
+                    ),
             )
     }
 

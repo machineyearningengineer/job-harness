@@ -648,6 +648,8 @@ fn extract_tool_output(val: Option<&Value>) -> String {
         return String::new();
     };
     // Unwrap Hermes JSON-encoded terminal wrapper: `{"output": "...", "exit_code": 0}`
+    // Note: Hermes often pre-truncates `tool_result` previews mid-string, so handle both
+    // complete JSON AND truncated `{"output": "{\"...` envelopes cleanly!
     let mut unwrapped = if let Some(s) = v.as_str() {
         if let Ok(inner) = serde_json::from_str::<Value>(s) {
             if let Some(out) = inner.get("output").and_then(Value::as_str) {
@@ -655,9 +657,15 @@ fn extract_tool_output(val: Option<&Value>) -> String {
             } else {
                 s.to_owned()
             }
+        } else if let Some(rest) = s.trim_start().strip_prefix("{\"output\":") {
+            let body = rest.trim_start().strip_prefix('"').unwrap_or(rest);
+            let body = body.strip_suffix("\"}").unwrap_or(body);
+            unescape_partial_json_str(body)
         } else {
             s.to_owned()
         }
+    } else if let Some(out) = v.get("output").and_then(Value::as_str) {
+        out.to_owned()
     } else {
         v.to_string()
     };
@@ -670,6 +678,12 @@ fn extract_tool_output(val: Option<&Value>) -> String {
         if let Ok(pretty) = serde_json::to_string_pretty(&parsed) {
             unwrapped = pretty;
         }
+    } else if unwrapped.trim_start().starts_with('{') || unwrapped.trim_start().starts_with('[') {
+        // Even on truncated JSON previews from Hermes, extract clean readable formatting!
+        if let Some(summary) = summarize_partial_batch_json(&unwrapped) {
+            return summary;
+        }
+        unwrapped = pretty_format_partial_json(unwrapped.trim());
     }
 
     let trimmed = unwrapped.trim();
@@ -679,6 +693,108 @@ fn extract_tool_output(val: Option<&Value>) -> String {
         let head: String = trimmed.chars().take(1200).collect();
         format!("{head}\n…")
     }
+}
+
+fn unescape_partial_json_str(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            match chars.next() {
+                Some('"') => out.push('"'),
+                Some('n') => out.push('\n'),
+                Some('r') => {}
+                Some('t') => out.push_str("  "),
+                Some('\\') => out.push('\\'),
+                Some(other) => {
+                    out.push('\\');
+                    out.push(other);
+                }
+                None => break,
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+fn summarize_partial_batch_json(src: &str) -> Option<String> {
+    if !src.contains("\"schema_version\":2") || !src.contains("\"results\"") {
+        return None;
+    }
+    let mut tools: Vec<String> = Vec::new();
+    let mut rest = src;
+    while let Some(idx) = rest.find("\"tool\":\"") {
+        let after = &rest[idx + 8..];
+        if let Some(end) = after.find('"') {
+            let name = &after[..end];
+            if !name.is_empty() && !tools.iter().any(|t| t == name) {
+                tools.push(name.to_owned());
+            }
+            rest = &after[end + 1..];
+        } else {
+            break;
+        }
+    }
+    if tools.is_empty() {
+        return None;
+    }
+    let mut lines: Vec<String> = tools.into_iter().map(|t| format!("✓ {t}")).collect();
+    if let Some(idx) = src.find("\"today_local\":\"") {
+        let after = &src[idx + 15..];
+        if let Some(end) = after.find('"') {
+            lines.push(format!("Ledger date: {}", &after[..end]));
+        }
+    }
+    Some(lines.join("\n"))
+}
+
+fn pretty_format_partial_json(src: &str) -> String {
+    let mut out = String::with_capacity(src.len() + 64);
+    let mut indent = 0usize;
+    let mut in_str = false;
+    let mut esc = false;
+    for ch in src.chars() {
+        if in_str {
+            out.push(ch);
+            if esc {
+                esc = false;
+            } else if ch == '\\' {
+                esc = true;
+            } else if ch == '"' {
+                in_str = false;
+            }
+            continue;
+        }
+        match ch {
+            '"' => {
+                in_str = true;
+                out.push('"');
+            }
+            '{' | '[' => {
+                out.push(ch);
+                indent += 2;
+                out.push('\n');
+                out.push_str(&" ".repeat(indent));
+            }
+            '}' | ']' => {
+                indent = indent.saturating_sub(2);
+                out.push('\n');
+                out.push_str(&" ".repeat(indent));
+                out.push(ch);
+            }
+            ',' => {
+                out.push(',');
+                out.push('\n');
+                out.push_str(&" ".repeat(indent));
+            }
+            ':' => out.push_str(": "),
+            c if c.is_ascii_whitespace() => {}
+            other => out.push(other),
+        }
+    }
+    out
 }
 
 fn summarize_json_tool_result(v: &Value) -> Option<String> {
