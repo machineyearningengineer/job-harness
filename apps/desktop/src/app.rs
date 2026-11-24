@@ -9070,8 +9070,8 @@ impl JobHarnessApp {
                                 .on_mouse_down(MouseButton::Left, |_, _, cx| {
                                     cx.stop_propagation();
                                 })
-                                .w(px(540.0))
-                                .max_h(px(430.0))
+                                .w(px(620.0))
+                                .max_h(px(490.0))
                                 .rounded(px(14.0))
                                 .bg(theme::popover_glass())
                                 .border_1()
@@ -9082,17 +9082,18 @@ impl JobHarnessApp {
                                 .overflow_hidden()
                                 .child(
                                     div()
-                                        .px_4()
-                                        .py_3()
+                                        .px_5()
+                                        .py_4()
                                         .border_b_1()
                                         .border_color(theme::hairline())
                                         .flex()
                                         .items_center()
                                         .gap_3()
+                                        .text_sm()
                                         .child(
                                             svg()
                                                 .path("icons/search.svg")
-                                                .size(px(15.0))
+                                                .size(px(16.0))
                                                 .flex_shrink_0()
                                                 .text_color(theme::text_muted()),
                                         )
@@ -9102,19 +9103,19 @@ impl JobHarnessApp {
                                             self.active_input == ActiveInput::CommandBar,
                                             self.reduce_motion,
                                             "cmd",
-                                            56,
+                                            58,
                                         )),
                                 )
                                 .child(
                                     div()
                                         .id("cmd-list")
                                         .flex_1()
-                                        .px_2()
-                                        .py_2()
+                                        .px_3()
+                                        .py_3()
                                         .overflow_y_scroll()
                                         .flex()
                                         .flex_col()
-                                        .gap(px(1.0))
+                                        .gap(px(2.0))
                                         .children({
                                             let mut items: Vec<AnyElement> = Vec::new();
                                             let mut last_section: Option<&'static str> = None;
@@ -9128,12 +9129,12 @@ impl JobHarnessApp {
                                                         div()
                                                             .px_3()
                                                             .pt(if last_section.is_some() {
-                                                                px(10.0)
+                                                                px(12.0)
                                                             } else {
                                                                 px(2.0)
                                                             })
-                                                            .pb(px(4.0))
-                                                            .text_size(px(11.0))
+                                                            .pb(px(6.0))
+                                                            .text_size(px(11.5))
                                                             .text_color(theme::text_muted())
                                                             .child(section)
                                                             .into_any_element(),
@@ -9166,8 +9167,8 @@ impl JobHarnessApp {
                                                             "cmd-row-{i}"
                                                         )))
                                                         .px_3()
-                                                        .py(px(8.0))
-                                                        .rounded(px(7.0))
+                                                        .py(px(10.0))
+                                                        .rounded(px(8.0))
                                                         .overflow_hidden()
                                                         .when(active, |d| {
                                                             d.bg(theme::surface_subtle())
@@ -9196,7 +9197,7 @@ impl JobHarnessApp {
                                                                 .child(
                                                                     svg()
                                                                         .path(row_icon)
-                                                                        .size(px(14.0))
+                                                                        .size(px(15.0))
                                                                         .flex_shrink_0()
                                                                         .text_color(if active {
                                                                             theme::text_primary()
@@ -9209,7 +9210,7 @@ impl JobHarnessApp {
                                                                         .flex_1()
                                                                         .min_w_0()
                                                                         .overflow_hidden()
-                                                                        .text_xs()
+                                                                        .text_size(px(13.0))
                                                                         .text_color(if active {
                                                                             theme::text_primary()
                                                                         } else {
@@ -9217,14 +9218,14 @@ impl JobHarnessApp {
                                                                         })
                                                                         .child(truncate_end(
                                                                             &entry.label,
-                                                                            50,
+                                                                            56,
                                                                         )),
                                                                 ),
                                                         )
                                                         .child(
                                                             div()
                                                                 .flex_shrink_0()
-                                                                .text_size(px(11.0))
+                                                                .text_size(px(11.5))
                                                                 .text_color(theme::text_muted())
                                                                 .child(entry.meta),
                                                         )
@@ -9236,15 +9237,15 @@ impl JobHarnessApp {
                                 )
                                 .child(
                                     div()
-                                        .px_4()
-                                        .py_2()
+                                        .px_5()
+                                        .py_3()
                                         .border_t_1()
                                         .border_color(theme::hairline())
                                         .bg(theme::window_glass())
                                         .flex()
                                         .items_center()
                                         .gap_4()
-                                        .text_size(px(11.0))
+                                        .text_size(px(11.5))
                                         .text_color(theme::text_muted())
                                         .child(
                                             div()
