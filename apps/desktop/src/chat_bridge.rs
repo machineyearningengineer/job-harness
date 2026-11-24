@@ -116,6 +116,7 @@ impl DiscoveredMcpServer {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CapabilityAccess {
     Active { server: String, global: bool },
+    BuiltIn,
     OtherRuntime { server: String, owner: String },
     NotConnected,
 }
@@ -452,6 +453,17 @@ impl AgentRuntime {
 
     pub fn is_ready(&self) -> bool {
         !matches!(self, Self::Unconfigured)
+    }
+
+    pub fn has_builtin_web_search(&self) -> bool {
+        matches!(
+            self,
+            Self::Hermes { .. } | Self::ClaudeCode { .. } | Self::Codex { .. }
+        )
+    }
+
+    pub fn has_builtin_browser(&self) -> bool {
+        matches!(self, Self::Hermes { .. })
     }
 
     /// Streams one turn directly from the host agent runtime with cancellation and media support.

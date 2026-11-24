@@ -2754,6 +2754,7 @@ impl JobHarnessApp {
             .border_color(theme::hairline())
             .child(
                 div()
+                    .flex_shrink_0()
                     .flex()
                     .items_center()
                     .gap_3()
@@ -2828,61 +2829,72 @@ impl JobHarnessApp {
                             )
                     }),
             )
-            // Centered Filter Roles input: blends seamlessly (borderless until focused!)
+            // Mathematically balanced Filter Roles input: fluid center with >=40px drag handles on both sides, borderless until focused!
             .when(!self.chat_fullscreen, |bar| {
                 let search_active = self.active_input == ActiveInput::Search;
                 bar.child(
                     div()
-                        .id("search-box")
-                        .w(px(340.0))
-                        .px_3()
-                        .py(px(5.0))
-                        .rounded(theme::r_md())
-                        .bg(if search_active {
-                            theme::surface_subtle()
-                        } else {
-                            gpui::rgba(0xffffff08)
-                        })
-                        .border_1()
-                        .border_color(if search_active {
-                            theme::hairline_strong()
-                        } else {
-                            gpui::rgba(0x00000000)
-                        })
-                        .hover(|s| {
-                            if search_active {
-                                s
-                            } else {
-                                s.bg(gpui::rgba(0xffffff0e))
-                            }
-                        })
+                        .flex_1()
+                        .min_w_0()
+                        .px(px(40.0))
                         .flex()
                         .items_center()
-                        .gap_2()
-                        .cursor_text()
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.active_input = ActiveInput::Search;
-                            cx.notify();
-                        }))
-                        .child(svg().path("icons/search.svg").size(px(12.5)).text_color(
-                            if search_active {
-                                theme::text_secondary()
-                            } else {
-                                theme::text_muted()
-                            },
-                        ))
-                        .child(input_line(
-                            &self.search_query,
-                            "Filter roles…",
-                            search_active,
-                            self.reduce_motion,
-                            "search",
-                            28,
-                        )),
+                        .justify_center()
+                        .child(
+                            div()
+                                .id("search-box")
+                                .w_full()
+                                .max_w(px(440.0))
+                                .px_3()
+                                .py(px(5.0))
+                                .rounded(theme::r_md())
+                                .bg(if search_active {
+                                    theme::surface_subtle()
+                                } else {
+                                    gpui::rgba(0xffffff08)
+                                })
+                                .border_1()
+                                .border_color(if search_active {
+                                    theme::hairline_strong()
+                                } else {
+                                    gpui::rgba(0x00000000)
+                                })
+                                .hover(|s| {
+                                    if search_active {
+                                        s
+                                    } else {
+                                        s.bg(gpui::rgba(0xffffff0e))
+                                    }
+                                })
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .cursor_text()
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.active_input = ActiveInput::Search;
+                                    cx.notify();
+                                }))
+                                .child(svg().path("icons/search.svg").size(px(12.5)).text_color(
+                                    if search_active {
+                                        theme::text_secondary()
+                                    } else {
+                                        theme::text_muted()
+                                    },
+                                ))
+                                .child(input_line(
+                                    &self.search_query,
+                                    "Filter roles…",
+                                    search_active,
+                                    self.reduce_motion,
+                                    "search",
+                                    44,
+                                )),
+                        ),
                 )
             })
             .child(
                 div()
+                    .flex_shrink_0()
                     .flex()
                     .items_center()
                     .gap_2()
@@ -4970,9 +4982,16 @@ impl JobHarnessApp {
                             })
                             .border_1()
                             .border_color(if input_active {
-                                theme::lavender_border()
+                                theme::hairline_strong()
                             } else {
-                                theme::hairline()
+                                gpui::rgba(0x00000000)
+                            })
+                            .hover(|s| {
+                                if input_active {
+                                    s
+                                } else {
+                                    s.bg(gpui::rgba(0xffffff0e))
+                                }
                             })
                             .flex()
                             .flex_col()
@@ -5832,9 +5851,16 @@ impl JobHarnessApp {
                                 })
                                 .border_1()
                                 .border_color(if model_input_active {
-                                    theme::lavender_border()
+                                    theme::hairline_strong()
                                 } else {
-                                    theme::hairline()
+                                    gpui::rgba(0x00000000)
+                                })
+                                .hover(|s| {
+                                    if model_input_active {
+                                        s
+                                    } else {
+                                        s.bg(gpui::rgba(0xffffff0e))
+                                    }
                                 })
                                 .flex()
                                 .items_center()
@@ -6990,9 +7016,9 @@ impl JobHarnessApp {
                             .bg(theme::dock_glass())
                             .border_1()
                             .border_color(if quick_active {
-                                theme::lavender_border()
+                                theme::hairline_strong()
                             } else {
-                                theme::hairline()
+                                gpui::rgba(0x00000000)
                             })
                             .shadow_md()
                             .flex()
@@ -9143,7 +9169,47 @@ impl JobHarnessApp {
                                 Some(root) => format!("jh --root {} connect mcp", root.display()),
                                 None => "jh connect mcp".to_owned(),
                             };
-                            let caps: [(&str, &str, CapabilityAccess); 3] = [
+                            let web_search_access = match evaluate_capability(
+                                &self.mcp_servers,
+                                active_kind,
+                                &[
+                                    "search",
+                                    "brave",
+                                    "exa",
+                                    "tavily",
+                                    "perplexity",
+                                    "firecrawl",
+                                    "fetch",
+                                ],
+                            ) {
+                                CapabilityAccess::Active { server, global } => {
+                                    CapabilityAccess::Active { server, global }
+                                }
+                                _ if self.runtime.has_builtin_web_search() => {
+                                    CapabilityAccess::BuiltIn
+                                }
+                                other => other,
+                            };
+                            let browser_access = match evaluate_capability(
+                                &self.mcp_servers,
+                                active_kind,
+                                &[
+                                    "browser",
+                                    "playwright",
+                                    "puppeteer",
+                                    "chrome",
+                                    "computer-use",
+                                ],
+                            ) {
+                                CapabilityAccess::Active { server, global } => {
+                                    CapabilityAccess::Active { server, global }
+                                }
+                                _ if self.runtime.has_builtin_browser() => {
+                                    CapabilityAccess::BuiltIn
+                                }
+                                other => other,
+                            };
+                            let caps: [(&str, &str, CapabilityAccess); 4] = [
                                 (
                                     "Email",
                                     "Recommended",
@@ -9162,25 +9228,8 @@ impl JobHarnessApp {
                                         &["calendar", "google", "cal", "gcal"],
                                     ),
                                 ),
-                                (
-                                    "Web Search",
-                                    "Optional",
-                                    evaluate_capability(
-                                        &self.mcp_servers,
-                                        active_kind,
-                                        &[
-                                            "search",
-                                            "brave",
-                                            "exa",
-                                            "tavily",
-                                            "perplexity",
-                                            "firecrawl",
-                                            "fetch",
-                                            "browser",
-                                            "playwright",
-                                        ],
-                                    ),
-                                ),
+                                ("Web Search", "Optional", web_search_access),
+                                ("Browser", "Optional", browser_access),
                             ];
                             let shared_servers: Vec<_> = self
                                 .mcp_servers
@@ -9299,6 +9348,11 @@ impl JobHarnessApp {
                                                 CapabilityAccess::Active { global: false, .. } => (
                                                     theme::emerald(),
                                                     format!("Active · {active_name}"),
+                                                    theme::text_primary(),
+                                                ),
+                                                CapabilityAccess::BuiltIn => (
+                                                    theme::emerald(),
+                                                    format!("Built-in · {active_name}"),
                                                     theme::text_primary(),
                                                 ),
                                                 CapabilityAccess::OtherRuntime { owner, .. } => (
@@ -10373,6 +10427,26 @@ impl JobHarnessApp {
             ActivePopover::Health => {
                 let right_off = self.bottom_popover_right_offset();
                 let epoch = self.cmd_anim_epoch;
+                let unresolved = self.snapshot.unresolved_attempts;
+                let rt_ready = self.runtime.is_ready();
+                let is_healthy = unresolved == 0 && rt_ready;
+                let ws_loc = format!(
+                    "{} · {}",
+                    self.client.target.label(),
+                    if self.client.target.is_remote() {
+                        "Remote"
+                    } else {
+                        "Local"
+                    }
+                );
+                let pipeline_summary = if self.snapshot.upcoming_count > 0 {
+                    format!(
+                        "{} roles · {} upcoming",
+                        self.snapshot.total_records, self.snapshot.upcoming_count
+                    )
+                } else {
+                    format!("{} roles", self.snapshot.total_records)
+                };
                 let card = popover_shell(true, 330.0, right_off)
                     .id("health-popover-card")
                     .occlude()
@@ -10381,28 +10455,187 @@ impl JobHarnessApp {
                     }))
                     .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .child(popover_header("Workspace Status", cx))
-                    .child(kv_row("Storage", self.snapshot.status_note.clone()))
-                    .child(kv_row(
-                        "Mode",
-                        if self.client.target.is_remote() {
-                            "Remote VPS".into()
-                        } else {
-                            "Local in-process".into()
-                        },
-                    ))
-                    .child(kv_row("Chat runtime", self.runtime.label()))
-                    .child(kv_row(
-                        "Tracked roles",
-                        format!(
-                            "{} ({} upcoming)",
-                            self.snapshot.total_records, self.snapshot.upcoming_count
-                        ),
-                    ))
-                    .child(kv_row(
-                        "Unknown guards",
-                        self.snapshot.unresolved_attempts.to_string(),
-                    ));
+                    .child(
+                        div()
+                            .pb_2()
+                            .border_b_1()
+                            .border_color(theme::hairline())
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .font_weight(FontWeight::MEDIUM)
+                                            .text_color(theme::text_primary())
+                                            .child("Workspace"),
+                                    )
+                                    .child(
+                                        div()
+                                            .px(px(6.0))
+                                            .py(px(1.5))
+                                            .rounded(theme::r_xs())
+                                            .bg(if is_healthy {
+                                                gpui::rgba(0x34d3991c)
+                                            } else {
+                                                theme::amber_wash()
+                                            })
+                                            .text_size(px(10.0))
+                                            .text_color(if is_healthy {
+                                                theme::emerald()
+                                            } else {
+                                                theme::amber_text()
+                                            })
+                                            .child(if is_healthy {
+                                                "Healthy"
+                                            } else {
+                                                "Needs review"
+                                            }),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .id("pop-close-health")
+                                    .px_1()
+                                    .rounded(theme::r_xs())
+                                    .hover(|s| {
+                                        s.bg(theme::row_hover()).text_color(theme::text_primary())
+                                    })
+                                    .cursor_pointer()
+                                    .text_xs()
+                                    .text_color(theme::text_muted())
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.active_popover = ActivePopover::None;
+                                        this.popover_pinned = false;
+                                        cx.notify();
+                                    }))
+                                    .child("✕"),
+                            ),
+                    )
+                    .child(kv_row("Location", ws_loc))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .gap_2()
+                            .text_xs()
+                            .child(div().text_color(theme::text_muted()).child("Agent"))
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(6.0))
+                                    .child(
+                                        div()
+                                            .w(px(6.0))
+                                            .h(px(6.0))
+                                            .rounded(px(99.0))
+                                            .bg(if rt_ready {
+                                                theme::emerald()
+                                            } else {
+                                                theme::amber_accent()
+                                            }),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_color(if rt_ready {
+                                                theme::text_primary()
+                                            } else {
+                                                theme::amber_text()
+                                            })
+                                            .child(self.runtime.label()),
+                                    ),
+                            ),
+                    )
+                    .child(kv_row("Pipeline", pipeline_summary))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .gap_2()
+                            .text_xs()
+                            .child(
+                                div()
+                                    .text_color(theme::text_muted())
+                                    .child("Unverified submits"),
+                            )
+                            .child(if unresolved > 0 {
+                                div()
+                                    .id("health-review-unverified")
+                                    .px(px(6.0))
+                                    .py(px(2.0))
+                                    .rounded(theme::r_xs())
+                                    .bg(theme::amber_wash())
+                                    .hover(|s| s.bg(theme::row_hover()))
+                                    .cursor_pointer()
+                                    .text_color(theme::amber_text())
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.active_popover = ActivePopover::None;
+                                        this.popover_pinned = false;
+                                        if !this.chat_open {
+                                            this.chat_open = true;
+                                            this.chat_anim_epoch =
+                                                this.chat_anim_epoch.wrapping_add(1);
+                                        }
+                                        this.submit_prompt(
+                                            "Summarize our unverified submissions and suggest the highest-priority ones to check first.".into(),
+                                            false,
+                                            cx,
+                                        );
+                                    }))
+                                    .child(format!("{unresolved} · Review →"))
+                                    .into_any_element()
+                            } else {
+                                div()
+                                    .text_color(theme::emerald())
+                                    .child("0 · All clear")
+                                    .into_any_element()
+                            }),
+                    )
+                    .child(
+                        div()
+                            .pt_2()
+                            .border_t_1()
+                            .border_color(theme::hairline())
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .text_size(px(11.0))
+                            .child(
+                                div()
+                                    .text_color(theme::text_muted())
+                                    .child(match &self.sync_state {
+                                        SyncIndicator::Working(msg) => msg.clone(),
+                                        SyncIndicator::Saved(msg, _) => msg.clone(),
+                                        SyncIndicator::Failed(msg, _) => msg.clone(),
+                                        SyncIndicator::Idle => "Ledger up to date".to_owned(),
+                                    }),
+                            )
+                            .child(
+                                div()
+                                    .id("health-refresh-now")
+                                    .px(px(6.0))
+                                    .py(px(2.0))
+                                    .rounded(theme::r_xs())
+                                    .hover(|s| {
+                                        s.bg(theme::row_hover()).text_color(theme::text_primary())
+                                    })
+                                    .cursor_pointer()
+                                    .text_color(theme::text_secondary())
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.refresh_snapshot_async(true, cx);
+                                    }))
+                                    .child("Refresh"),
+                            ),
+                    );
                 Some(if self.reduce_motion {
                     card.into_any_element()
                 } else {
