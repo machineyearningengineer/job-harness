@@ -2929,6 +2929,8 @@ impl JobHarnessApp {
         let active_sel = self.active_text_selection();
 
         let is_full = self.chat_fullscreen;
+        let show_ruler = (is_full || self.chat_width >= 420.0)
+            && self.chat_messages.iter().filter(|m| m.is_user).count() >= 2;
         let inner_composer_w = if is_full {
             728.0
         } else {
@@ -3119,15 +3121,10 @@ impl JobHarnessApp {
                             .flex_1()
                             .min_h_0()
                             .overflow_y_scroll()
-                            .pl(px(
-                                if self.chat_messages.iter().filter(|m| m.is_user).count() >= 2 {
-                                    22.0
-                                } else {
-                                    16.0
-                                },
-                            ))
+                            .pl(px(if show_ruler && !is_full { 30.0 } else { 16.0 }))
                             .pr_4()
-                            .py_3()
+                            .pt_3()
+                            .pb(px(36.0))
                             .flex()
                             .flex_col()
                             .gap_2()
