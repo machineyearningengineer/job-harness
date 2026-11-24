@@ -44,9 +44,8 @@ pub struct ModelPreset {
     pub label: String,
     pub model: Option<String>,
     pub provider: Option<String>,
+    pub provider_label: Option<String>,
 }
-
-pub const HERMES_REASONING_LEVELS: [&str; 6] = ["minimal", "low", "medium", "high", "xhigh", "max"];
 
 fn find_hermes() -> Option<PathBuf> {
     let home = std::env::var("HOME").unwrap_or_default();
@@ -97,7 +96,7 @@ impl AgentRuntime {
     pub fn short_name(&self) -> &'static str {
         match self {
             Self::Hermes { .. } => "Hermes",
-            Self::ClaudeCode { .. } => "Claude Code",
+            Self::ClaudeCode { .. } => "Claude",
             Self::Codex { .. } => "Codex",
             Self::Unconfigured => "No agent",
         }
@@ -117,6 +116,7 @@ impl AgentRuntime {
                     label: m.to_owned(),
                     model: Some(m.to_owned()),
                     provider: None,
+                    provider_label: Some("Anthropic".into()),
                 })
                 .collect(),
             _ => Vec::new(),
@@ -461,10 +461,12 @@ pub(crate) fn parse_hermes_presets(text: &str) -> Vec<ModelPreset> {
         if let Some((key, name, model)) = cur.take()
             && let Some(m) = model
         {
+            let prov_display = name.unwrap_or_else(|| key.clone());
             out.push(ModelPreset {
-                label: format!("{m} · {}", name.unwrap_or_else(|| key.clone())),
+                label: m.clone(),
                 model: Some(m),
                 provider: Some(key),
+                provider_label: Some(prov_display),
             });
         }
     };
@@ -514,16 +516,13 @@ pub(crate) fn parse_hermes_presets(text: &str) -> Vec<ModelPreset> {
         flush(&mut current_provider, &mut out);
     }
     if let Some(m) = default_model {
-        let label = match &default_provider {
-            Some(p) => format!("{m} · {p}"),
-            None => m.clone(),
-        };
         out.insert(
             0,
             ModelPreset {
-                label,
+                label: m.clone(),
                 model: Some(m),
-                provider: default_provider,
+                provider: default_provider.clone(),
+                provider_label: default_provider,
             },
         );
     }

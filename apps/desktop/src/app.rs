@@ -2,9 +2,7 @@
 //! Zero main-thread I/O: all Engine / SQLite / HTTP / disk calls execute off-thread so
 //! every click, toggle, scroll, and drag runs smoothly at 120Hz.
 use crate::{
-    chat_bridge::{
-        AgentOptions, AgentRuntime, HERMES_REASONING_LEVELS, StreamEvent, extract_citations,
-    },
+    chat_bridge::{AgentOptions, AgentRuntime, StreamEvent, extract_citations},
     theme,
     transport::{
         RoleCard, RoleOverviewDetails, WorkspaceClient, WorkspaceSnapshot, WorkspaceTarget,
@@ -1603,10 +1601,10 @@ impl JobHarnessApp {
 
     fn active_model_badge(&self) -> String {
         if let Some(m) = self.agent_opts.model.as_deref().filter(|s| !s.is_empty()) {
-            return truncate_label(m, 20);
+            return truncate_end(m, 18);
         }
         if let Some(def) = self.runtime.default_model() {
-            return truncate_label(&def, 20);
+            return truncate_end(&def, 18);
         }
         "default".into()
     }
@@ -1907,7 +1905,7 @@ impl JobHarnessApp {
                         .justify_between()
                         .text_xs()
                         .text_color(theme::lavender())
-                        .child(truncate_label(&format!("Queued: {queued}"), 36))
+                        .child(truncate_end(&format!("Queued: {queued}"), 36))
                         .child(
                             div()
                                 .id("cancel-queue")
@@ -2044,6 +2042,7 @@ impl JobHarnessApp {
     fn render_agent_controls(
         &self,
         scope: &'static str,
+        show_custom_input: bool,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let presets = self.runtime.model_presets();
@@ -2051,12 +2050,19 @@ impl JobHarnessApp {
         let cur_provider = self.agent_opts.provider.clone();
         let cur_reasoning = self.agent_opts.reasoning.clone();
         let model_input_active = self.active_input == ActiveInput::ModelField;
+        let reasoning_opts: [(&str, Option<&str>); 5] = [
+            ("Auto", None),
+            ("Low", Some("low")),
+            ("Med", Some("medium")),
+            ("High", Some("high")),
+            ("Max", Some("max")),
+        ];
 
         div()
             .flex()
             .flex_col()
             .gap_3()
-            // Host Agent Runtime selector
+            // 1. Clean 1-row equal-width segmented Runtime switcher (never wraps onto 2 rows)
             .child(
                 div()
                     .flex()
@@ -2066,47 +2072,52 @@ impl JobHarnessApp {
                         div()
                             .text_xs()
                             .text_color(theme::text_muted())
-                            .child("Agent runtime"),
+                            .child("Agent"),
                     )
-                    .child(div().flex().flex_wrap().gap_1().children(
-                        self.available_runtimes.iter().enumerate().map(|(i, rt)| {
-                            let on = rt.kind() == self.runtime.kind();
-                            let rt_clone = rt.clone();
-                            div()
-                                .id(SharedString::from(format!("{scope}-rt-{i}")))
-                                .px_2()
-                                .py(px(3.0))
-                                .rounded(px(6.0))
-                                .bg(if on {
-                                    theme::surface_active()
-                                } else {
-                                    gpui::rgba(0x00000000)
-                                })
-                                .border_1()
-                                .border_color(if on {
-                                    theme::lavender_border()
-                                } else {
-                                    theme::hairline()
-                                })
-                                .hover(|s| s.bg(theme::row_hover()))
-                                .cursor_pointer()
-                                .text_xs()
-                                .text_color(if on {
-                                    theme::text_primary()
-                                } else {
-                                    theme::text_secondary()
-                                })
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.runtime = rt_clone.clone();
-                                    this.agent_opts = AgentOptions::default();
-                                    this.model_draft.clear();
-                                    cx.notify();
-                                }))
-                                .child(rt.label())
-                        }),
-                    )),
+                    .child(
+                        div()
+                            .w_full()
+                            .p(px(2.0))
+                            .rounded(px(8.0))
+                            .bg(theme::surface_subtle())
+                            .flex()
+                            .items_center()
+                            .gap(px(2.0))
+                            .children(self.available_runtimes.iter().enumerate().map(|(i, rt)| {
+                                let on = rt.kind() == self.runtime.kind();
+                                let rt_clone = rt.clone();
+                                div()
+                                    .id(SharedString::from(format!("{scope}-rt-{i}")))
+                                    .flex_1()
+                                    .py(px(4.0))
+                                    .rounded(px(6.0))
+                                    .bg(if on {
+                                        theme::surface_active()
+                                    } else {
+                                        gpui::rgba(0x00000000)
+                                    })
+                                    .hover(|s| if on { s } else { s.bg(theme::row_hover()) })
+                                    .cursor_pointer()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .text_xs()
+                                    .text_color(if on {
+                                        theme::text_primary()
+                                    } else {
+                                        theme::text_muted()
+                                    })
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.runtime = rt_clone.clone();
+                                        this.agent_opts = AgentOptions::default();
+                                        this.model_draft.clear();
+                                        cx.notify();
+                                    }))
+                                    .child(rt.short_name())
+                            })),
+                    ),
             )
-            // Discovered Model & Provider presets (from Hermes config.yaml or CLI aliases)
+            // 2. Clean 2-column Model rows: readable prefix on left, muted provider badge on right
             .when(!presets.is_empty(), |d| {
                 d.child(
                     div()
@@ -2117,9 +2128,9 @@ impl JobHarnessApp {
                             div()
                                 .text_xs()
                                 .text_color(theme::text_muted())
-                                .child("Model & provider"),
+                                .child("Model"),
                         )
-                        .child(div().flex().flex_col().gap_1().children(
+                        .child(div().flex().flex_col().gap(px(2.0)).children(
                             presets.into_iter().enumerate().map(|(i, preset)| {
                                 let is_selected = match (&cur_model, &preset.model) {
                                     (None, _) if i == 0 => true,
@@ -2128,11 +2139,15 @@ impl JobHarnessApp {
                                 };
                                 let m = preset.model.clone();
                                 let p = preset.provider.clone();
+                                let prov_tag = preset
+                                    .provider_label
+                                    .as_deref()
+                                    .map(|s| truncate_end(s, 12));
                                 div()
                                     .id(SharedString::from(format!("{scope}-preset-{i}")))
                                     .px_2()
-                                    .py(px(5.0))
-                                    .rounded(px(6.0))
+                                    .py(px(6.0))
+                                    .rounded(px(7.0))
                                     .bg(if is_selected {
                                         theme::surface_active()
                                     } else {
@@ -2143,6 +2158,7 @@ impl JobHarnessApp {
                                     .flex()
                                     .items_center()
                                     .justify_between()
+                                    .gap_2()
                                     .text_xs()
                                     .on_click(cx.listener(move |this, _, _, cx| {
                                         if i == 0 {
@@ -2158,88 +2174,40 @@ impl JobHarnessApp {
                                     }))
                                     .child(
                                         div()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .overflow_hidden()
                                             .text_color(if is_selected {
                                                 theme::text_primary()
                                             } else {
                                                 theme::text_secondary()
                                             })
-                                            .child(truncate_label(&preset.label, 34)),
+                                            .child(truncate_end(&preset.label, 20)),
                                     )
-                                    .when(is_selected, |r| {
-                                        r.child(div().text_color(theme::lavender()).child("●"))
-                                    })
+                                    .child(
+                                        div()
+                                            .flex_shrink_0()
+                                            .flex()
+                                            .items_center()
+                                            .gap_2()
+                                            .when_some(prov_tag, |r, tag| {
+                                                r.child(
+                                                    div()
+                                                        .text_color(theme::text_muted())
+                                                        .child(tag),
+                                                )
+                                            })
+                                            .when(is_selected, |r| {
+                                                r.child(
+                                                    div().text_color(theme::lavender()).child("●"),
+                                                )
+                                            }),
+                                    )
                             }),
                         )),
                 )
             })
-            // Custom model override input (-m / --model)
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(theme::text_muted())
-                            .child("Custom model override (-m)"),
-                    )
-                    .child(
-                        div()
-                            .id(SharedString::from(format!("{scope}-model-input")))
-                            .px_2()
-                            .py(px(5.0))
-                            .rounded(px(7.0))
-                            .bg(if model_input_active {
-                                theme::surface_active()
-                            } else {
-                                theme::surface_subtle()
-                            })
-                            .border_1()
-                            .border_color(if model_input_active {
-                                theme::lavender_border()
-                            } else {
-                                theme::hairline()
-                            })
-                            .flex()
-                            .items_center()
-                            .justify_between()
-                            .gap_2()
-                            .cursor_text()
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                if this.model_draft.is_empty()
-                                    && let Some(m) = &this.agent_opts.model
-                                {
-                                    this.model_draft = m.clone();
-                                }
-                                this.active_input = ActiveInput::ModelField;
-                                cx.notify();
-                            }))
-                            .child(input_line(
-                                &self.model_draft,
-                                "Profile default (or type model id…)",
-                                model_input_active,
-                                self.reduce_motion,
-                                scope,
-                                28,
-                            ))
-                            .child(
-                                div()
-                                    .id(SharedString::from(format!("{scope}-model-apply")))
-                                    .px(px(5.0))
-                                    .rounded(px(4.0))
-                                    .hover(|s| s.bg(theme::row_hover()))
-                                    .cursor_pointer()
-                                    .text_xs()
-                                    .text_color(theme::lavender())
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.apply_model_draft(cx);
-                                    }))
-                                    .child("Set"),
-                            ),
-                    ),
-            )
-            // Reasoning effort selector (Hermes --reasoning)
+            // 3. Single-row 5-segment Reasoning control (Auto · Low · Med · High · Max)
             .when(self.runtime.supports_reasoning(), |d| {
                 d.child(
                     div()
@@ -2250,64 +2218,140 @@ impl JobHarnessApp {
                             div()
                                 .text_xs()
                                 .text_color(theme::text_muted())
-                                .child("Reasoning effort"),
+                                .child("Reasoning"),
                         )
                         .child(
                             div()
+                                .w_full()
+                                .p(px(2.0))
+                                .rounded(px(8.0))
+                                .bg(theme::surface_subtle())
                                 .flex()
-                                .flex_wrap()
-                                .gap_1()
-                                .child({
-                                    let on = cur_reasoning.is_none();
+                                .items_center()
+                                .gap(px(2.0))
+                                .children(reasoning_opts.into_iter().map(|(label, val)| {
+                                    let on = cur_reasoning.as_deref() == val;
                                     div()
-                                        .id(SharedString::from(format!("{scope}-reas-auto")))
-                                        .px_2()
-                                        .py(px(2.0))
-                                        .rounded(px(5.0))
+                                        .id(SharedString::from(format!("{scope}-reas-{label}")))
+                                        .flex_1()
+                                        .py(px(4.0))
+                                        .rounded(px(6.0))
                                         .bg(if on {
                                             theme::surface_active()
                                         } else {
                                             gpui::rgba(0x00000000)
                                         })
+                                        .hover(|s| if on { s } else { s.bg(theme::row_hover()) })
+                                        .cursor_pointer()
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
                                         .text_xs()
                                         .text_color(if on {
                                             theme::lavender()
                                         } else {
                                             theme::text_muted()
                                         })
-                                        .cursor_pointer()
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.agent_opts.reasoning = None;
-                                            cx.notify();
-                                        }))
-                                        .child("auto")
-                                })
-                                .children(HERMES_REASONING_LEVELS.into_iter().map(|lvl| {
-                                    let on = cur_reasoning.as_deref() == Some(lvl);
-                                    div()
-                                        .id(SharedString::from(format!("{scope}-reas-{lvl}")))
-                                        .px_2()
-                                        .py(px(2.0))
-                                        .rounded(px(5.0))
-                                        .bg(if on {
-                                            theme::surface_active()
-                                        } else {
-                                            gpui::rgba(0x00000000)
-                                        })
-                                        .hover(|s| s.bg(theme::row_hover()))
-                                        .text_xs()
-                                        .text_color(if on {
-                                            theme::lavender()
-                                        } else {
-                                            theme::text_muted()
-                                        })
-                                        .cursor_pointer()
                                         .on_click(cx.listener(move |this, _, _, cx| {
-                                            this.agent_opts.reasoning = Some(lvl.to_owned());
+                                            this.agent_opts.reasoning = val.map(str::to_owned);
                                             cx.notify();
                                         }))
-                                        .child(lvl)
+                                        .child(label)
                                 })),
+                        ),
+                )
+            })
+            // 4. Custom model override lives cleanly in Settings; quick popover gets a subtle shortcut
+            .when(show_custom_input, |d| {
+                d.child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(theme::text_muted())
+                                .child("Custom model"),
+                        )
+                        .child(
+                            div()
+                                .id(SharedString::from(format!("{scope}-model-input")))
+                                .px_2()
+                                .py(px(6.0))
+                                .rounded(px(7.0))
+                                .bg(if model_input_active {
+                                    theme::surface_active()
+                                } else {
+                                    theme::surface_subtle()
+                                })
+                                .border_1()
+                                .border_color(if model_input_active {
+                                    theme::lavender_border()
+                                } else {
+                                    theme::hairline()
+                                })
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .gap_2()
+                                .cursor_text()
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    if this.model_draft.is_empty()
+                                        && let Some(m) = &this.agent_opts.model
+                                    {
+                                        this.model_draft = m.clone();
+                                    }
+                                    this.active_input = ActiveInput::ModelField;
+                                    cx.notify();
+                                }))
+                                .child(input_line(
+                                    &self.model_draft,
+                                    "Type a model ID…",
+                                    model_input_active,
+                                    self.reduce_motion,
+                                    scope,
+                                    28,
+                                ))
+                                .child(
+                                    div()
+                                        .id(SharedString::from(format!("{scope}-model-apply")))
+                                        .px(px(6.0))
+                                        .py(px(1.0))
+                                        .rounded(px(4.0))
+                                        .hover(|s| s.bg(theme::row_hover()))
+                                        .cursor_pointer()
+                                        .text_xs()
+                                        .text_color(theme::lavender())
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.apply_model_draft(cx);
+                                        }))
+                                        .child("Apply"),
+                                ),
+                        ),
+                )
+            })
+            .when(!show_custom_input, |d| {
+                d.child(
+                    div()
+                        .pt_2()
+                        .border_t_1()
+                        .border_color(theme::hairline())
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .child(
+                            div()
+                                .id("pop-open-settings")
+                                .text_xs()
+                                .text_color(theme::text_muted())
+                                .hover(|s| s.text_color(theme::text_primary()))
+                                .cursor_pointer()
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.active_popover = ActivePopover::None;
+                                    this.open_right_drawer(RightDrawer::Settings, cx);
+                                }))
+                                .child("Custom model & rules →"),
                         ),
                 )
             })
@@ -2341,7 +2385,7 @@ impl JobHarnessApp {
         event: &ScrollWheelEvent,
         cx: &mut Context<Self>,
     ) {
-        if self.active_popover == ActivePopover::CommandBar || self.expanded_reader.is_some() {
+        if self.active_popover != ActivePopover::None || self.expanded_reader.is_some() {
             return;
         }
         let now = Instant::now();
@@ -4130,35 +4174,13 @@ impl JobHarnessApp {
                     .border_color(theme::hairline())
                     .flex()
                     .flex_col()
-                    .gap_2()
+                    .gap_3()
                     .overflow_y_scroll()
-                    .child(
-                        div()
-                            .pb_2()
-                            .border_b_1()
-                            .border_color(theme::hairline())
-                            .flex()
-                            .items_center()
-                            .justify_between()
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .text_color(theme::text_primary())
-                                    .child("CVs & Tracks"),
-                            )
-                            .child(
-                                div()
-                                    .id("close-cv-drawer")
-                                    .cursor_pointer()
-                                    .text_xs()
-                                    .text_color(theme::text_muted())
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.right_drawer = RightDrawer::Closed;
-                                        cx.notify();
-                                    }))
-                                    .child("✕"),
-                            ),
-                    )
+                    .child(drawer_header(
+                        "CVs & Tracks",
+                        Some("Master CV and tailored role tracks.".into()),
+                        cx,
+                    ))
                     // Borderless Master -> Children Tree
                     .children(self.snapshot.cv_nodes.iter().enumerate().map(|(i, node)| {
                         let full = node.full_path.clone();
@@ -4610,7 +4632,7 @@ impl JobHarnessApp {
                                                     div()
                                                         .text_xs()
                                                         .text_color(theme::text_secondary())
-                                                        .child(truncate_label(&act.summary, 96)),
+                                                        .child(truncate_end(&act.summary, 96)),
                                                 )
                                         }),
                                 ),
@@ -4641,7 +4663,7 @@ impl JobHarnessApp {
                             cx,
                         ))
                         // Section 1: Agent & Model controls
-                        .child(self.render_agent_controls("set", cx))
+                        .child(self.render_agent_controls("set", true, cx))
                         // Section 2: Automation Permissions (stored in config/career-ledger.json)
                         .child(
                             div()
@@ -5125,10 +5147,7 @@ impl JobHarnessApp {
                                                             } else {
                                                                 theme::text_secondary()
                                                             })
-                                                            .child(truncate_label(
-                                                                &entry.label,
-                                                                52,
-                                                            )),
+                                                            .child(truncate_end(&entry.label, 52)),
                                                     )
                                                     .child(
                                                         div()
@@ -5156,77 +5175,127 @@ impl JobHarnessApp {
             }
             ActivePopover::Agent => Some(
                 div()
-                    .id("agent-popover")
+                    .id("agent-backdrop")
+                    .occlude()
                     .absolute()
-                    .left(px(12.0))
-                    .top(px(88.0))
-                    .w(px(284.0))
-                    .p_3()
-                    .rounded(px(12.0))
-                    .bg(theme::popover_glass())
-                    .border_1()
-                    .border_color(theme::hairline_strong())
-                    .shadow_lg()
-                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .child(self.render_agent_controls("pop", cx))
+                    .inset_0()
+                    .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _, _, cx| {
+                            this.active_popover = ActivePopover::None;
+                            if this.active_input == ActiveInput::ModelField {
+                                this.active_input = ActiveInput::None;
+                            }
+                            cx.notify();
+                        }),
+                    )
+                    .child(
+                        div()
+                            .id("agent-popover")
+                            .absolute()
+                            .left(px(12.0))
+                            .top(px(84.0))
+                            .w(px(280.0))
+                            .p_3()
+                            .rounded(px(12.0))
+                            .bg(theme::popover_glass())
+                            .border_1()
+                            .border_color(theme::hairline_strong())
+                            .shadow_lg()
+                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                            .child(self.render_agent_controls("pop", false, cx)),
+                    )
                     .into_any_element(),
             ),
             ActivePopover::Budget => {
                 let b = &self.snapshot.daily_budget;
                 let right_off = self.bottom_popover_right_offset();
                 Some(
-                    popover_shell(true, 330.0, right_off)
-                        .child(popover_header("Daily Submission Cap", cx))
-                        .child(stepper_row(
-                            "Portals",
-                            b.portal_used,
-                            b.portal_limit,
-                            "portal",
-                            cx,
-                        ))
-                        .child(stepper_row(
-                            "Direct email",
-                            b.email_used,
-                            b.email_limit,
-                            "direct_email",
-                            cx,
-                        ))
-                        .child(stepper_row(
-                            "Outreach",
-                            b.outreach_used,
-                            b.outreach_limit,
-                            "recruiter_outreach",
-                            cx,
-                        ))
+                    div()
+                        .id("budget-backdrop")
+                        .occlude()
+                        .absolute()
+                        .inset_0()
+                        .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, _, _, cx| {
+                                this.active_popover = ActivePopover::None;
+                                cx.notify();
+                            }),
+                        )
+                        .child(
+                            popover_shell(true, 330.0, right_off)
+                                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                                .child(popover_header("Daily Submission Cap", cx))
+                                .child(stepper_row(
+                                    "Portals",
+                                    b.portal_used,
+                                    b.portal_limit,
+                                    "portal",
+                                    cx,
+                                ))
+                                .child(stepper_row(
+                                    "Direct email",
+                                    b.email_used,
+                                    b.email_limit,
+                                    "direct_email",
+                                    cx,
+                                ))
+                                .child(stepper_row(
+                                    "Outreach",
+                                    b.outreach_used,
+                                    b.outreach_limit,
+                                    "recruiter_outreach",
+                                    cx,
+                                )),
+                        )
                         .into_any_element(),
                 )
             }
             ActivePopover::Health => {
                 let right_off = self.bottom_popover_right_offset();
                 Some(
-                    popover_shell(true, 330.0, right_off)
-                        .child(popover_header("Workspace Status", cx))
-                        .child(kv_row("Storage", self.snapshot.status_note.clone()))
-                        .child(kv_row(
-                            "Mode",
-                            if self.client.target.is_remote() {
-                                "Remote VPS".into()
-                            } else {
-                                "Local in-process".into()
-                            },
-                        ))
-                        .child(kv_row("Chat runtime", self.runtime.label()))
-                        .child(kv_row(
-                            "Tracked roles",
-                            format!(
-                                "{} ({} upcoming)",
-                                self.snapshot.total_records, self.snapshot.upcoming_count
-                            ),
-                        ))
-                        .child(kv_row(
-                            "Unknown guards",
-                            self.snapshot.unresolved_attempts.to_string(),
-                        ))
+                    div()
+                        .id("health-backdrop")
+                        .occlude()
+                        .absolute()
+                        .inset_0()
+                        .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, _, _, cx| {
+                                this.active_popover = ActivePopover::None;
+                                cx.notify();
+                            }),
+                        )
+                        .child(
+                            popover_shell(true, 330.0, right_off)
+                                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                                .child(popover_header("Workspace Status", cx))
+                                .child(kv_row("Storage", self.snapshot.status_note.clone()))
+                                .child(kv_row(
+                                    "Mode",
+                                    if self.client.target.is_remote() {
+                                        "Remote VPS".into()
+                                    } else {
+                                        "Local in-process".into()
+                                    },
+                                ))
+                                .child(kv_row("Chat runtime", self.runtime.label()))
+                                .child(kv_row(
+                                    "Tracked roles",
+                                    format!(
+                                        "{} ({} upcoming)",
+                                        self.snapshot.total_records, self.snapshot.upcoming_count
+                                    ),
+                                ))
+                                .child(kv_row(
+                                    "Unknown guards",
+                                    self.snapshot.unresolved_attempts.to_string(),
+                                )),
+                        )
                         .into_any_element(),
                 )
             }
@@ -5647,16 +5716,27 @@ fn switch_pill(on: bool) -> impl IntoElement {
         )
 }
 
-fn truncate_label(text: &str, max_chars: usize) -> String {
+/// Truncates human-readable text at the end (`Prefix…`) so the beginning is never chopped off.
+fn truncate_end(text: &str, max_chars: usize) -> String {
     let count = text.chars().count();
     if count <= max_chars {
         return text.to_owned();
     }
-    let tail: String = text
-        .chars()
-        .skip(count.saturating_sub(max_chars.saturating_sub(1)))
-        .collect();
-    format!("…{tail}")
+    let head: String = text.chars().take(max_chars.saturating_sub(1)).collect();
+    format!("{}…", head.trim_end())
+}
+
+/// Truncates file names in the middle (`cambridge-ap…41638.md`) so both slug and extension stay legible.
+fn truncate_label(text: &str, max_chars: usize) -> String {
+    let count = text.chars().count();
+    if count <= max_chars || max_chars < 6 {
+        return text.to_owned();
+    }
+    let keep_end = (max_chars / 3).clamp(4, 10);
+    let keep_start = max_chars.saturating_sub(keep_end + 1);
+    let head: String = text.chars().take(keep_start).collect();
+    let tail: String = text.chars().skip(count.saturating_sub(keep_end)).collect();
+    format!("{head}…{tail}")
 }
 
 struct BriefSection {
@@ -5871,7 +5951,7 @@ fn render_markdown_blocks(text: &str, spacious: bool) -> impl IntoElement {
                 row.text_xs().into_any_element()
             });
         } else if line.starts_with("Evidence:") || line.starts_with("Source URL:") {
-            let clean = truncate_label(line, if spacious { 92 } else { 54 });
+            let clean = truncate_end(line, if spacious { 92 } else { 54 });
             blocks.push(
                 div()
                     .text_xs()
