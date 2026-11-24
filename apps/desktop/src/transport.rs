@@ -23,12 +23,39 @@ pub enum WorkspaceTarget {
 impl WorkspaceTarget {
     pub fn label(&self) -> String {
         match self {
-            Self::Local(_) => "Job Harness".to_owned(),
+            Self::Local(p) => p
+                .file_name()
+                .and_then(|s| s.to_str())
+                .filter(|s| !s.trim().is_empty())
+                .unwrap_or("workspace")
+                .to_owned(),
             Self::Remote { url, .. } => format!(
                 "VPS · {}",
                 url.trim_start_matches("http://")
                     .trim_start_matches("https://")
             ),
+        }
+    }
+    pub fn monogram(&self) -> String {
+        let name = self.label();
+        let parts: Vec<&str> = name
+            .split(|c: char| !c.is_ascii_alphanumeric())
+            .filter(|s| !s.is_empty())
+            .collect();
+        let raw = if parts.len() >= 2 {
+            let a = parts[0].chars().next().unwrap_or('W');
+            let b = parts[1].chars().next().unwrap_or('S');
+            format!("{a}{b}")
+        } else {
+            name.chars()
+                .filter(|c| c.is_ascii_alphanumeric())
+                .take(2)
+                .collect()
+        };
+        if raw.is_empty() {
+            "WS".into()
+        } else {
+            raw.to_ascii_uppercase()
         }
     }
     pub fn is_remote(&self) -> bool {
@@ -420,10 +447,37 @@ impl WorkspaceClient {
                 .filter(|s| !s.is_empty())
                 .map(str::to_owned);
 
-            let outcome = row["outcome"]
+            let explicit_outcome = row["outcome"]
                 .as_str()
                 .filter(|s| !s.trim().is_empty())
                 .map(str::to_owned);
+            let status_detail_low = row["status_detail"]
+                .as_str()
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            // Preserve explicit tracking.outcome first; on closed rows without an outcome field,
+            // classify explicit rejection/decline or withdrawal statements from status_detail
+            // (never guessing silence as rejection).
+            let outcome = explicit_outcome.or_else(|| {
+                if column != "Archive" && stage != "closed" {
+                    return None;
+                }
+                if status_detail_low.contains("withdrawn")
+                    || status_detail_low.contains("candidate declined")
+                    || status_detail_low.contains("candidate withdrew")
+                {
+                    Some("withdrawn".into())
+                } else if status_detail_low.contains("rejected")
+                    || status_detail_low.contains("rejection")
+                    || status_detail_low.contains("employer declined")
+                    || status_detail_low.contains("declined to progress")
+                    || status_detail_low.contains("declined this")
+                {
+                    Some("rejected".into())
+                } else {
+                    None
+                }
+            });
             let note_line = if urgency == "urgent_now" {
                 scheduled_start
                     .as_deref()
@@ -912,9 +966,18 @@ impl WorkspaceClient {
             .as_str()
             .or_else(|| res["data"]["content"].as_str())
             .unwrap_or("");
-        // Strip machine tracking comment block for clean human reading
-        let cleaned = strip_tracking_comment(raw);
-        let trimmed: String = cleaned.trim().chars().take(2400).collect();
+        // Strip machine tracking comment block for clean human reading (preserve full JSON & briefs!)
+        let cleaned = if rel_path.ends_with(".json") {
+            raw.to_owned()
+        } else {
+            strip_tracking_comment(raw)
+        };
+        let cap = if rel_path.ends_with(".json") {
+            256_000
+        } else {
+            64_000
+        };
+        let trimmed: String = cleaned.trim().chars().take(cap).collect();
         if trimmed.is_empty() {
             Ok("Empty record.".into())
         } else {

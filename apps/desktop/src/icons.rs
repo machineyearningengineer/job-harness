@@ -54,6 +54,8 @@ const COLUMNS: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="14" heig
 
 const FLOW: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h4c3 0 5 6 10 6h4"/><path d="M3 18h4c3 0 5-6 10-6"/><path d="M3 12h4c3 0 5 6 10 6h4"/></svg>"#;
 
+const HISTORY: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M12 7v5l4 2"/></svg>"#;
+
 impl AssetSource for EmbeddedIcons {
     fn load(&self, path: &str) -> Result<Option<Cow<'static, [u8]>>> {
         let bytes = match path {
@@ -82,6 +84,7 @@ impl AssetSource for EmbeddedIcons {
             "icons/zap.svg" => Some(ZAP.as_bytes()),
             "icons/columns.svg" => Some(COLUMNS.as_bytes()),
             "icons/flow.svg" => Some(FLOW.as_bytes()),
+            "icons/history.svg" => Some(HISTORY.as_bytes()),
             _ => None,
         };
         Ok(bytes.map(Cow::Borrowed))
@@ -114,6 +117,7 @@ impl AssetSource for EmbeddedIcons {
             "icons/zap.svg".into(),
             "icons/columns.svg".into(),
             "icons/flow.svg".into(),
+            "icons/history.svg".into(),
         ])
     }
 }

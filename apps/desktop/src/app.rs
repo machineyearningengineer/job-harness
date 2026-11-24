@@ -3,8 +3,8 @@
 //! every click, toggle, scroll, and drag runs smoothly at 120Hz.
 use crate::{
     chat_bridge::{
-        AgentOptions, AgentRuntime, DiscoveredMcpServer, StreamEvent, discover_mcp_servers,
-        extract_citations, is_image_path,
+        AgentOptions, AgentRuntime, CapabilityAccess, DiscoveredMcpServer, HostSession, McpScope,
+        StreamEvent, discover_mcp_servers, evaluate_capability, extract_citations, is_image_path,
     },
     markdown::{self, LinkTarget},
     sankey::{self, SankeyBucket},
@@ -100,6 +100,7 @@ enum ActivePopover {
     None,
     CommandBar,
     Agent,
+    Sessions,
     Budget,
     Health,
 }
@@ -206,6 +207,9 @@ pub struct JobHarnessApp {
     runtime: AgentRuntime,
     available_runtimes: Vec<AgentRuntime>,
     mcp_servers: Vec<DiscoveredMcpServer>,
+    host_sessions: Vec<HostSession>,
+    resumed_session_label: Option<String>,
+    show_connect_help: bool,
     agent_opts: AgentOptions,
     model_draft: String,
     last_seen_activity_at: Option<String>,
@@ -256,6 +260,8 @@ pub struct JobHarnessApp {
     flow_view: bool,
     flow_anim_epoch: u64,
     sankey_zoom: Option<SankeyBucket>,
+    sankey_expand_all: bool,
+    sankey_scale: f32,
     sankey_bucket: Option<SankeyBucket>,
     sankey_hover: Option<SankeyBucket>,
     reduce_motion: bool,
@@ -359,6 +365,9 @@ impl JobHarnessApp {
             runtime,
             available_runtimes,
             mcp_servers,
+            host_sessions: Vec::new(),
+            resumed_session_label: None,
+            show_connect_help: false,
             agent_opts,
             model_draft: String::new(),
             last_seen_activity_at: saved.last_seen_activity_at.clone(),
@@ -419,6 +428,8 @@ impl JobHarnessApp {
             flow_view: false,
             flow_anim_epoch: 1,
             sankey_zoom: None,
+            sankey_expand_all: false,
+            sankey_scale: 1.0,
             sankey_bucket: None,
             sankey_hover: None,
             reduce_motion: saved.reduce_motion,
@@ -509,7 +520,7 @@ impl JobHarnessApp {
                     }
                     "flow-drill" => {
                         app.flow_view = true;
-                        app.sankey_bucket = Some(SankeyBucket::Interviews);
+                        app.sankey_bucket = Some(SankeyBucket::Screening);
                         app.submit_prompt("What needs attention today?".into(), false, cx);
                         cx.notify();
                     }
@@ -2754,26 +2765,42 @@ impl JobHarnessApp {
                     .child({
                         let local_root = self.client.target.local_root().map(PathBuf::from);
                         let has_dir = local_root.is_some();
+                        let ws_monogram = self.client.target.monogram();
                         div()
                             .id("topbar-open-ws")
-                            .px(px(5.0))
-                            .py(px(2.0))
-                            .rounded(px(5.0))
-                            .text_xs()
-                            .text_color(theme::text_muted())
+                            .px(px(6.0))
+                            .py(px(3.0))
+                            .rounded(px(6.0))
+                            .flex()
+                            .items_center()
+                            .gap(px(7.0))
                             .when(has_dir, |d| {
                                 let p = local_root.unwrap();
-                                d.hover(|s| {
-                                    s.bg(theme::row_hover()).text_color(theme::text_primary())
-                                })
-                                .cursor_pointer()
-                                .on_click(cx.listener(
-                                    move |_, _, _, _| {
+                                d.hover(|s| s.bg(theme::row_hover()))
+                                    .cursor_pointer()
+                                    .on_click(cx.listener(move |_, _, _, _| {
                                         open_in_system(&p);
-                                    },
-                                ))
+                                    }))
                             })
-                            .child(ws_label)
+                            .child(
+                                div()
+                                    .px(px(5.0))
+                                    .py(px(1.5))
+                                    .rounded(px(5.0))
+                                    .bg(theme::surface_subtle())
+                                    .border_1()
+                                    .border_color(theme::hairline())
+                                    .text_size(px(10.0))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(theme::text_secondary())
+                                    .child(ws_monogram),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(theme::text_secondary())
+                                    .child(ws_label),
+                            )
                     }),
             )
             // Centered compact Filter Roles input right in the top bar (frees vertical board & Sankey space!)
@@ -3194,6 +3221,8 @@ impl JobHarnessApp {
             self.chat_messages.clear();
             self.agent_opts.session_name =
                 Some(format!("career-gui-{}", chrono::Utc::now().timestamp()));
+            self.agent_opts.resume_existing = false;
+            self.resumed_session_label = None;
             self.quoted_reply = None;
             self.chat_attachments.clear();
             self.pasted_snippets.clear();
@@ -3424,6 +3453,62 @@ impl JobHarnessApp {
                             .flex()
                             .items_center()
                             .gap_1()
+                            .when(self.runtime.supports_sessions() && !self.streaming, |d| {
+                                let sess_open = self.active_popover == ActivePopover::Sessions;
+                                let resuming = self.resumed_session_label.is_some();
+                                d.child(
+                                    div()
+                                        .id("chat-sessions-btn")
+                                        .w(px(26.0))
+                                        .h(px(26.0))
+                                        .rounded(px(6.0))
+                                        .when(sess_open || resuming, |b| {
+                                            b.bg(theme::surface_active())
+                                        })
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .cursor_pointer()
+                                        .hover(|s| s.bg(theme::row_hover()))
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            if this.active_popover == ActivePopover::Sessions {
+                                                this.active_popover = ActivePopover::None;
+                                                cx.notify();
+                                                return;
+                                            }
+                                            this.cmd_anim_epoch =
+                                                this.cmd_anim_epoch.wrapping_add(1);
+                                            this.active_popover = ActivePopover::Sessions;
+                                            cx.notify();
+                                            let rt = this.runtime.clone();
+                                            let ws =
+                                                this.client.target.local_root().map(PathBuf::from);
+                                            cx.spawn(async move |this, cx| {
+                                                let list = cx
+                                                    .background_executor()
+                                                    .spawn(async move {
+                                                        rt.list_recent_sessions(ws.as_deref())
+                                                    })
+                                                    .await;
+                                                let _ = this.update(cx, |app, cx| {
+                                                    app.host_sessions = list;
+                                                    cx.notify();
+                                                });
+                                            })
+                                            .detach();
+                                        }))
+                                        .child(
+                                            svg()
+                                                .path("icons/history.svg")
+                                                .size(px(13.5))
+                                                .text_color(if sess_open || resuming {
+                                                    theme::text_primary()
+                                                } else {
+                                                    theme::text_muted()
+                                                }),
+                                        ),
+                                )
+                            })
                             .when(!self.chat_messages.is_empty() && !self.streaming, |d| {
                                 d.child(
                                     div()
@@ -3442,6 +3527,8 @@ impl JobHarnessApp {
                                                 "career-gui-{}",
                                                 chrono::Utc::now().timestamp()
                                             ));
+                                            this.agent_opts.resume_existing = false;
+                                            this.resumed_session_label = None;
                                             this.quoted_reply = None;
                                             this.chat_attachments.clear();
                                             this.pasted_snippets.clear();
@@ -3492,6 +3579,55 @@ impl JobHarnessApp {
                             ),
                     ),
             )
+            // Quiet strip when continuing an existing host runtime session
+            .when_some(self.resumed_session_label.clone(), |d, lbl| {
+                d.child(
+                    div()
+                        .mx_4()
+                        .mb_1()
+                        .px(px(8.0))
+                        .py(px(4.0))
+                        .rounded(px(6.0))
+                        .bg(theme::surface_subtle())
+                        .border_1()
+                        .border_color(theme::hairline())
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .gap_2()
+                        .child(
+                            div()
+                                .min_w_0()
+                                .overflow_hidden()
+                                .text_size(px(11.0))
+                                .text_color(theme::text_secondary())
+                                .child(format!("Resuming · {}", truncate_end(&lbl, 34))),
+                        )
+                        .child(
+                            div()
+                                .id("chat-exit-resumed-session")
+                                .flex_shrink_0()
+                                .px(px(5.0))
+                                .py(px(1.5))
+                                .rounded(px(4.0))
+                                .hover(|s| s.bg(theme::row_hover()))
+                                .cursor_pointer()
+                                .text_size(px(10.5))
+                                .text_color(theme::text_muted())
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.chat_messages.clear();
+                                    this.agent_opts.session_name = Some(format!(
+                                        "career-gui-{}",
+                                        chrono::Utc::now().timestamp()
+                                    ));
+                                    this.agent_opts.resume_existing = false;
+                                    this.resumed_session_label = None;
+                                    cx.notify();
+                                }))
+                                .child("Fresh"),
+                        ),
+                )
+            })
             // Scrollable message stream wrapped in `.relative()` so jump-to-bottom floats cleanly above the composer
             .child(
                 div()
@@ -5324,7 +5460,15 @@ impl JobHarnessApp {
                                     })
                                     .on_click(cx.listener(move |this, _, _, cx| {
                                         this.runtime = rt_clone.clone();
-                                        this.agent_opts = AgentOptions::default();
+                                        this.agent_opts = AgentOptions {
+                                            session_name: Some(format!(
+                                                "career-gui-{}",
+                                                chrono::Utc::now().timestamp()
+                                            )),
+                                            ..AgentOptions::default()
+                                        };
+                                        this.resumed_session_label = None;
+                                        this.host_sessions.clear();
                                         this.model_draft.clear();
                                         cx.notify();
                                     }))
@@ -6334,6 +6478,8 @@ impl JobHarnessApp {
                 sankey::render_sankey_view(
                     &all_for_sankey,
                     self.sankey_zoom,
+                    self.sankey_expand_all,
+                    self.sankey_scale,
                     self.sankey_bucket,
                     self.sankey_hover,
                     self.flow_anim_epoch,
@@ -6349,6 +6495,18 @@ impl JobHarnessApp {
                         this.sankey_bucket = None;
                         this.sankey_hover = None;
                         this.flow_anim_epoch = this.flow_anim_epoch.wrapping_add(1);
+                        cx.notify();
+                    },
+                    |expand, this: &mut Self, _, cx| {
+                        this.sankey_expand_all = expand;
+                        this.sankey_zoom = None;
+                        this.sankey_bucket = None;
+                        this.sankey_hover = None;
+                        this.flow_anim_epoch = this.flow_anim_epoch.wrapping_add(1);
+                        cx.notify();
+                    },
+                    |scale, this: &mut Self, _, cx| {
+                        this.sankey_scale = scale.clamp(0.75, 1.45);
                         cx.notify();
                     },
                     |bucket, this: &mut Self, _, cx| {
@@ -8559,10 +8717,213 @@ impl JobHarnessApp {
                             Some("Agent runtime, automation rules, and interface preferences.".into()),
                             cx,
                         ))
-                        // Section 1: Agent & Model controls
-                        .child(self.render_agent_controls("set", true, cx))
-                        // Section 1b: Connected Layers (detected runtimes + configured MCP connectors, read-only)
+                        // Section 1: Inference & runtime (model, speed, and zero-friction CLI sign-in)
                         .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap_2()
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .justify_between()
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .font_weight(FontWeight::MEDIUM)
+                                                .text_color(theme::text_primary())
+                                                .child("Inference & runtime"),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_size(px(10.5))
+                                                .text_color(theme::text_muted())
+                                                .child(format!(
+                                                    "{} ready",
+                                                    self.available_runtimes.len()
+                                                )),
+                                        ),
+                                )
+                                .child(self.render_agent_controls("set", true, cx))
+                                .child({
+                                    let open = self.show_connect_help;
+                                    let connect_rows: [(&str, &str, &str); 4] = [
+                                        (
+                                            "ChatGPT (Codex CLI)",
+                                            "codex login",
+                                            "codex login",
+                                        ),
+                                        ("Claude Code", "claude", "claude"),
+                                        (
+                                            "Hermes / local models",
+                                            "hermes model",
+                                            "hermes model",
+                                        ),
+                                        (
+                                            "Auto-setup via any agent",
+                                            "Copy 1-line setup prompt",
+                                            "Read https://raw.githubusercontent.com/machineyearningengineer/job-harness/main/docs/AGENT-SETUP.md and set up Job Harness for me.",
+                                        ),
+                                    ];
+                                    div()
+                                        .pt_1()
+                                        .flex()
+                                        .flex_col()
+                                        .gap(px(6.0))
+                                        .child(
+                                            div()
+                                                .id("set-toggle-connect-help")
+                                                .px_2()
+                                                .py(px(5.0))
+                                                .rounded(px(7.0))
+                                                .bg(theme::surface_subtle())
+                                                .border_1()
+                                                .border_color(theme::hairline())
+                                                .hover(|s| s.bg(theme::row_hover()))
+                                                .cursor_pointer()
+                                                .flex()
+                                                .items_center()
+                                                .justify_between()
+                                                .on_click(cx.listener(|this, _, _, cx| {
+                                                    this.show_connect_help =
+                                                        !this.show_connect_help;
+                                                    cx.notify();
+                                                }))
+                                                .child(
+                                                    div()
+                                                        .text_size(px(11.5))
+                                                        .text_color(theme::text_secondary())
+                                                        .child("Connect ChatGPT, Claude, or local"),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .text_size(px(10.5))
+                                                        .text_color(theme::text_muted())
+                                                        .child(if open { "▴" } else { "▾" }),
+                                                ),
+                                        )
+                                        .when(open, |box_d| {
+                                            box_d.child(
+                                                div()
+                                                    .p_2()
+                                                    .rounded(px(8.0))
+                                                    .bg(theme::window_glass())
+                                                    .border_1()
+                                                    .border_color(theme::hairline())
+                                                    .flex()
+                                                    .flex_col()
+                                                    .gap(px(6.0))
+                                                    .child(
+                                                        div()
+                                                            .text_size(px(10.5))
+                                                            .text_color(theme::text_muted())
+                                                            .child("Sign in once via your CLI (OAuth or local server) — no API keys stored in Job Harness."),
+                                                    )
+                                                    .children(connect_rows.into_iter().enumerate().map(|(ci, (title, hint, cmd))| {
+                                                        div()
+                                                            .id(SharedString::from(format!("set-conn-{ci}")))
+                                                            .px_2()
+                                                            .py(px(5.0))
+                                                            .rounded(px(6.0))
+                                                            .bg(theme::surface_subtle())
+                                                            .hover(|s| s.bg(theme::row_hover()))
+                                                            .cursor_pointer()
+                                                            .flex()
+                                                            .items_center()
+                                                            .justify_between()
+                                                            .gap_2()
+                                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                                cx.write_to_clipboard(ClipboardItem::new_string(cmd.to_owned()));
+                                                                this.set_toast(format!("Copied `{hint}`"), cx);
+                                                            }))
+                                                            .child(
+                                                                div()
+                                                                    .flex()
+                                                                    .flex_col()
+                                                                    .min_w_0()
+                                                                    .child(
+                                                                        div()
+                                                                            .text_size(px(11.0))
+                                                                            .text_color(theme::text_primary())
+                                                                            .child(title),
+                                                                    )
+                                                                    .child(
+                                                                        div()
+                                                                            .text_size(px(10.0))
+                                                                            .text_color(theme::text_muted())
+                                                                            .child(hint),
+                                                                    ),
+                                                            )
+                                                            .child(
+                                                                div()
+                                                                    .flex_shrink_0()
+                                                                    .text_size(px(10.5))
+                                                                    .text_color(theme::text_secondary())
+                                                                    .child("Copy"),
+                                                            )
+                                                    })),
+                                            )
+                                        })
+                                }),
+                        )
+                        // Section 1b: Tools & connectors (capability matrix for active runtime + shared vs agent-only scope)
+                        .child({
+                            let active_kind = self.runtime.kind();
+                            let active_name = self.runtime.short_name().to_owned();
+                            let mcp_cmd = match self.client.target.local_root() {
+                                Some(root) => format!("jh --root {} connect mcp", root.display()),
+                                None => "jh connect mcp".to_owned(),
+                            };
+                            let caps: [(&str, &str, CapabilityAccess); 3] = [
+                                (
+                                    "Email",
+                                    "Recommended",
+                                    evaluate_capability(
+                                        &self.mcp_servers,
+                                        active_kind,
+                                        &["mail", "gmail", "google", "outlook", "imap", "inbox"],
+                                    ),
+                                ),
+                                (
+                                    "Calendar",
+                                    "Recommended",
+                                    evaluate_capability(
+                                        &self.mcp_servers,
+                                        active_kind,
+                                        &["calendar", "google", "cal", "gcal"],
+                                    ),
+                                ),
+                                (
+                                    "Web Search",
+                                    "Optional",
+                                    evaluate_capability(
+                                        &self.mcp_servers,
+                                        active_kind,
+                                        &[
+                                            "search",
+                                            "brave",
+                                            "exa",
+                                            "tavily",
+                                            "perplexity",
+                                            "firecrawl",
+                                            "fetch",
+                                            "browser",
+                                            "playwright",
+                                        ],
+                                    ),
+                                ),
+                            ];
+                            let shared_servers: Vec<_> = self
+                                .mcp_servers
+                                .iter()
+                                .filter(|s| matches!(s.scope, McpScope::Global))
+                                .collect();
+                            let agent_servers: Vec<_> = self
+                                .mcp_servers
+                                .iter()
+                                .filter(|s| matches!(s.scope, McpScope::AgentOnly(_)))
+                                .collect();
                             div()
                                 .pt_3()
                                 .border_t_1()
@@ -8578,86 +8939,257 @@ impl JobHarnessApp {
                                         .child(
                                             div()
                                                 .text_xs()
-                                                .text_color(theme::text_muted())
-                                                .child("Connections"),
+                                                .font_weight(FontWeight::MEDIUM)
+                                                .text_color(theme::text_primary())
+                                                .child("Tools & connectors"),
                                         )
                                         .child(
                                             div()
                                                 .text_size(px(10.5))
                                                 .text_color(theme::text_muted())
-                                                .child(format!(
-                                                    "{} runtimes · {} MCP",
-                                                    self.available_runtimes.len(),
-                                                    self.mcp_servers.len()
-                                                )),
+                                                .child(format!("for {active_name}")),
                                         ),
                                 )
+                                // Capability rows (what Job Harness needs vs what is active for this runtime)
                                 .child(
                                     div()
                                         .flex()
-                                        .flex_wrap()
-                                        .gap(px(5.0))
-                                        .children(self.available_runtimes.iter().map(|rt| {
-                                            let active = rt.kind() == self.runtime.kind();
+                                        .flex_col()
+                                        .gap(px(4.0))
+                                        // Built-in Required capability: Career Ledger
+                                        .child(
                                             div()
                                                 .px_2()
-                                                .py(px(3.0))
-                                                .rounded(px(6.0))
-                                                .bg(if active {
-                                                    theme::surface_active()
-                                                } else {
-                                                    theme::surface_subtle()
-                                                })
-                                                .border_1()
-                                                .border_color(theme::hairline())
-                                                .flex()
-                                                .items_center()
-                                                .gap(px(5.0))
-                                                .text_size(px(11.0))
-                                                .text_color(if active {
-                                                    theme::text_primary()
-                                                } else {
-                                                    theme::text_secondary()
-                                                })
-                                                .child(
-                                                    div()
-                                                        .w(px(5.0))
-                                                        .h(px(5.0))
-                                                        .rounded(px(99.0))
-                                                        .bg(theme::emerald()),
-                                                )
-                                                .child(rt.short_name().to_owned())
-                                        }))
-                                        .children(self.mcp_servers.iter().take(10).map(|srv| {
-                                            div()
-                                                .px_2()
-                                                .py(px(3.0))
-                                                .rounded(px(6.0))
+                                                .py(px(6.0))
+                                                .rounded(px(7.0))
                                                 .bg(theme::window_glass())
                                                 .border_1()
                                                 .border_color(theme::hairline())
                                                 .flex()
                                                 .items_center()
-                                                .gap(px(5.0))
-                                                .text_size(px(11.0))
-                                                .text_color(theme::text_secondary())
+                                                .justify_between()
+                                                .gap_2()
                                                 .child(
                                                     div()
-                                                        .w(px(5.0))
-                                                        .h(px(5.0))
-                                                        .rounded(px(99.0))
-                                                        .bg(theme::text_muted()),
+                                                        .flex()
+                                                        .items_center()
+                                                        .gap(px(6.0))
+                                                        .child(
+                                                            div()
+                                                                .w(px(6.0))
+                                                                .h(px(6.0))
+                                                                .rounded(px(99.0))
+                                                                .bg(theme::emerald()),
+                                                        )
+                                                        .child(
+                                                            div()
+                                                                .text_size(px(11.5))
+                                                                .text_color(theme::text_primary())
+                                                                .child("Career Ledger"),
+                                                        )
+                                                        .child(
+                                                            div()
+                                                                .text_size(px(10.0))
+                                                                .text_color(theme::text_muted())
+                                                                .child("Required"),
+                                                        ),
                                                 )
-                                                .child(srv.name.clone())
                                                 .child(
                                                     div()
-                                                        .text_size(px(9.5))
-                                                        .text_color(theme::text_muted())
-                                                        .child(srv.source.clone()),
+                                                        .id("set-copy-mcp-cmd")
+                                                        .px(px(6.0))
+                                                        .py(px(2.0))
+                                                        .rounded(px(5.0))
+                                                        .bg(theme::surface_subtle())
+                                                        .hover(|s| s.bg(theme::row_hover()))
+                                                        .cursor_pointer()
+                                                        .text_size(px(10.0))
+                                                        .text_color(theme::text_secondary())
+                                                        .on_click(cx.listener(
+                                                            move |this, _, _, cx| {
+                                                                cx.write_to_clipboard(
+                                                                    ClipboardItem::new_string(
+                                                                        mcp_cmd.clone(),
+                                                                    ),
+                                                                );
+                                                                this.set_toast(
+                                                                    "Copied MCP registration command",
+                                                                    cx,
+                                                                );
+                                                            },
+                                                        ))
+                                                        .child("Active · Copy MCP"),
+                                                ),
+                                        )
+                                        .children(caps.into_iter().map(|(label, tier, access)| {
+                                            let (dot_col, status_txt, status_col) = match access {
+                                                CapabilityAccess::Active { global: true, .. } => (
+                                                    theme::emerald(),
+                                                    "Active · Shared".to_owned(),
+                                                    theme::text_primary(),
+                                                ),
+                                                CapabilityAccess::Active { global: false, .. } => (
+                                                    theme::emerald(),
+                                                    format!("Active · {active_name}"),
+                                                    theme::text_primary(),
+                                                ),
+                                                CapabilityAccess::OtherRuntime { owner, .. } => (
+                                                    theme::amber_accent(),
+                                                    format!("In {owner} only"),
+                                                    theme::amber_text(),
+                                                ),
+                                                CapabilityAccess::NotConnected => (
+                                                    theme::text_muted(),
+                                                    "Not connected".to_owned(),
+                                                    theme::text_muted(),
+                                                ),
+                                            };
+                                            div()
+                                                .px_2()
+                                                .py(px(5.5))
+                                                .rounded(px(7.0))
+                                                .bg(theme::window_glass())
+                                                .border_1()
+                                                .border_color(theme::hairline())
+                                                .flex()
+                                                .items_center()
+                                                .justify_between()
+                                                .gap_2()
+                                                .child(
+                                                    div()
+                                                        .flex()
+                                                        .items_center()
+                                                        .gap(px(6.0))
+                                                        .child(
+                                                            div()
+                                                                .w(px(6.0))
+                                                                .h(px(6.0))
+                                                                .rounded(px(99.0))
+                                                                .bg(dot_col),
+                                                        )
+                                                        .child(
+                                                            div()
+                                                                .text_size(px(11.5))
+                                                                .text_color(theme::text_primary())
+                                                                .child(label),
+                                                        )
+                                                        .child(
+                                                            div()
+                                                                .text_size(px(10.0))
+                                                                .text_color(theme::text_muted())
+                                                                .child(tier),
+                                                        ),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .text_size(px(10.5))
+                                                        .text_color(status_col)
+                                                        .child(status_txt),
                                                 )
                                         })),
-                                ),
-                        )
+                                )
+                                // Discovered MCP scope tree: Shared across agents vs Agent-only
+                                .when(!shared_servers.is_empty(), |box_d| {
+                                    box_d.child(
+                                        div()
+                                            .pt_1()
+                                            .flex()
+                                            .flex_col()
+                                            .gap(px(4.0))
+                                            .child(
+                                                div()
+                                                    .text_size(px(10.0))
+                                                    .text_color(theme::text_muted())
+                                                    .child("Shared across agents"),
+                                            )
+                                            .child(div().flex().flex_wrap().gap(px(5.0)).children(
+                                                shared_servers.into_iter().take(8).map(|srv| {
+                                                    div()
+                                                        .px_2()
+                                                        .py(px(3.0))
+                                                        .rounded(px(6.0))
+                                                        .bg(theme::surface_subtle())
+                                                        .border_1()
+                                                        .border_color(theme::hairline())
+                                                        .flex()
+                                                        .items_center()
+                                                        .gap(px(5.0))
+                                                        .text_size(px(10.5))
+                                                        .text_color(theme::text_secondary())
+                                                        .child(
+                                                            div()
+                                                                .w(px(5.0))
+                                                                .h(px(5.0))
+                                                                .rounded(px(99.0))
+                                                                .bg(theme::emerald()),
+                                                        )
+                                                        .child(srv.name.clone())
+                                                        .child(
+                                                            div()
+                                                                .text_size(px(9.5))
+                                                                .text_color(theme::text_muted())
+                                                                .child(srv.source.clone()),
+                                                        )
+                                                }),
+                                            )),
+                                    )
+                                })
+                                .when(!agent_servers.is_empty(), |box_d| {
+                                    box_d.child(
+                                        div()
+                                            .pt_1()
+                                            .flex()
+                                            .flex_col()
+                                            .gap(px(4.0))
+                                            .child(
+                                                div()
+                                                    .text_size(px(10.0))
+                                                    .text_color(theme::text_muted())
+                                                    .child("Agent-only MCPs"),
+                                            )
+                                            .child(div().flex().flex_wrap().gap(px(5.0)).children(
+                                                agent_servers.into_iter().take(8).map(|srv| {
+                                                    let vis = srv.visible_to(active_kind);
+                                                    div()
+                                                        .px_2()
+                                                        .py(px(3.0))
+                                                        .rounded(px(6.0))
+                                                        .bg(theme::window_glass())
+                                                        .border_1()
+                                                        .border_color(theme::hairline())
+                                                        .when(!vis, |d| d.opacity(0.6))
+                                                        .flex()
+                                                        .items_center()
+                                                        .gap(px(5.0))
+                                                        .text_size(px(10.5))
+                                                        .text_color(if vis {
+                                                            theme::text_primary()
+                                                        } else {
+                                                            theme::text_muted()
+                                                        })
+                                                        .child(
+                                                            div()
+                                                                .w(px(5.0))
+                                                                .h(px(5.0))
+                                                                .rounded(px(99.0))
+                                                                .bg(if vis {
+                                                                    theme::emerald()
+                                                                } else {
+                                                                    theme::text_muted()
+                                                                }),
+                                                        )
+                                                        .child(srv.name.clone())
+                                                        .child(
+                                                            div()
+                                                                .text_size(px(9.5))
+                                                                .text_color(theme::text_muted())
+                                                                .child(srv.source.clone()),
+                                                        )
+                                                }),
+                                            )),
+                                    )
+                                })
+                        })
                         // Section 2: Automation Permissions (stored in config/career-ledger.json)
                         .child(
                             div()
@@ -9334,6 +9866,179 @@ impl JobHarnessApp {
                         .into_any_element(),
                 )
             }
+            ActivePopover::Sessions => {
+                let epoch = self.cmd_anim_epoch;
+                let rt_name = self.runtime.short_name().to_owned();
+                let is_fresh = !self.agent_opts.resume_existing;
+                let active_id = self.agent_opts.session_name.clone();
+                let sessions = self.host_sessions.clone();
+                let card = div()
+                    .id("sessions-popover")
+                    .absolute()
+                    .left(px(12.0))
+                    .top(px(84.0))
+                    .w(px(300.0))
+                    .p_3()
+                    .rounded(px(12.0))
+                    .bg(theme::popover_glass())
+                    .border_1()
+                    .border_color(theme::hairline_strong())
+                    .shadow_lg()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(theme::text_primary())
+                                    .child(format!("Recent {rt_name} sessions")),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(10.0))
+                                    .text_color(theme::text_muted())
+                                    .child("Read-only"),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .id("session-start-fresh")
+                            .px_2()
+                            .py(px(6.0))
+                            .rounded(px(7.0))
+                            .bg(if is_fresh {
+                                theme::surface_active()
+                            } else {
+                                theme::surface_subtle()
+                            })
+                            .hover(|s| s.bg(theme::row_hover()))
+                            .cursor_pointer()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.chat_messages.clear();
+                                this.agent_opts.session_name =
+                                    Some(format!("career-gui-{}", chrono::Utc::now().timestamp()));
+                                this.agent_opts.resume_existing = false;
+                                this.resumed_session_label = None;
+                                this.active_popover = ActivePopover::None;
+                                cx.notify();
+                            }))
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(theme::text_primary())
+                                    .child("Start fresh chat (default)"),
+                            )
+                            .when(is_fresh, |d| {
+                                d.child(
+                                    div()
+                                        .w(px(6.0))
+                                        .h(px(6.0))
+                                        .rounded(px(99.0))
+                                        .bg(theme::emerald()),
+                                )
+                            }),
+                    )
+                    .child(div().h(px(1.0)).w_full().bg(theme::hairline()))
+                    .child(if sessions.is_empty() {
+                        div()
+                            .py_3()
+                            .text_xs()
+                            .text_color(theme::text_muted())
+                            .child(format!("No recent {rt_name} sessions found on disk."))
+                            .into_any_element()
+                    } else {
+                        div()
+                            .id("sessions-list-scroll")
+                            .max_h(px(280.0))
+                            .overflow_y_scroll()
+                            .flex()
+                            .flex_col()
+                            .gap(px(3.0))
+                            .children(sessions.into_iter().enumerate().map(|(si, s)| {
+                                let is_cur =
+                                    !is_fresh && active_id.as_deref() == Some(s.id.as_str());
+                                let sid = s.id.clone();
+                                let stitle = s.title.clone();
+                                let rt_toast = rt_name.clone();
+                                let meta = if s.message_count > 0 {
+                                    format!("{} · {} msgs", s.age_label, s.message_count)
+                                } else {
+                                    s.age_label.clone()
+                                };
+                                div()
+                                    .id(SharedString::from(format!("host-sess-{si}")))
+                                    .px_2()
+                                    .py(px(6.0))
+                                    .rounded(px(7.0))
+                                    .when(is_cur, |d| d.bg(theme::surface_active()))
+                                    .hover(|d| d.bg(theme::row_hover()))
+                                    .cursor_pointer()
+                                    .flex()
+                                    .flex_col()
+                                    .gap(px(2.0))
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.chat_messages.clear();
+                                        this.agent_opts.session_name = Some(sid.clone());
+                                        this.agent_opts.resume_existing = true;
+                                        this.resumed_session_label = Some(stitle.clone());
+                                        this.active_popover = ActivePopover::None;
+                                        this.set_toast(format!("Resuming {rt_toast} session"), cx);
+                                    }))
+                                    .child(
+                                        div()
+                                            .min_w_0()
+                                            .overflow_hidden()
+                                            .text_xs()
+                                            .text_color(theme::text_primary())
+                                            .child(truncate_end(&s.title, 40)),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_size(px(10.0))
+                                            .text_color(theme::text_muted())
+                                            .child(meta),
+                                    )
+                            }))
+                            .into_any_element()
+                    });
+                Some(
+                    div()
+                        .id("sessions-backdrop")
+                        .occlude()
+                        .absolute()
+                        .inset_0()
+                        .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, _, _, cx| {
+                                this.active_popover = ActivePopover::None;
+                                cx.notify();
+                            }),
+                        )
+                        .child(if self.reduce_motion {
+                            card.into_any_element()
+                        } else {
+                            card.with_animation(
+                                SharedString::from(format!("pop-sess-{epoch}")),
+                                Animation::new(Duration::from_millis(140))
+                                    .with_easing(ease_out_quint()),
+                                |el, t| el.opacity(t).mt(px(-6.0 * (1.0 - t))),
+                            )
+                            .into_any_element()
+                        })
+                        .into_any_element(),
+                )
+            }
             ActivePopover::Budget => {
                 let b = &self.snapshot.daily_budget;
                 let right_off = self.bottom_popover_right_offset();
@@ -9868,7 +10573,7 @@ impl Render for JobHarnessApp {
                                                             this.reader_raw_json = false;
                                                             cx.notify();
                                                         }))
-                                                        .child("Formatted"),
+                                                        .child("Readable"),
                                                 )
                                                 .child(
                                                     div()
@@ -9882,7 +10587,7 @@ impl Render for JobHarnessApp {
                                                         .cursor_pointer()
                                                         .text_size(px(11.0))
                                                         .text_color(if raw_on {
-                                                            theme::lavender()
+                                                            theme::text_primary()
                                                         } else {
                                                             theme::text_muted()
                                                         })
@@ -10080,6 +10785,23 @@ impl Render for JobHarnessApp {
                                     self.md_select_handler(cx),
                                 )
                             }
+                        } else if title.ends_with(".json") {
+                            let code_id = SharedString::from("reader-json-fallback");
+                            let sr = reader_sel.as_ref().and_then(|s| {
+                                if s.block_id == code_id && s.start != s.end {
+                                    Some(s.start.min(s.end)..s.start.max(s.end))
+                                } else {
+                                    None
+                                }
+                            });
+                            markdown::render_syntax_code(
+                                code_id,
+                                &body,
+                                "json",
+                                true,
+                                sr,
+                                self.md_select_handler(cx),
+                            )
                         } else {
                             markdown::render_markdown(
                                 "reader-md",

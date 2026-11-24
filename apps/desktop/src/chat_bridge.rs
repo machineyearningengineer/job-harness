@@ -64,6 +64,18 @@ pub struct AgentOptions {
     /// Ephemeral per-chat session key rotated on New Chat so fresh threads start clean.
     #[serde(skip)]
     pub session_name: Option<String>,
+    /// True only when explicitly resuming an existing host-runtime session by its native ID.
+    #[serde(skip)]
+    pub resume_existing: bool,
+}
+
+/// Read-only handle to a recent session owned by the host agent runtime (zero Job Harness chat DB).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HostSession {
+    pub id: String,
+    pub title: String,
+    pub age_label: String,
+    pub message_count: usize,
 }
 
 /// A selectable model preset discovered from the runtime's own configuration.
@@ -75,22 +87,82 @@ pub struct ModelPreset {
     pub provider_label: Option<String>,
 }
 
-/// Read-only view of a configured MCP server (names and source only — never reads secrets).
+/// Scope of a discovered MCP server: shared across runtimes (e.g. MCPorter) vs pinned to one agent.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum McpScope {
+    Global,
+    AgentOnly(&'static str),
+}
+
+/// Read-only view of a configured MCP server (names and scope only — never reads secrets).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DiscoveredMcpServer {
     pub name: String,
     pub source: String,
+    pub scope: McpScope,
+}
+
+impl DiscoveredMcpServer {
+    /// True when the given active runtime kind (`"hermes"`, `"claude"`, `"codex"`, ...) can see this MCP.
+    pub fn visible_to(&self, runtime_kind: &str) -> bool {
+        match self.scope {
+            McpScope::Global => true,
+            McpScope::AgentOnly(owner) => owner == runtime_kind,
+        }
+    }
+}
+
+/// High-level tool capability status relative to the currently selected agent runtime.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CapabilityAccess {
+    Active { server: String, global: bool },
+    OtherRuntime { server: String, owner: String },
+    NotConnected,
+}
+
+pub fn evaluate_capability(
+    servers: &[DiscoveredMcpServer],
+    active_runtime_kind: &str,
+    keywords: &[&str],
+) -> CapabilityAccess {
+    let matches_kw = |s: &DiscoveredMcpServer| {
+        let low = s.name.to_ascii_lowercase();
+        keywords.iter().any(|kw| low.contains(kw))
+    };
+    if let Some(s) = servers
+        .iter()
+        .find(|s| matches_kw(s) && s.visible_to(active_runtime_kind))
+    {
+        return CapabilityAccess::Active {
+            server: s.name.clone(),
+            global: matches!(s.scope, McpScope::Global),
+        };
+    }
+    if let Some(s) = servers.iter().find(|s| matches_kw(s)) {
+        return CapabilityAccess::OtherRuntime {
+            server: s.name.clone(),
+            owner: s.source.clone(),
+        };
+    }
+    CapabilityAccess::NotConnected
 }
 
 /// Discovers configured MCP servers from standard local agent registries without reading secrets.
 pub fn discover_mcp_servers() -> Vec<DiscoveredMcpServer> {
     let mut out: Vec<DiscoveredMcpServer> = Vec::new();
-    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut seen: std::collections::HashSet<(String, &'static str)> =
+        std::collections::HashSet::new();
 
     if let Ok(custom) = std::env::var("JOB_HARNESS_MCP_CONFIG")
         && !custom.trim().is_empty()
     {
-        read_json_mcp_names(Path::new(&custom), "MCP", &mut out, &mut seen);
+        read_json_mcp_names(
+            Path::new(&custom),
+            "Shared",
+            McpScope::Global,
+            &mut out,
+            &mut seen,
+        );
         return out;
     }
 
@@ -100,16 +172,24 @@ pub fn discover_mcp_servers() -> Vec<DiscoveredMcpServer> {
     read_json_mcp_names(
         &home.join(".mcporter/mcporter.json"),
         "MCPorter",
+        McpScope::Global,
         &mut out,
         &mut seen,
     );
     read_json_mcp_names(
         &home.join(".config/mcporter/mcporter.json"),
         "MCPorter",
+        McpScope::Global,
         &mut out,
         &mut seen,
     );
-    read_json_mcp_names(&home.join(".claude.json"), "Claude", &mut out, &mut seen);
+    read_json_mcp_names(
+        &home.join(".claude.json"),
+        "Claude",
+        McpScope::AgentOnly("claude"),
+        &mut out,
+        &mut seen,
+    );
     if let Ok(toml_txt) = std::fs::read_to_string(home.join(".codex/config.toml")) {
         for line in toml_txt.lines() {
             let t = line.trim();
@@ -117,10 +197,14 @@ pub fn discover_mcp_servers() -> Vec<DiscoveredMcpServer> {
                 && let Some(name) = rest.strip_suffix(']')
             {
                 let clean = name.trim_matches('"').trim();
-                if !clean.is_empty() && !clean.contains('.') && seen.insert(clean.to_owned()) {
+                if !clean.is_empty()
+                    && !clean.contains('.')
+                    && seen.insert((clean.to_owned(), "codex"))
+                {
                     out.push(DiscoveredMcpServer {
                         name: clean.to_owned(),
                         source: "Codex".into(),
+                        scope: McpScope::AgentOnly("codex"),
                     });
                 }
             }
@@ -131,9 +215,10 @@ pub fn discover_mcp_servers() -> Vec<DiscoveredMcpServer> {
 
 fn read_json_mcp_names(
     path: &Path,
-    source: &str,
+    source: &'static str,
+    scope: McpScope,
     out: &mut Vec<DiscoveredMcpServer>,
-    seen: &mut std::collections::HashSet<String>,
+    seen: &mut std::collections::HashSet<(String, &'static str)>,
 ) {
     let Ok(bytes) = std::fs::read(path) else {
         return;
@@ -141,13 +226,18 @@ fn read_json_mcp_names(
     let Ok(val) = serde_json::from_slice::<Value>(&bytes) else {
         return;
     };
+    let scope_key = match scope {
+        McpScope::Global => "global",
+        McpScope::AgentOnly(k) => k,
+    };
     for key in ["mcpServers", "servers"] {
         if let Some(obj) = val.get(key).and_then(Value::as_object) {
             for name in obj.keys() {
-                if seen.insert(name.clone()) {
+                if seen.insert((name.clone(), scope_key)) {
                     out.push(DiscoveredMcpServer {
                         name: name.clone(),
                         source: source.to_owned(),
+                        scope,
                     });
                 }
             }
@@ -342,6 +432,24 @@ impl AgentRuntime {
         }
     }
 
+    /// True when this runtime maintains a native session store we can list read-only and resume.
+    pub fn supports_sessions(&self) -> bool {
+        matches!(
+            self,
+            Self::Hermes { .. } | Self::ClaudeCode { .. } | Self::Codex { .. }
+        )
+    }
+
+    /// Reads the last ~8 recent sessions directly from the host runtime's own store (zero Job Harness DB).
+    pub fn list_recent_sessions(&self, workspace: Option<&Path>) -> Vec<HostSession> {
+        match self {
+            Self::Hermes { profile, .. } => list_hermes_sessions(profile),
+            Self::ClaudeCode { .. } => list_claude_sessions(workspace),
+            Self::Codex { .. } => list_codex_sessions(),
+            Self::Custom { .. } | Self::Unconfigured => Vec::new(),
+        }
+    }
+
     pub fn is_ready(&self) -> bool {
         !matches!(self, Self::Unconfigured)
     }
@@ -406,10 +514,12 @@ fn run_streaming(
                 "-Q",
                 "--format",
                 "stream-json",
-                "--continue",
-                session_key,
-                "--create-if-missing",
             ]);
+            if opts.resume_existing {
+                c.args(["--resume", session_key]);
+            } else {
+                c.args(["--continue", session_key, "--create-if-missing"]);
+            }
             if let Some(dir) = workspace {
                 c.arg("--in").arg(dir);
             }
@@ -435,12 +545,18 @@ fn run_streaming(
             let mut c = Command::new(binary);
             c.args([
                 "-p",
-                "--continue",
                 "--verbose",
                 "--output-format",
                 "stream-json",
                 "--include-partial-messages",
             ]);
+            if opts.resume_existing
+                && let Some(sid) = opts.session_name.as_deref().filter(|s| !s.is_empty())
+            {
+                c.args(["--resume", sid]);
+            } else {
+                c.arg("--continue");
+            }
             if let Some(m) = opts.model.as_deref().filter(|m| !m.is_empty()) {
                 c.args(["--model", m]);
             }
@@ -458,7 +574,13 @@ fn run_streaming(
         }
         AgentRuntime::Codex { binary } => {
             let mut c = Command::new(binary);
-            c.args(["exec", "--json"]);
+            if opts.resume_existing
+                && let Some(sid) = opts.session_name.as_deref().filter(|s| !s.is_empty())
+            {
+                c.args(["exec", "resume", sid, "--json"]);
+            } else {
+                c.args(["exec", "--json"]);
+            }
             if let Some(m) = opts.model.as_deref().filter(|m| !m.is_empty()) {
                 c.args(["-m", m]);
             }
@@ -1373,4 +1495,170 @@ mod preset_tests {
         assert_eq!(presets[1].model.as_deref(), Some("m-local"));
         assert_eq!(presets[1].provider.as_deref(), Some("local"));
     }
+}
+
+fn format_relative_age(epoch_secs: f64) -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(epoch_secs);
+    let diff = (now - epoch_secs).max(0.0) as u64;
+    if diff < 60 {
+        "just now".into()
+    } else if diff < 3600 {
+        format!("{}m ago", diff / 60)
+    } else if diff < 86_400 {
+        format!("{}h ago", diff / 3600)
+    } else {
+        format!("{}d ago", diff / 86_400)
+    }
+}
+
+fn clean_session_title(raw: &str) -> String {
+    let line = raw
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .unwrap_or("Untitled session");
+    let chars: Vec<char> = line.chars().collect();
+    if chars.len() > 54 {
+        format!("{}…", chars[..53].iter().collect::<String>())
+    } else {
+        line.to_owned()
+    }
+}
+
+fn list_hermes_sessions(profile: &str) -> Vec<HostSession> {
+    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+        return Vec::new();
+    };
+    let db = home.join(".hermes/profiles").join(profile).join("state.db");
+    if !db.is_file() {
+        return Vec::new();
+    }
+    let sql = "SELECT s.id, COALESCE(NULLIF((SELECT m.content FROM messages m WHERE m.session_id = s.id AND m.role = 'user' ORDER BY m.id ASC LIMIT 1), ''), s.title, s.id) AS label, s.started_at, COALESCE(s.message_count, 0) AS mc FROM sessions s WHERE COALESCE(s.message_count, 0) > 0 AND COALESCE(s.title, '') NOT LIKE '[bot:%' ORDER BY COALESCE(s.last_activity_at, s.started_at) DESC LIMIT 8;";
+    let Ok(out) = Command::new("sqlite3")
+        .arg("-readonly")
+        .arg("-json")
+        .arg(&db)
+        .arg(sql)
+        .output()
+    else {
+        return Vec::new();
+    };
+    if !out.status.success() {
+        return Vec::new();
+    }
+    let Ok(rows) = serde_json::from_slice::<Vec<Value>>(&out.stdout) else {
+        return Vec::new();
+    };
+    rows.into_iter()
+        .filter_map(|r| {
+            let id = r["id"].as_str()?.to_owned();
+            let title = clean_session_title(r["label"].as_str().unwrap_or(&id));
+            let started = r["started_at"].as_f64().unwrap_or(0.0);
+            let mc = r["mc"].as_u64().unwrap_or(0) as usize;
+            Some(HostSession {
+                id,
+                title,
+                age_label: format_relative_age(started),
+                message_count: mc,
+            })
+        })
+        .collect()
+}
+
+fn list_claude_sessions(workspace: Option<&Path>) -> Vec<HostSession> {
+    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+        return Vec::new();
+    };
+    let projects_dir = home.join(".claude/projects");
+    let target_dir = if let Some(ws) = workspace {
+        let encoded = ws.to_string_lossy().replace('/', "-");
+        let candidate = projects_dir.join(encoded);
+        if candidate.is_dir() {
+            candidate
+        } else {
+            return Vec::new();
+        }
+    } else {
+        return Vec::new();
+    };
+    collect_jsonl_sessions(&target_dir, 8)
+}
+
+fn list_codex_sessions() -> Vec<HostSession> {
+    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+        return Vec::new();
+    };
+    let root = home.join(".codex/sessions");
+    if !root.is_dir() {
+        return Vec::new();
+    }
+    collect_jsonl_sessions(&root, 8)
+}
+
+fn collect_jsonl_sessions(dir: &Path, limit: usize) -> Vec<HostSession> {
+    let mut files: Vec<(f64, PathBuf)> = Vec::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(cur) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&cur) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let p = entry.path();
+            if p.is_dir() {
+                stack.push(p);
+            } else if p.extension().and_then(|e| e.to_str()) == Some("jsonl")
+                && let Ok(meta) = entry.metadata()
+                && let Ok(mtime) = meta.modified()
+                && let Ok(dur) = mtime.duration_since(std::time::UNIX_EPOCH)
+            {
+                files.push((dur.as_secs_f64(), p));
+            }
+        }
+    }
+    files.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+    files
+        .into_iter()
+        .take(limit)
+        .filter_map(|(ts, path)| {
+            let id = path.file_stem()?.to_str()?.to_owned();
+            let text = std::fs::read_to_string(&path).ok()?;
+            let mut preview = None;
+            let mut count = 0usize;
+            for line in text.lines().take(60) {
+                if let Ok(v) = serde_json::from_str::<Value>(line) {
+                    let is_user = v["type"].as_str() == Some("user")
+                        || v["role"].as_str() == Some("user")
+                        || v.pointer("/payload/role").and_then(Value::as_str) == Some("user");
+                    if is_user {
+                        count += 1;
+                        if preview.is_none() {
+                            let msg = v
+                                .pointer("/message/content")
+                                .or_else(|| v.get("content"))
+                                .or_else(|| v.pointer("/payload/content"))
+                                .and_then(|c| {
+                                    c.as_str().or_else(|| {
+                                        c.as_array()
+                                            .and_then(|arr| arr.first())
+                                            .and_then(|x| x["text"].as_str())
+                                    })
+                                });
+                            if let Some(m) = msg.filter(|s| !s.trim().is_empty()) {
+                                preview = Some(clean_session_title(m));
+                            }
+                        }
+                    }
+                }
+            }
+            Some(HostSession {
+                title: preview.unwrap_or_else(|| id.clone()),
+                id,
+                age_label: format_relative_age(ts),
+                message_count: count,
+            })
+        })
+        .collect()
 }

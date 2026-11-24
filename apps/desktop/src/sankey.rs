@@ -1,8 +1,8 @@
-//! Museum-grade interactive native GPUI Sankey funnel view.
-//! - Razor-thin 3px architectural node pins with crisp optical separation from ribbons
-//! - Exact cubic-Bezier per-ribbon hit testing (hover/click directly on curved flows!)
-//! - Non-overlapping labels (middle column labels anchored cleanly above/below pins)
-//! - Floating scrollable drill-down popover with smooth entrance animation & instant exit
+//! Interactive native GPUI Sankey funnel view.
+//! - Clear, unambiguous stages: All roles -> Applied / Saved -> Offer, Interviews, Screening, No response, Closed
+//! - Two clean modes: Surface Overview (collapsed parents with `›`) vs Expand all (every sub-tree unfolded)
+//! - Unambiguous tap rule: nodes with `›` zoom into their child tree with breadcrumbs; leaf nodes open a scrollable role popover
+//! - Smooth zoom in/out (`−` / `100%` / `+`), 3px hairline pins, exact per-ribbon Bezier hover hit-testing
 use crate::{theme, transport::RoleCard};
 use gpui::{
     Animation, AnimationExt, AnyElement, Bounds, Context, FontWeight, InteractiveElement,
@@ -16,13 +16,14 @@ use std::{cell::RefCell, rc::Rc, time::Duration};
 pub enum SankeyBucket {
     Total,
     Saved,
-    Submitted,
-    Awaiting,
+    AppliedAll,
+    NoResponse,
     Screening,
     Interviews,
     Technical,
     FinalRound,
     Offer,
+    ClosedAll,
     Rejected,
     Withdrawn,
     ClosedOther,
@@ -33,40 +34,41 @@ impl SankeyBucket {
         match self {
             Self::Total => "All roles",
             Self::Saved => "Saved",
-            Self::Submitted => "Submitted",
-            Self::Awaiting => "Applied",
+            Self::AppliedAll => "Applied",
+            Self::NoResponse => "No response",
             Self::Screening => "Screening",
             Self::Interviews => "Interviews",
             Self::Technical => "Technical",
             Self::FinalRound => "Final",
             Self::Offer => "Offer",
+            Self::ClosedAll => "Closed",
             Self::Rejected => "Rejected",
             Self::Withdrawn => "Withdrawn",
-            Self::ClosedOther => "Archived",
+            Self::ClosedOther => "Other closed",
         }
     }
 
-    /// Refined, high-contrast Linear/Stripe-inspired dark-mode palette.
     pub fn color(self) -> gpui::Rgba {
         match self {
             Self::Total => rgba(0xe4e4e7ff),
             Self::Saved => rgba(0x94a3b8ff),
-            Self::Submitted => rgba(0x7dd3fcff),
-            Self::Awaiting => rgba(0x38bdf8ff),
+            Self::AppliedAll => rgba(0x7dd3fcff),
+            Self::NoResponse => rgba(0x38bdf8ff),
             Self::Screening => rgba(0x818cf8ff),
             Self::Interviews => rgba(0xfbbf24ff),
             Self::Technical => rgba(0xf59e0bff),
             Self::FinalRound => rgba(0xfde047ff),
             Self::Offer => rgba(0x34d399ff),
+            Self::ClosedAll => rgba(0xa1a1aaff),
             Self::Rejected => rgba(0xfb7185ff),
-            Self::Withdrawn => rgba(0xa1a1aaff),
+            Self::Withdrawn => rgba(0x94a3b8ff),
             Self::ClosedOther => rgba(0x71717aff),
         }
     }
 
-    /// True when tapping this node zooms into a focused child-stage Sankey with breadcrumbs.
+    /// True when tapping this node in Overview mode zooms into its child Sankey tree.
     pub fn has_children(self) -> bool {
-        matches!(self, Self::Submitted | Self::Interviews)
+        matches!(self, Self::AppliedAll | Self::Interviews | Self::ClosedAll)
     }
 
     fn with_alpha(self, alpha: u8) -> gpui::Rgba {
@@ -92,14 +94,18 @@ pub fn classify_card_leaf(card: &RoleCard) -> SankeyBucket {
         }
     } else if card.stage == "offer" {
         SankeyBucket::Offer
-    } else if matches!(card.stage.as_str(), "technical" | "final") || card.column == "Interviews" {
+    } else if card.stage == "technical" {
+        SankeyBucket::Technical
+    } else if card.stage == "final" {
+        SankeyBucket::FinalRound
+    } else if card.column == "Interviews" {
         SankeyBucket::Interviews
     } else if matches!(card.stage.as_str(), "screening" | "introduction")
         || card.column == "Screening"
     {
         SankeyBucket::Screening
     } else if card.stage == "applied" || card.column == "Applied" {
-        SankeyBucket::Awaiting
+        SankeyBucket::NoResponse
     } else {
         SankeyBucket::Saved
     }
@@ -109,9 +115,15 @@ pub fn matches_bucket(card: &RoleCard, bucket: SankeyBucket) -> bool {
     let leaf = classify_card_leaf(card);
     match bucket {
         SankeyBucket::Total => true,
-        SankeyBucket::Submitted => leaf != SankeyBucket::Saved,
-        SankeyBucket::Technical => card.stage == "technical",
-        SankeyBucket::FinalRound => card.stage == "final",
+        SankeyBucket::AppliedAll => leaf != SankeyBucket::Saved,
+        SankeyBucket::Interviews => matches!(
+            leaf,
+            SankeyBucket::Interviews | SankeyBucket::Technical | SankeyBucket::FinalRound
+        ),
+        SankeyBucket::ClosedAll => matches!(
+            leaf,
+            SankeyBucket::Rejected | SankeyBucket::Withdrawn | SankeyBucket::ClosedOther
+        ),
         other => leaf == other,
     }
 }
@@ -137,12 +149,10 @@ struct RibbonGeom {
 }
 
 impl RibbonGeom {
-    /// Evaluates the cubic Bezier ribbon's vertical span `[top, bot]` at screen `x`.
     fn y_span_at(&self, x: f32) -> Option<(f32, f32)> {
         if x < self.x0 || x > self.x1 || (self.x1 - self.x0) < 1.0 {
             return None;
         }
-        // Horizontal midpoint Bezier has smooth S-curve easing S(u) = 3u^2 - 2u^3
         let u = ((x - self.x0) / (self.x1 - self.x0)).clamp(0.0, 1.0);
         let s = u * u * (3.0 - 2.0 * u);
         let top = self.y0_top + (self.y1_top - self.y0_top) * s;
@@ -192,23 +202,22 @@ fn build_ribbons(
     col0: &[NodeGeom],
     col1: &[NodeGeom],
     col2: &[NodeGeom],
-    zoom_root: Option<SankeyBucket>,
+    two_col: bool,
 ) -> (f32, f32, f32, Vec<RibbonGeom>) {
     let w: f32 = bounds.size.width.into();
     let ox: f32 = bounds.origin.x.into();
     let oy: f32 = bounds.origin.y.into();
     let pin_w = 3.0_f32;
     let gap_x = 3.0_f32;
-    let x_col0 = ox + 108.0;
+    let x_col0 = ox + 112.0;
     let x_col1 = ox + w * 0.42;
-    let x_col2 = ox + w - 186.0;
+    let x_col2 = ox + w - 196.0;
     let mut ribbons: Vec<RibbonGeom> = Vec::new();
-    if w < 220.0 {
+    if w < 240.0 {
         return (x_col0, x_col1, x_col2, ribbons);
     }
 
-    // Zoomed 2-column mode (parent -> children directly!)
-    if zoom_root.is_some() {
+    if two_col {
         if let Some(root) = col0.first() {
             let mut src_y = oy + root.y;
             let leaf_sum = col2.iter().map(|n| n.count).sum::<usize>().max(1);
@@ -251,12 +260,12 @@ fn build_ribbons(
         }
     }
 
-    if let Some(sub_node) = col1.iter().find(|n| n.bucket == SankeyBucket::Submitted) {
-        let mut src_y = oy + sub_node.y;
-        let sub_sum = col2.iter().map(|n| n.count).sum::<usize>().max(1);
+    if let Some(app_node) = col1.iter().find(|n| n.bucket == SankeyBucket::AppliedAll) {
+        let mut src_y = oy + app_node.y;
+        let app_sum = col2.iter().map(|n| n.count).sum::<usize>().max(1);
         for target in col2 {
-            let frac = target.count as f32 / sub_sum as f32;
-            let band_h = sub_node.h * frac;
+            let frac = target.count as f32 / app_sum as f32;
+            let band_h = app_node.h * frac;
             ribbons.push(RibbonGeom {
                 target: target.bucket,
                 is_stage0: false,
@@ -273,77 +282,99 @@ fn build_ribbons(
     (x_col0, x_col1, x_col2, ribbons)
 }
 
-/// Renders the full-canvas interactive Sankey funnel with exact per-ribbon hover,
-/// hairline 3px pins, hierarchical parent->child zoom with breadcrumbs, and a sleek
-/// scrollable floating drill-down popover.
 #[allow(clippy::too_many_arguments)]
 pub fn render_sankey_view<V: 'static>(
     cards: &[RoleCard],
     zoom_root: Option<SankeyBucket>,
+    expand_all: bool,
+    zoom_scale: f32,
     selected: Option<SankeyBucket>,
     hovered: Option<SankeyBucket>,
     anim_epoch: u64,
     reduce_motion: bool,
     on_hover: impl Fn(Option<SankeyBucket>, &mut V, &mut Window, &mut Context<V>) + Clone + 'static,
     on_zoom: impl Fn(Option<SankeyBucket>, &mut V, &mut Window, &mut Context<V>) + Clone + 'static,
+    on_expand_all: impl Fn(bool, &mut V, &mut Window, &mut Context<V>) + Clone + 'static,
+    on_scale: impl Fn(f32, &mut V, &mut Window, &mut Context<V>) + Clone + 'static,
     on_select: impl Fn(Option<SankeyBucket>, &mut V, &mut Window, &mut Context<V>) + Clone + 'static,
     on_open_role: impl Fn(RoleCard, &mut V, &mut Window, &mut Context<V>) + Clone + 'static,
     cx: &mut Context<V>,
 ) -> AnyElement {
     let total = cards.len();
     let mut saved = 0usize;
-    let mut awaiting = 0usize;
+    let mut no_response = 0usize;
     let mut screening = 0usize;
-    let mut interviews = 0usize;
     let mut technical = 0usize;
     let mut final_round = 0usize;
+    let mut other_interviews = 0usize;
     let mut offer = 0usize;
     let mut rejected = 0usize;
     let mut withdrawn = 0usize;
     let mut closed_other = 0usize;
 
     for c in cards {
-        if c.stage == "technical" {
-            technical += 1;
-        } else if c.stage == "final" {
-            final_round += 1;
-        }
         match classify_card_leaf(c) {
             SankeyBucket::Saved => saved += 1,
-            SankeyBucket::Awaiting => awaiting += 1,
+            SankeyBucket::NoResponse => no_response += 1,
             SankeyBucket::Screening => screening += 1,
-            SankeyBucket::Interviews => interviews += 1,
+            SankeyBucket::Technical => technical += 1,
+            SankeyBucket::FinalRound => final_round += 1,
+            SankeyBucket::Interviews => other_interviews += 1,
             SankeyBucket::Offer => offer += 1,
             SankeyBucket::Rejected => rejected += 1,
             SankeyBucket::Withdrawn => withdrawn += 1,
             SankeyBucket::ClosedOther => closed_other += 1,
-            SankeyBucket::Total
-            | SankeyBucket::Submitted
-            | SankeyBucket::Technical
-            | SankeyBucket::FinalRound => {}
+            SankeyBucket::Total | SankeyBucket::AppliedAll | SankeyBucket::ClosedAll => {}
         }
     }
-    let submitted = total.saturating_sub(saved);
+    let interviews = technical + final_round + other_interviews;
+    let closed_all = rejected + withdrawn + closed_other;
+    let applied_all = total.saturating_sub(saved);
     let focus_bucket = hovered.or(selected);
+
+    let effective_scale = zoom_scale.clamp(0.75, 1.45);
+    let diagram_h = (430.0 * effective_scale).clamp(320.0, 620.0);
+    let top_pad = 34.0_f32;
+    let two_col = zoom_root.is_some();
+
     let denom = match zoom_root {
         Some(SankeyBucket::Interviews) => interviews.max(1),
-        Some(SankeyBucket::Submitted) | None => submitted.max(1),
+        Some(SankeyBucket::ClosedAll) => closed_all.max(1),
+        Some(SankeyBucket::AppliedAll) | None => applied_all.max(1),
         _ => total.max(1),
     };
 
-    let diagram_h = 440.0_f32;
-    let top_pad = 34.0_f32;
+    let leaf_items_applied: Vec<(SankeyBucket, usize)> = if expand_all {
+        vec![
+            (SankeyBucket::Offer, offer),
+            (SankeyBucket::FinalRound, final_round),
+            (SankeyBucket::Technical, technical),
+            (SankeyBucket::Screening, screening),
+            (SankeyBucket::NoResponse, no_response),
+            (SankeyBucket::Rejected, rejected),
+            (SankeyBucket::Withdrawn, withdrawn),
+            (SankeyBucket::ClosedOther, closed_other),
+        ]
+    } else {
+        vec![
+            (SankeyBucket::Offer, offer),
+            (SankeyBucket::Interviews, interviews),
+            (SankeyBucket::Screening, screening),
+            (SankeyBucket::NoResponse, no_response),
+            (SankeyBucket::ClosedAll, closed_all),
+        ]
+    };
 
     let (col0, col1, col2) = match zoom_root {
         Some(SankeyBucket::Interviews) => {
             let c0: Vec<NodeGeom> = layout_column(
                 &[(SankeyBucket::Interviews, interviews)],
-                diagram_h * 0.60,
+                diagram_h * 0.58,
                 16.0,
             )
             .into_iter()
             .map(|mut n| {
-                n.y += diagram_h * 0.20;
+                n.y += diagram_h * 0.21;
                 n
             })
             .collect();
@@ -363,9 +394,38 @@ pub fn render_sankey_view<V: 'static>(
             .collect();
             (c0, Vec::new(), c2)
         }
-        Some(SankeyBucket::Submitted) => {
+        Some(SankeyBucket::ClosedAll) => {
             let c0: Vec<NodeGeom> = layout_column(
-                &[(SankeyBucket::Submitted, submitted)],
+                &[(SankeyBucket::ClosedAll, closed_all)],
+                diagram_h * 0.66,
+                16.0,
+            )
+            .into_iter()
+            .map(|mut n| {
+                n.y += diagram_h * 0.17;
+                n
+            })
+            .collect();
+            let c2: Vec<NodeGeom> = layout_column(
+                &[
+                    (SankeyBucket::Rejected, rejected),
+                    (SankeyBucket::Withdrawn, withdrawn),
+                    (SankeyBucket::ClosedOther, closed_other),
+                ],
+                diagram_h * 0.78,
+                22.0,
+            )
+            .into_iter()
+            .map(|mut n| {
+                n.y += diagram_h * 0.11;
+                n
+            })
+            .collect();
+            (c0, Vec::new(), c2)
+        }
+        Some(SankeyBucket::AppliedAll) => {
+            let c0: Vec<NodeGeom> = layout_column(
+                &[(SankeyBucket::AppliedAll, applied_all)],
                 diagram_h * 0.78,
                 16.0,
             )
@@ -375,19 +435,7 @@ pub fn render_sankey_view<V: 'static>(
                 n
             })
             .collect();
-            let c2 = layout_column(
-                &[
-                    (SankeyBucket::Offer, offer),
-                    (SankeyBucket::Interviews, interviews),
-                    (SankeyBucket::Screening, screening),
-                    (SankeyBucket::Awaiting, awaiting),
-                    (SankeyBucket::Rejected, rejected),
-                    (SankeyBucket::Withdrawn, withdrawn),
-                    (SankeyBucket::ClosedOther, closed_other),
-                ],
-                diagram_h,
-                14.0,
-            );
+            let c2 = layout_column(&leaf_items_applied, diagram_h, 14.0);
             (c0, Vec::new(), c2)
         }
         _ => {
@@ -401,7 +449,7 @@ pub fn render_sankey_view<V: 'static>(
                     .collect();
             let c1: Vec<NodeGeom> = layout_column(
                 &[
-                    (SankeyBucket::Submitted, submitted),
+                    (SankeyBucket::AppliedAll, applied_all),
                     (SankeyBucket::Saved, saved),
                 ],
                 diagram_h * 0.84,
@@ -413,20 +461,19 @@ pub fn render_sankey_view<V: 'static>(
                 n
             })
             .collect();
-            let c2 = layout_column(
-                &[
-                    (SankeyBucket::Offer, offer),
-                    (SankeyBucket::Interviews, interviews),
-                    (SankeyBucket::Screening, screening),
-                    (SankeyBucket::Awaiting, awaiting),
-                    (SankeyBucket::Rejected, rejected),
-                    (SankeyBucket::Withdrawn, withdrawn),
-                    (SankeyBucket::ClosedOther, closed_other),
-                ],
-                diagram_h,
-                14.0,
-            );
+            let c2 = layout_column(&leaf_items_applied, diagram_h, 14.0);
             (c0, c1, c2)
+        }
+    };
+
+    let can_zoom_bucket = move |b: SankeyBucket| -> bool {
+        if zoom_root == Some(b) {
+            return false;
+        }
+        if expand_all {
+            b == SankeyBucket::AppliedAll
+        } else {
+            b.has_children()
         }
     };
 
@@ -445,30 +492,28 @@ pub fn render_sankey_view<V: 'static>(
             let pin_w = 3.0_f32;
             let oy: f32 = bounds.origin.y.into();
             let (x_col0, x_col1, x_col2, ribbons) =
-                build_ribbons(bounds, &col0_paint, &col1_paint, &col2_paint, zoom_root);
+                build_ribbons(bounds, &col0_paint, &col1_paint, &col2_paint, two_col);
             if ribbons.is_empty() {
                 return;
             }
 
-            // Paint smooth cubic-Bezier ribbons with per-path contrast & luminous highlight
             for r in &ribbons {
                 let is_direct = sel_paint == Some(r.target);
                 let is_ancestor = r.is_stage0
-                    && r.target == SankeyBucket::Submitted
+                    && r.target == SankeyBucket::AppliedAll
                     && sel_paint.is_some_and(|s| {
                         !matches!(
                             s,
-                            SankeyBucket::Total | SankeyBucket::Saved | SankeyBucket::Submitted
+                            SankeyBucket::Total | SankeyBucket::Saved | SankeyBucket::AppliedAll
                         )
                     });
-                let is_descendant = !r.is_stage0 && sel_paint == Some(SankeyBucket::Submitted);
+                let is_descendant = !r.is_stage0 && sel_paint == Some(SankeyBucket::AppliedAll);
                 let lit = is_direct || is_descendant;
                 let dimmed = sel_paint.is_some()
                     && sel_paint != Some(SankeyBucket::Total)
                     && !lit
                     && !is_ancestor;
 
-                // Pick the color: when hovering a specific leaf, tint the upstream trunk subtly too!
                 let tint_bucket = if is_ancestor {
                     sel_paint.unwrap_or(r.target)
                 } else {
@@ -476,7 +521,6 @@ pub fn render_sankey_view<V: 'static>(
                 };
                 let mid_x = (r.x0 + r.x1) * 0.5;
 
-                // Soft luminous halo ONLY on actively highlighted ribbon
                 if lit {
                     let halo = 3.5_f32;
                     let mut gp = PathBuilder::fill();
@@ -498,7 +542,6 @@ pub fn render_sankey_view<V: 'static>(
                     }
                 }
 
-                // Main sculpted Bezier ribbon
                 let mut pb = PathBuilder::fill();
                 pb.move_to(point(px(r.x0), px(r.y0_top)));
                 pb.cubic_bezier_to(
@@ -521,7 +564,6 @@ pub fn render_sankey_view<V: 'static>(
                     } else if dimmed {
                         0x0d
                     } else if r.is_stage0 {
-                        // Keep the wide upstream trunk understated so the colored branches sing!
                         0x1b
                     } else {
                         0x32
@@ -529,7 +571,6 @@ pub fn render_sankey_view<V: 'static>(
                     window.paint_path(path, tint_bucket.with_alpha(alpha));
                 }
 
-                // Razor-sharp 1px top/bottom highlight edge for optical definition
                 if lit || !dimmed {
                     let edge_a = if lit {
                         0xaa
@@ -551,7 +592,6 @@ pub fn render_sankey_view<V: 'static>(
                 }
             }
 
-            // Razor-thin 3px architectural node pins (crisp, never bulky!)
             for (x_pos, nodes) in [
                 (x_col0, &col0_paint),
                 (x_col1, &col1_paint),
@@ -561,7 +601,7 @@ pub fn render_sankey_view<V: 'static>(
                     let active = sel_paint.is_none()
                         || sel_paint == Some(SankeyBucket::Total)
                         || sel_paint == Some(n.bucket)
-                        || (n.bucket == SankeyBucket::Submitted
+                        || (n.bucket == SankeyBucket::AppliedAll
                             && sel_paint.is_some_and(|s| s != SankeyBucket::Saved));
                     if sel_paint == Some(n.bucket) {
                         let aura = Bounds::new(
@@ -589,7 +629,6 @@ pub fn render_sankey_view<V: 'static>(
     .w_full()
     .h(px(diagram_h));
 
-    // Exact per-ribbon mouse hit testing directly on the Sankey canvas!
     let hit_bounds_move = shared_bounds.clone();
     let col0_mv = col0.clone();
     let col1_mv = col1.clone();
@@ -612,8 +651,7 @@ pub fn render_sankey_view<V: 'static>(
         let mx: f32 = pos.x.into();
         let my: f32 = pos.y.into();
         let oy: f32 = bounds.origin.y.into();
-        let (x0, x1, x2, ribbons) = build_ribbons(bounds, c0, c1, c2, zoom_root);
-        // Check leaf/mid/root pins first (generous 12px horizontal grab zone)
+        let (x0, x1, x2, ribbons) = build_ribbons(bounds, c0, c1, c2, two_col);
         for (px_x, nodes) in [(x2, c2), (x1, c1), (x0, c0)] {
             if (mx - px_x).abs() <= 10.0 {
                 for n in nodes {
@@ -623,7 +661,6 @@ pub fn render_sankey_view<V: 'static>(
                 }
             }
         }
-        // Check curved ribbons directly!
         for r in ribbons.iter().rev() {
             if let Some((top, bot)) = r.y_span_at(mx)
                 && my >= top - 2.0
@@ -657,7 +694,7 @@ pub fn render_sankey_view<V: 'static>(
                     .borrow()
                     .and_then(|b| hit_test(ev.position, b, &col0_cl, &col1_cl, &col2_cl));
                 if let Some(bucket) = hit {
-                    if bucket.has_children() && zoom_root != Some(bucket) {
+                    if can_zoom_bucket(bucket) {
                         on_zoom_canvas(Some(bucket), this, window, cx);
                     } else if bucket == SankeyBucket::Total {
                         on_zoom_canvas(None, this, window, cx);
@@ -675,14 +712,13 @@ pub fn render_sankey_view<V: 'static>(
             }),
         )
         .child(ribbon_canvas)
-        // Column 0 root label cleanly to the left of the hairline pin
         .children(col0.iter().map(|n| {
             let on_zm = on_zoom.clone();
             div()
                 .id("sk-n0-root")
                 .absolute()
                 .left(px(4.0))
-                .w(px(92.0))
+                .w(px(96.0))
                 .top(px(top_pad + n.y + (n.h * 0.5) - 18.0))
                 .cursor_pointer()
                 .flex()
@@ -705,15 +741,15 @@ pub fn render_sankey_view<V: 'static>(
                         .child(n.bucket.label()),
                 )
         }))
-        // Column 1 labels anchored cleanly ABOVE Submitted pin and BELOW Saved pin (zero ribbon collision!)
         .children(col1.iter().map(|n| {
             let b = n.bucket;
             let is_sel = selected == Some(b);
             let is_hl = focus_bucket == Some(b);
+            let zoomable = can_zoom_bucket(b);
             let on_sel = on_select.clone();
             let on_zm = on_zoom.clone();
             let on_hov = on_hover.clone();
-            let y_pos = if b == SankeyBucket::Submitted {
+            let y_pos = if b == SankeyBucket::AppliedAll {
                 (top_pad + n.y - 24.0).max(4.0)
             } else {
                 top_pad + n.y + n.h + 6.0
@@ -736,7 +772,7 @@ pub fn render_sankey_view<V: 'static>(
                     on_hov(if *h { Some(b) } else { None }, this, window, cx);
                 }))
                 .on_click(cx.listener(move |this, _, window, cx| {
-                    if b.has_children() {
+                    if zoomable {
                         on_zm(Some(b), this, window, cx);
                     } else {
                         let next = if is_sel { None } else { Some(b) };
@@ -764,12 +800,20 @@ pub fn render_sankey_view<V: 'static>(
                         .text_color(theme::text_muted())
                         .child(n.count.to_string()),
                 )
+                .when(zoomable, |r| {
+                    r.child(
+                        div()
+                            .text_size(px(11.0))
+                            .text_color(theme::text_muted())
+                            .child("›"),
+                    )
+                })
         }))
-        // Column 2 labels cleanly to the right of the hairline pins
         .children(col2.iter().map(|n| {
             let b = n.bucket;
             let is_sel = selected == Some(b);
             let is_hl = focus_bucket == Some(b);
+            let zoomable = can_zoom_bucket(b);
             let on_sel = on_select.clone();
             let on_zm = on_zoom.clone();
             let on_hov = on_hover.clone();
@@ -778,7 +822,7 @@ pub fn render_sankey_view<V: 'static>(
                 .id(SharedString::from(format!("sk-n2-{}", b.label())))
                 .absolute()
                 .right(px(8.0))
-                .w(px(166.0))
+                .w(px(176.0))
                 .top(px(top_pad + n.y))
                 .h(px(n.h))
                 .px(px(8.0))
@@ -793,7 +837,7 @@ pub fn render_sankey_view<V: 'static>(
                     on_hov(if *h { Some(b) } else { None }, this, window, cx);
                 }))
                 .on_click(cx.listener(move |this, _, window, cx| {
-                    if b.has_children() && zoom_root != Some(b) {
+                    if zoomable {
                         on_zm(Some(b), this, window, cx);
                     } else {
                         let next = if is_sel { None } else { Some(b) };
@@ -820,7 +864,7 @@ pub fn render_sankey_view<V: 'static>(
                                 })
                                 .child(b.label()),
                         )
-                        .when(b.has_children() && zoom_root != Some(b), |r| {
+                        .when(zoomable, |r| {
                             r.child(
                                 div()
                                     .text_size(px(11.0))
@@ -860,7 +904,7 @@ pub fn render_sankey_view<V: 'static>(
         stage_interactive
             .with_animation(
                 SharedString::from(format!("sankey-enter-{anim_epoch}")),
-                Animation::new(Duration::from_millis(260)).with_easing(ease_out_quint()),
+                Animation::new(Duration::from_millis(240)).with_easing(ease_out_quint()),
                 |el, t| el.opacity(t).mt(px(10.0 * (1.0 - t))),
             )
             .into_any_element()
@@ -876,6 +920,13 @@ pub fn render_sankey_view<V: 'static>(
         })
         .unwrap_or_default();
 
+    let on_exp_ov = on_expand_all.clone();
+    let on_exp_full = on_expand_all;
+    let on_sc_out = on_scale.clone();
+    let on_sc_reset = on_scale.clone();
+    let on_sc_in = on_scale;
+    let scale_pct = (effective_scale * 100.0).round() as i32;
+
     div()
         .id("sankey-flow-view")
         .relative()
@@ -885,107 +936,25 @@ pub fn render_sankey_view<V: 'static>(
         .overflow_hidden()
         .flex()
         .flex_col()
-        .justify_center()
-        // Clean breadcrumb bar (only appears when zoomed into a parent branch!)
-        .when_some(zoom_root, |d, zr| {
-            let on_back = on_zoom.clone();
-            d.child(
-                div()
-                    .absolute()
-                    .top_1()
-                    .left_1()
-                    .flex()
-                    .items_center()
-                    .gap(px(6.0))
-                    .text_xs()
-                    .child(
-                        div()
-                            .id("sk-crumb-root")
-                            .px(px(6.0))
-                            .py(px(2.0))
-                            .rounded(px(5.0))
-                            .hover(|s| s.bg(theme::row_hover()).text_color(theme::text_primary()))
-                            .cursor_pointer()
-                            .text_color(theme::text_muted())
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                on_back(None, this, window, cx);
-                            }))
-                            .child("← All roles"),
-                    )
-                    .child(div().text_color(theme::text_muted()).child("›"))
-                    .child(
-                        div()
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(zr.color())
-                            .child(zr.label()),
-                    ),
-            )
-        })
-        .child(animated_stage)
-        // Floating scrollable drill-down popover (keeps full Sankey calm behind it!)
-        .when_some(selected, |d, active_bucket| {
-            let on_close = on_select.clone();
-            let pct = if submitted > 0
-                && !matches!(active_bucket, SankeyBucket::Total | SankeyBucket::Saved)
-            {
-                Some(((drill_cards.len() as f32 / submitted as f32) * 100.0).round() as usize)
-            } else {
-                None
-            };
-            let card = div()
-                .id("sankey-drill-popover")
-                .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                    cx.stop_propagation();
-                })
-                .w(px(360.0))
-                .max_h(px(340.0))
-                .rounded(px(12.0))
-                .bg(theme::popover_glass())
-                .border_1()
-                .border_color(theme::hairline_strong())
-                .shadow_lg()
-                .overflow_hidden()
+        // Quiet top controls: Breadcrumbs (when zoomed) + Overview / Expand all + Zoom − / 100% / +
+        .child(
+            div()
+                .flex_shrink_0()
+                .pb_1()
                 .flex()
-                .flex_col()
-                .child(
+                .items_center()
+                .justify_between()
+                .gap_2()
+                .child(if let Some(zr) = zoom_root {
+                    let on_back = on_zoom.clone();
                     div()
-                        .px_4()
-                        .py_3()
-                        .border_b_1()
-                        .border_color(theme::hairline())
                         .flex()
                         .items_center()
-                        .justify_between()
-                        .gap_2()
+                        .gap(px(6.0))
+                        .text_xs()
                         .child(
                             div()
-                                .flex()
-                                .items_center()
-                                .gap_2()
-                                .child(
-                                    div()
-                                        .w(px(7.0))
-                                        .h(px(7.0))
-                                        .rounded(px(99.0))
-                                        .bg(active_bucket.color()),
-                                )
-                                .child(
-                                    div()
-                                        .text_xs()
-                                        .font_weight(FontWeight::SEMIBOLD)
-                                        .text_color(theme::text_primary())
-                                        .child(active_bucket.label()),
-                                )
-                                .child(div().text_xs().text_color(theme::text_muted()).child(
-                                    match pct {
-                                        Some(p) => format!("{} · {p}%", drill_cards.len()),
-                                        None => drill_cards.len().to_string(),
-                                    },
-                                )),
-                        )
-                        .child(
-                            div()
-                                .id("sk-drill-close")
+                                .id("sk-crumb-root")
                                 .px(px(6.0))
                                 .py(px(2.0))
                                 .rounded(px(5.0))
@@ -993,80 +962,286 @@ pub fn render_sankey_view<V: 'static>(
                                     s.bg(theme::row_hover()).text_color(theme::text_primary())
                                 })
                                 .cursor_pointer()
-                                .text_xs()
                                 .text_color(theme::text_muted())
                                 .on_click(cx.listener(move |this, _, window, cx| {
-                                    on_close(None, this, window, cx);
+                                    on_back(None, this, window, cx);
                                 }))
-                                .child("← Back"),
-                        ),
-                )
-                .child(
-                    div()
-                        .id("sankey-drill-scroll")
-                        .flex_1()
-                        .min_h_0()
-                        .overflow_y_scroll()
-                        .p_2()
-                        .flex()
-                        .flex_col()
-                        .gap(px(2.0))
-                        .children(drill_cards.into_iter().enumerate().map(|(i, role)| {
-                            let open_cb = on_open_role.clone();
-                            let role_click = role.clone();
+                                .child("← All roles"),
+                        )
+                        .child(div().text_color(theme::text_muted()).child("›"))
+                        .child(
                             div()
-                                .id(SharedString::from(format!("sk-pop-role-{i}")))
-                                .w_full()
-                                .px_3()
-                                .py_2()
-                                .rounded(px(7.0))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(zr.color())
+                                .child(zr.label()),
+                        )
+                        .into_any_element()
+                } else {
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .child(
+                            div()
+                                .id("sk-mode-overview")
+                                .px_2()
+                                .py(px(2.0))
+                                .rounded(px(5.0))
+                                .when(!expand_all, |d| d.bg(theme::surface_subtle()))
                                 .hover(|s| s.bg(theme::row_hover()))
                                 .cursor_pointer()
-                                .overflow_hidden()
-                                .flex()
-                                .flex_col()
-                                .gap(px(2.0))
+                                .text_xs()
+                                .text_color(if !expand_all {
+                                    theme::text_primary()
+                                } else {
+                                    theme::text_muted()
+                                })
                                 .on_click(cx.listener(move |this, _, window, cx| {
-                                    open_cb(role_click.clone(), this, window, cx);
+                                    on_exp_ov(false, this, window, cx);
                                 }))
-                                .child(
+                                .child("Overview"),
+                        )
+                        .child(
+                            div()
+                                .id("sk-mode-expand")
+                                .px_2()
+                                .py(px(2.0))
+                                .rounded(px(5.0))
+                                .when(expand_all, |d| d.bg(theme::surface_subtle()))
+                                .hover(|s| s.bg(theme::row_hover()))
+                                .cursor_pointer()
+                                .text_xs()
+                                .text_color(if expand_all {
+                                    theme::text_primary()
+                                } else {
+                                    theme::text_muted()
+                                })
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    on_exp_full(true, this, window, cx);
+                                }))
+                                .child("Expand all"),
+                        )
+                        .into_any_element()
+                })
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(2.0))
+                        .text_xs()
+                        .text_color(theme::text_muted())
+                        .child(
+                            div()
+                                .id("sk-zoom-out")
+                                .w(px(22.0))
+                                .h(px(22.0))
+                                .rounded(px(5.0))
+                                .hover(|s| {
+                                    s.bg(theme::row_hover()).text_color(theme::text_primary())
+                                })
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .cursor_pointer()
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    on_sc_out((effective_scale - 0.15).max(0.75), this, window, cx);
+                                }))
+                                .child("−"),
+                        )
+                        .child(
+                            div()
+                                .id("sk-zoom-reset")
+                                .px(px(5.0))
+                                .py(px(2.0))
+                                .rounded(px(5.0))
+                                .hover(|s| {
+                                    s.bg(theme::row_hover()).text_color(theme::text_primary())
+                                })
+                                .cursor_pointer()
+                                .text_size(px(11.0))
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    on_sc_reset(1.0, this, window, cx);
+                                }))
+                                .child(format!("{scale_pct}%")),
+                        )
+                        .child(
+                            div()
+                                .id("sk-zoom-in")
+                                .w(px(22.0))
+                                .h(px(22.0))
+                                .rounded(px(5.0))
+                                .hover(|s| {
+                                    s.bg(theme::row_hover()).text_color(theme::text_primary())
+                                })
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .cursor_pointer()
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    on_sc_in((effective_scale + 0.15).min(1.45), this, window, cx);
+                                }))
+                                .child("+"),
+                        ),
+                ),
+        )
+        // Scrollable canvas wrapper so zoomed-in (>100%) diagrams pan cleanly
+        .child(
+            div()
+                .id("sankey-canvas-scroll")
+                .flex_1()
+                .min_h_0()
+                .overflow_y_scroll()
+                .flex()
+                .flex_col()
+                .justify_center()
+                .child(animated_stage),
+        )
+        // Floating scrollable drill-down popover (opens ONLY on leaf click — zero ambiguity!)
+        .when_some(selected, |d, active_bucket| {
+            let on_close = on_select.clone();
+            let pct = if !matches!(active_bucket, SankeyBucket::Total | SankeyBucket::Saved) {
+                Some(((drill_cards.len() as f32 / denom as f32) * 100.0).round() as usize)
+            } else {
+                None
+            };
+            let card =
+                div()
+                    .id("sankey-drill-popover")
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                        cx.stop_propagation();
+                    })
+                    .w(px(360.0))
+                    .max_h(px(340.0))
+                    .rounded(px(12.0))
+                    .bg(theme::popover_glass())
+                    .border_1()
+                    .border_color(theme::hairline_strong())
+                    .shadow_lg()
+                    .overflow_hidden()
+                    .flex()
+                    .flex_col()
+                    .child(
+                        div()
+                            .px_4()
+                            .py_3()
+                            .border_b_1()
+                            .border_color(theme::hairline())
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(
+                                        div()
+                                            .w(px(7.0))
+                                            .h(px(7.0))
+                                            .rounded(px(99.0))
+                                            .bg(active_bucket.color()),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .text_color(theme::text_primary())
+                                            .child(active_bucket.label()),
+                                    )
+                                    .child(div().text_xs().text_color(theme::text_muted()).child(
+                                        match pct {
+                                            Some(p) => format!("{} · {p}%", drill_cards.len()),
+                                            None => drill_cards.len().to_string(),
+                                        },
+                                    )),
+                            )
+                            .child(
+                                div()
+                                    .id("sk-drill-close")
+                                    .px(px(6.0))
+                                    .py(px(2.0))
+                                    .rounded(px(5.0))
+                                    .hover(|s| {
+                                        s.bg(theme::row_hover()).text_color(theme::text_primary())
+                                    })
+                                    .cursor_pointer()
+                                    .text_xs()
+                                    .text_color(theme::text_muted())
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        on_close(None, this, window, cx);
+                                    }))
+                                    .child("✕"),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .id("sankey-drill-scroll")
+                            .flex_1()
+                            .min_h_0()
+                            .overflow_y_scroll()
+                            .p_2()
+                            .flex()
+                            .flex_col()
+                            .gap(px(2.0))
+                            .children(drill_cards.into_iter().take(60).enumerate().map(
+                                |(i, role)| {
+                                    let open_cb = on_open_role.clone();
+                                    let role_click = role.clone();
                                     div()
+                                        .id(SharedString::from(format!("sk-pop-role-{i}")))
+                                        .w_full()
+                                        .px_3()
+                                        .py_2()
+                                        .rounded(px(7.0))
+                                        .hover(|s| s.bg(theme::row_hover()))
+                                        .cursor_pointer()
+                                        .overflow_hidden()
                                         .flex()
-                                        .items_center()
-                                        .justify_between()
-                                        .gap_2()
+                                        .flex_col()
+                                        .gap(px(2.0))
+                                        .on_click(cx.listener(move |this, _, window, cx| {
+                                            open_cb(role_click.clone(), this, window, cx);
+                                        }))
                                         .child(
                                             div()
-                                                .flex_1()
-                                                .min_w_0()
-                                                .overflow_hidden()
-                                                .text_xs()
-                                                .font_weight(FontWeight::MEDIUM)
-                                                .text_color(theme::text_primary())
-                                                .child(role.company.clone()),
+                                                .flex()
+                                                .items_center()
+                                                .justify_between()
+                                                .gap_2()
+                                                .child(
+                                                    div()
+                                                        .flex_1()
+                                                        .min_w_0()
+                                                        .overflow_hidden()
+                                                        .text_xs()
+                                                        .font_weight(FontWeight::MEDIUM)
+                                                        .text_color(theme::text_primary())
+                                                        .child(role.company.clone()),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .flex_shrink_0()
+                                                        .text_size(px(10.5))
+                                                        .text_color(theme::text_muted())
+                                                        .child(
+                                                            role.note_line.clone().unwrap_or_else(
+                                                                || role.checked.clone(),
+                                                            ),
+                                                        ),
+                                                ),
                                         )
                                         .child(
                                             div()
-                                                .flex_shrink_0()
-                                                .text_size(px(10.5))
+                                                .min_w_0()
+                                                .overflow_hidden()
+                                                .text_size(px(11.0))
                                                 .text_color(theme::text_muted())
-                                                .child(
-                                                    role.note_line
-                                                        .clone()
-                                                        .unwrap_or_else(|| role.checked.clone()),
-                                                ),
-                                        ),
-                                )
-                                .child(
-                                    div()
-                                        .min_w_0()
-                                        .overflow_hidden()
-                                        .text_size(px(11.0))
-                                        .text_color(theme::text_muted())
-                                        .child(role.title.clone()),
-                                )
-                        })),
-                );
+                                                .child(role.title.clone()),
+                                        )
+                                },
+                            )),
+                    );
 
             let pop = if reduce_motion {
                 card.into_any_element()
