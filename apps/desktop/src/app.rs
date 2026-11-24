@@ -130,12 +130,28 @@ struct CommandEntry {
 }
 
 #[derive(Clone, Debug)]
+struct ToolStep {
+    id: String,
+    name: String,
+    detail: String,
+    done: bool,
+    ok: bool,
+    duration_ms: Option<u64>,
+}
+
+#[derive(Clone, Debug)]
 struct ChatMessage {
     is_user: bool,
     text: String,
     /// Byte length shown so far (paced reveal, always on a char boundary).
     revealed: usize,
     citations: Vec<String>,
+    steps: Vec<ToolStep>,
+    thinking: String,
+    started_at: Instant,
+    duration_ms: Option<u64>,
+    steps_expanded: bool,
+    is_error: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -213,6 +229,7 @@ pub struct JobHarnessApp {
     chat_messages: Vec<ChatMessage>,
     chat_input: String,
     attached_role: Option<(String, String)>,
+    quoted_reply: Option<String>,
     quick_input: String,
     quick_popover_open: bool,
     quick_reply_preview: String,
@@ -332,6 +349,7 @@ impl JobHarnessApp {
             chat_messages: Vec::new(),
             chat_input: String::new(),
             attached_role: None,
+            quoted_reply: None,
             quick_input: String::new(),
             quick_popover_open: false,
             quick_reply_preview: String::new(),
@@ -1057,7 +1075,7 @@ impl JobHarnessApp {
     fn submit_chat_input(&mut self, cx: &mut Context<Self>) {
         let raw = std::mem::take(&mut self.chat_input);
         let trimmed = raw.trim();
-        let prompt = match self.attached_role.take() {
+        let mut prompt = match self.attached_role.take() {
             Some((company, record_path)) => {
                 if trimmed.is_empty() {
                     format!(
@@ -1069,6 +1087,11 @@ impl JobHarnessApp {
             }
             None => trimmed.to_owned(),
         };
+        if let Some(quote) = self.quoted_reply.take()
+            && !prompt.is_empty()
+        {
+            prompt = format!("> {}\n\n{prompt}", truncate_end(&quote, 220));
+        }
         if !prompt.is_empty() {
             self.submit_prompt(prompt, false, cx);
         }
@@ -1084,18 +1107,31 @@ impl JobHarnessApp {
             self.set_toast("Queued follow-up message", cx);
             return;
         }
+        let now = Instant::now();
         let user_len = trimmed.len();
         self.chat_messages.push(ChatMessage {
             is_user: true,
             text: trimmed.clone(),
             revealed: user_len,
             citations: vec![],
+            steps: vec![],
+            thinking: String::new(),
+            started_at: now,
+            duration_ms: None,
+            steps_expanded: false,
+            is_error: false,
         });
         self.chat_messages.push(ChatMessage {
             is_user: false,
             text: String::new(),
             revealed: 0,
             citations: vec![],
+            steps: vec![],
+            thinking: String::new(),
+            started_at: now,
+            duration_ms: None,
+            steps_expanded: true,
+            is_error: false,
         });
         self.chat_follow = true;
         self.chat_scroll.scroll_to_bottom();
@@ -1128,10 +1164,12 @@ impl JobHarnessApp {
         // settles (quick when far behind, gentle when close) instead of jumping.
         cx.spawn(async move |this, cx| {
             let mut done = false;
+            let mut tick_count: u64 = 0;
             loop {
                 cx.background_executor()
                     .timer(Duration::from_millis(16))
                     .await;
+                tick_count = tick_count.wrapping_add(1);
                 let mut batch = Vec::new();
                 while let Ok(ev) = rx.try_recv() {
                     batch.push(ev);
@@ -1141,10 +1179,55 @@ impl JobHarnessApp {
                         if app.stream_turn_id != turn_id {
                             return false;
                         }
-                        let mut dirty = !batch.is_empty();
+                        // Tick elapsed timer smoothly (~2x/sec) while waiting on tool calls
+                        let mut dirty = !batch.is_empty() || tick_count.is_multiple_of(30);
                         for ev in batch {
                             match ev {
                                 StreamEvent::Status(s) => app.stream_status = s,
+                                StreamEvent::ToolStart { id, name, detail } => {
+                                    if let Some(last) = app.chat_messages.last_mut() {
+                                        if let Some(existing) =
+                                            last.steps.iter_mut().find(|s| s.id == id)
+                                        {
+                                            existing.detail = detail;
+                                        } else {
+                                            last.steps.push(ToolStep {
+                                                id,
+                                                name,
+                                                detail,
+                                                done: false,
+                                                ok: true,
+                                                duration_ms: None,
+                                            });
+                                        }
+                                    }
+                                }
+                                StreamEvent::ToolFinish {
+                                    id,
+                                    ok,
+                                    duration_ms,
+                                } => {
+                                    if let Some(last) = app.chat_messages.last_mut() {
+                                        if let Some(step) =
+                                            last.steps.iter_mut().rev().find(|s| s.id == id)
+                                        {
+                                            step.done = true;
+                                            step.ok = ok;
+                                            step.duration_ms = duration_ms;
+                                        } else if let Some(step) =
+                                            last.steps.iter_mut().rev().find(|s| !s.done)
+                                        {
+                                            step.done = true;
+                                            step.ok = ok;
+                                            step.duration_ms = duration_ms;
+                                        }
+                                    }
+                                }
+                                StreamEvent::Thinking(chunk) => {
+                                    if let Some(last) = app.chat_messages.last_mut() {
+                                        last.thinking.push_str(&chunk);
+                                    }
+                                }
                                 StreamEvent::Delta(chunk) => {
                                     if let Some(last) = app.chat_messages.last_mut() {
                                         last.text.push_str(&chunk);
@@ -1155,6 +1238,7 @@ impl JobHarnessApp {
                                     if let Some(last) = app.chat_messages.last_mut() {
                                         last.text = format!("Error: {err}");
                                         last.revealed = last.text.len();
+                                        last.is_error = true;
                                     }
                                 }
                                 StreamEvent::Done => done = true,
@@ -1186,6 +1270,18 @@ impl JobHarnessApp {
                             .is_none_or(|m| m.revealed >= m.text.len());
                         let finished = done && fully_shown;
                         if finished {
+                            if let Some(last) = app.chat_messages.last_mut()
+                                && !last.is_user
+                            {
+                                last.duration_ms =
+                                    Some(last.started_at.elapsed().as_millis() as u64);
+                                for st in &mut last.steps {
+                                    st.done = true;
+                                }
+                                if !last.text.is_empty() {
+                                    last.steps_expanded = false;
+                                }
+                            }
                             app.streaming = false;
                             app.stream_status.clear();
                             app.stream_cancel = None;
@@ -1256,6 +1352,52 @@ impl JobHarnessApp {
         }
         if cmd && key == "z" && self.undo_move.is_some() {
             self.perform_undo(cx);
+            return;
+        }
+        // Native Copy (⌘C) & Paste (⌘V) for inputs and latest Chat reply
+        if cmd && key == "v" {
+            if let Some(item) = cx.read_from_clipboard()
+                && let Some(pasted) = item.text()
+            {
+                let clean = pasted.replace('\r', "");
+                match self.active_input {
+                    ActiveInput::CommandBar => {
+                        self.command_query.push_str(clean.trim());
+                        self.command_index = 0;
+                    }
+                    ActiveInput::Search => self.search_query.push_str(clean.trim()),
+                    ActiveInput::QuickAsk => self.quick_input.push_str(&clean),
+                    ActiveInput::Chat => self.chat_input.push_str(&clean),
+                    ActiveInput::ModelField => self.model_draft.push_str(clean.trim()),
+                    ActiveInput::None => {}
+                }
+                cx.notify();
+            }
+            return;
+        }
+        if cmd && key == "c" {
+            let to_copy = match self.active_input {
+                ActiveInput::Chat if !self.chat_input.is_empty() => Some(self.chat_input.clone()),
+                ActiveInput::QuickAsk if !self.quick_input.is_empty() => {
+                    Some(self.quick_input.clone())
+                }
+                ActiveInput::Search if !self.search_query.is_empty() => {
+                    Some(self.search_query.clone())
+                }
+                ActiveInput::ModelField if !self.model_draft.is_empty() => {
+                    Some(self.model_draft.clone())
+                }
+                _ => self
+                    .chat_messages
+                    .iter()
+                    .rev()
+                    .find(|m| !m.is_user && !m.text.is_empty())
+                    .map(|m| m.text.clone()),
+            };
+            if let Some(txt) = to_copy {
+                cx.write_to_clipboard(ClipboardItem::new_string(txt));
+                self.set_toast("Copied to clipboard", cx);
+            }
             return;
         }
         if key == "escape" {
@@ -1330,7 +1472,11 @@ impl JobHarnessApp {
         if let Some(buf) = target_buf {
             match key {
                 "backspace" => {
-                    buf.pop();
+                    if cmd {
+                        buf.clear();
+                    } else {
+                        buf.pop();
+                    }
                     cx.notify();
                 }
                 "enter" => match self.active_input {
@@ -1689,7 +1835,7 @@ impl JobHarnessApp {
                                 div()
                                     .text_xs()
                                     .text_color(theme::text_primary())
-                                    .child(self.runtime.short_name()),
+                                    .child(self.runtime.short_name().to_owned()),
                             )
                             .child(
                                 div()
@@ -1701,24 +1847,49 @@ impl JobHarnessApp {
                     .when(!self.chat_messages.is_empty(), |d| {
                         d.child(
                             div()
-                                .id("chat-jump-bottom")
-                                .px(px(6.0))
-                                .py(px(2.0))
-                                .rounded(px(5.0))
-                                .cursor_pointer()
-                                .hover(|s| s.bg(theme::row_hover()))
-                                .text_xs()
-                                .text_color(if self.streaming {
-                                    theme::lavender()
-                                } else {
-                                    theme::text_muted()
+                                .flex()
+                                .items_center()
+                                .gap_1()
+                                .when(!self.streaming, |r| {
+                                    r.child(
+                                        div()
+                                            .id("chat-clear")
+                                            .px(px(6.0))
+                                            .py(px(2.0))
+                                            .rounded(px(5.0))
+                                            .cursor_pointer()
+                                            .hover(|s| s.bg(theme::row_hover()))
+                                            .text_xs()
+                                            .text_color(theme::text_muted())
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                this.chat_messages.clear();
+                                                this.quoted_reply = None;
+                                                cx.notify();
+                                            }))
+                                            .child("Clear"),
+                                    )
                                 })
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.chat_follow = true;
-                                    this.chat_scroll.scroll_to_bottom();
-                                    cx.notify();
-                                }))
-                                .child(if self.streaming { "● ↓" } else { "↓" }),
+                                .child(
+                                    div()
+                                        .id("chat-jump-bottom")
+                                        .px(px(6.0))
+                                        .py(px(2.0))
+                                        .rounded(px(5.0))
+                                        .cursor_pointer()
+                                        .hover(|s| s.bg(theme::row_hover()))
+                                        .text_xs()
+                                        .text_color(if self.streaming {
+                                            theme::lavender()
+                                        } else {
+                                            theme::text_muted()
+                                        })
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.chat_follow = true;
+                                            this.chat_scroll.scroll_to_bottom();
+                                            cx.notify();
+                                        }))
+                                        .child(if self.streaming { "● ↓" } else { "↓" }),
+                                ),
                         )
                     }),
             )
@@ -1805,71 +1976,223 @@ impl JobHarnessApp {
                             let end = msg.revealed.min(msg.text.len());
                             &msg.text[..end]
                         };
-                        let actively_writing =
-                            !msg.is_user && is_last && (self.streaming || msg.revealed < msg.text.len());
+                        let actively_writing = !msg.is_user
+                            && is_last
+                            && (self.streaming || msg.revealed < msg.text.len());
+                        let elapsed_s = msg
+                            .duration_ms
+                            .map(|ms| ms as f32 / 1000.0)
+                            .unwrap_or_else(|| msg.started_at.elapsed().as_secs_f32());
+                        let has_trace = !msg.steps.is_empty() || !msg.thinking.is_empty();
+                        let copy_text = msg.text.clone();
+                        let reply_text = msg.text.clone();
+                        let expand_text = msg.text.clone();
+                        let prev_user_prompt = if !msg.is_user && idx > 0 {
+                            self.chat_messages
+                                .get(idx - 1)
+                                .filter(|m| m.is_user)
+                                .map(|m| m.text.clone())
+                        } else {
+                            None
+                        };
+                        let has_model_override =
+                            self.agent_opts.model.is_some() || self.agent_opts.provider.is_some();
 
-                        let body_el = if msg.is_user {
-                            div()
-                                .px_3()
-                                .py_2()
-                                .rounded(px(9.0))
-                                .bg(theme::surface_subtle())
-                                .text_xs()
-                                .text_color(theme::text_primary())
-                                .child(msg.text.clone())
-                                .into_any_element()
-                        } else if shown.is_empty() && actively_writing {
-                            // Emma-style live thinking indicator with pulsing dot
-                            let status_lbl = if self.stream_status.is_empty() {
-                                "Thinking…".to_owned()
+                        let mut block = div().flex().flex_col().gap_2();
+
+                        // Live / collapsible inline Activity Trace for assistant messages
+                        if !msg.is_user && (actively_writing || has_trace) {
+                            let step_count = msg.steps.len();
+                            let header_label = if actively_writing {
+                                let base = if self.stream_status.is_empty() {
+                                    "Thinking…".to_owned()
+                                } else {
+                                    self.stream_status.clone()
+                                };
+                                format!("{base} · {:.0}s", elapsed_s.max(0.0))
+                            } else if step_count > 0 {
+                                let noun = if step_count == 1 { "step" } else { "steps" };
+                                format!("{step_count} {noun} · {elapsed_s:.1}s")
                             } else {
-                                self.stream_status.clone()
+                                format!("Thought · {elapsed_s:.1}s")
                             };
-                            let pill = div()
-                                .py_1()
+
+                            let dot = div()
+                                .w(px(6.0))
+                                .h(px(6.0))
+                                .rounded(px(99.0))
+                                .bg(if actively_writing {
+                                    theme::lavender()
+                                } else {
+                                    theme::emerald()
+                                });
+                            let header_row = div()
+                                .id(SharedString::from(format!("trace-tog-{idx}")))
                                 .flex()
                                 .items_center()
+                                .justify_between()
                                 .gap_2()
+                                .cursor_pointer()
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    if let Some(m) = this.chat_messages.get_mut(idx) {
+                                        m.steps_expanded = !m.steps_expanded;
+                                        cx.notify();
+                                    }
+                                }))
                                 .child(
                                     div()
-                                        .w(px(7.0))
-                                        .h(px(7.0))
-                                        .rounded(px(99.0))
-                                        .bg(theme::lavender()),
+                                        .flex()
+                                        .items_center()
+                                        .gap_2()
+                                        .child(dot)
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .text_color(if actively_writing {
+                                                    theme::text_secondary()
+                                                } else {
+                                                    theme::text_muted()
+                                                })
+                                                .child(header_label),
+                                        ),
                                 )
-                                .child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(theme::text_secondary())
-                                        .child(status_lbl),
-                                );
-                            if self.reduce_motion {
-                                pill.into_any_element()
+                                .when(has_trace, |r| {
+                                    r.child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(theme::text_muted())
+                                            .child(if msg.steps_expanded { "▾" } else { "▸" }),
+                                    )
+                                });
+
+                            let header_el = if actively_writing && !self.reduce_motion {
+                                header_row
+                                    .with_animation(
+                                        SharedString::from(format!("think-pulse-{idx}")),
+                                        Animation::new(Duration::from_millis(900))
+                                            .repeat()
+                                            .with_easing(ease_out_quint()),
+                                        |el, t| {
+                                            let wave = 0.6 + 0.4 * (1.0 - (2.0 * t - 1.0).abs());
+                                            el.opacity(wave)
+                                        },
+                                    )
+                                    .into_any_element()
                             } else {
-                                pill.with_animation(
-                                    SharedString::from(format!("think-pulse-{idx}")),
-                                    Animation::new(Duration::from_millis(900))
-                                        .repeat()
-                                        .with_easing(ease_out_quint()),
-                                    |el, t| {
-                                        let wave = 0.55 + 0.45 * (1.0 - (2.0 * t - 1.0).abs());
-                                        el.opacity(wave)
-                                    },
-                                )
-                                .into_any_element()
+                                header_row.into_any_element()
+                            };
+
+                            let mut trace_box = div()
+                                .flex()
+                                .flex_col()
+                                .gap_1()
+                                .child(header_el);
+
+                            if msg.steps_expanded && has_trace {
+                                let mut inner = div()
+                                    .pl_3()
+                                    .ml(px(2.0))
+                                    .border_l_1()
+                                    .border_color(theme::hairline())
+                                    .flex()
+                                    .flex_col()
+                                    .gap_1();
+                                if !msg.thinking.trim().is_empty() {
+                                    inner = inner.child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(theme::text_muted())
+                                            .child(truncate_end(msg.thinking.trim(), 160)),
+                                    );
+                                }
+                                for step in &msg.steps {
+                                    let icon = if !step.done {
+                                        "●"
+                                    } else if step.ok {
+                                        "✓"
+                                    } else {
+                                        "✕"
+                                    };
+                                    let icon_col = if !step.done {
+                                        theme::lavender()
+                                    } else if step.ok {
+                                        theme::emerald()
+                                    } else {
+                                        theme::rose_text()
+                                    };
+                                    let dur_tag = step
+                                        .duration_ms
+                                        .map(|ms| format!("{:.1}s", ms as f32 / 1000.0));
+                                    let line_txt = if step.detail.is_empty() {
+                                        step.name.clone()
+                                    } else {
+                                        format!(
+                                            "{} · {}",
+                                            step.name,
+                                            truncate_end(&step.detail, 34)
+                                        )
+                                    };
+                                    inner = inner.child(
+                                        div()
+                                            .flex()
+                                            .items_center()
+                                            .justify_between()
+                                            .gap_2()
+                                            .text_xs()
+                                            .child(
+                                                div()
+                                                    .flex_1()
+                                                    .min_w_0()
+                                                    .overflow_hidden()
+                                                    .flex()
+                                                    .items_center()
+                                                    .gap_1()
+                                                    .child(div().text_color(icon_col).child(icon))
+                                                    .child(
+                                                        div()
+                                                            .text_color(theme::text_muted())
+                                                            .child(line_txt),
+                                                    ),
+                                            )
+                                            .when_some(dur_tag, |r, d| {
+                                                r.child(
+                                                    div()
+                                                        .flex_shrink_0()
+                                                        .text_color(theme::text_muted())
+                                                        .child(d),
+                                                )
+                                            }),
+                                    );
+                                }
+                                trace_box = trace_box.child(inner);
                             }
-                        } else {
+                            block = block.child(trace_box);
+                        }
+
+                        // Message content body
+                        if msg.is_user {
+                            block = block.child(
+                                div()
+                                    .px_3()
+                                    .py_2()
+                                    .rounded(px(9.0))
+                                    .bg(theme::surface_subtle())
+                                    .text_xs()
+                                    .text_color(theme::text_primary())
+                                    .child(msg.text.clone()),
+                            );
+                        } else if !shown.is_empty() {
                             let display_str = if actively_writing {
                                 format!("{shown} ▋")
                             } else {
                                 shown.to_owned()
                             };
-                            render_markdown_blocks(&display_str, false).into_any_element()
-                        };
+                            block = block.child(render_markdown_blocks(&display_str, false));
+                        }
 
-                        let mut block = div().flex().flex_col().gap_1().child(body_el);
+                        // Clickable workspace citations
                         if !msg.citations.is_empty() {
-                            let links = div().flex().flex_wrap().gap_2().pt_1().children(
+                            let links = div().flex().flex_wrap().gap_2().children(
                                 msg.citations.iter().enumerate().map(|(ci, path)| {
                                     let p = path.clone();
                                     let short =
@@ -1888,6 +2211,90 @@ impl JobHarnessApp {
                             );
                             block = block.child(links);
                         }
+
+                        // Clean chat action strip (Copy · Reply · Expand · Retry / Reset model)
+                        if !msg.text.is_empty() && !actively_writing {
+                            let mut actions = div()
+                                .flex()
+                                .items_center()
+                                .flex_wrap()
+                                .gap_3()
+                                .text_xs()
+                                .text_color(theme::text_muted())
+                                .child(
+                                    div()
+                                        .id(SharedString::from(format!("msg-copy-{idx}")))
+                                        .cursor_pointer()
+                                        .hover(|s| s.text_color(theme::text_primary()))
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            cx.write_to_clipboard(ClipboardItem::new_string(
+                                                copy_text.clone(),
+                                            ));
+                                            this.set_toast("Copied message", cx);
+                                        }))
+                                        .child("Copy"),
+                                )
+                                .child(
+                                    div()
+                                        .id(SharedString::from(format!("msg-reply-{idx}")))
+                                        .cursor_pointer()
+                                        .hover(|s| s.text_color(theme::text_primary()))
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            this.quoted_reply = Some(reply_text.clone());
+                                            this.active_input = ActiveInput::Chat;
+                                            cx.notify();
+                                        }))
+                                        .child("Reply"),
+                                );
+                            if !msg.is_user {
+                                actions = actions.child(
+                                    div()
+                                        .id(SharedString::from(format!("msg-expand-{idx}")))
+                                        .cursor_pointer()
+                                        .hover(|s| s.text_color(theme::text_primary()))
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            this.expanded_reader = Some((
+                                                format!("{} reply", this.runtime.short_name()),
+                                                expand_text.clone(),
+                                            ));
+                                            cx.notify();
+                                        }))
+                                        .child("Expand ⤢"),
+                                );
+                            }
+                            if let Some(retry_prompt) = prev_user_prompt
+                                && (is_last || msg.is_error)
+                            {
+                                let retry_p2 = retry_prompt.clone();
+                                actions = actions.child(
+                                    div()
+                                        .id(SharedString::from(format!("msg-retry-{idx}")))
+                                        .cursor_pointer()
+                                        .hover(|s| s.text_color(theme::text_primary()))
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            this.submit_prompt(retry_prompt.clone(), false, cx);
+                                        }))
+                                        .child("Retry"),
+                                );
+                                if msg.is_error && has_model_override {
+                                    actions = actions.child(
+                                        div()
+                                            .id(SharedString::from(format!("msg-reset-{idx}")))
+                                            .cursor_pointer()
+                                            .text_color(theme::lavender())
+                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                this.agent_opts.model = None;
+                                                this.agent_opts.provider = None;
+                                                this.model_draft.clear();
+                                                this.submit_prompt(retry_p2.clone(), false, cx);
+                                            }))
+                                            .child("Reset model & retry"),
+                                    );
+                                }
+                            }
+                            block = block.child(actions);
+                        }
+
                         block
                     })),
             )
@@ -1927,6 +2334,43 @@ impl JobHarnessApp {
                     .flex()
                     .flex_col()
                     .gap_2()
+                    .when_some(self.quoted_reply.clone(), |d, q| {
+                        d.child(
+                            div()
+                                .px_2()
+                                .py(px(4.0))
+                                .rounded(px(6.0))
+                                .bg(theme::surface_subtle())
+                                .border_l_2()
+                                .border_color(theme::lavender())
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .gap_2()
+                                .child(
+                                    div()
+                                        .min_w_0()
+                                        .overflow_hidden()
+                                        .text_xs()
+                                        .text_color(theme::text_secondary())
+                                        .child(truncate_end(&format!("Replying: {q}"), 36)),
+                                )
+                                .child(
+                                    div()
+                                        .id("clear-quote-chip")
+                                        .flex_shrink_0()
+                                        .text_xs()
+                                        .text_color(theme::text_muted())
+                                        .hover(|s| s.text_color(theme::text_primary()))
+                                        .cursor_pointer()
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.quoted_reply = None;
+                                            cx.notify();
+                                        }))
+                                        .child("✕"),
+                                ),
+                        )
+                    })
                     .when_some(self.attached_role.clone(), |d, (company, path)| {
                         let short = truncate_label(path.rsplit('/').next().unwrap_or(&path), 20);
                         d.child(
@@ -2113,7 +2557,7 @@ impl JobHarnessApp {
                                         this.model_draft.clear();
                                         cx.notify();
                                     }))
-                                    .child(rt.short_name())
+                                    .child(rt.short_name().to_owned())
                             })),
                     ),
             )
@@ -2261,8 +2705,10 @@ impl JobHarnessApp {
                         ),
                 )
             })
-            // 4. Custom model override lives cleanly in Settings; quick popover gets a subtle shortcut
+            // 4. Custom model override lives cleanly in Settings (with 1-click Reset guard)
             .when(show_custom_input, |d| {
+                let has_override =
+                    self.agent_opts.model.is_some() || self.agent_opts.provider.is_some();
                 d.child(
                     div()
                         .flex()
@@ -2270,9 +2716,34 @@ impl JobHarnessApp {
                         .gap_1()
                         .child(
                             div()
-                                .text_xs()
-                                .text_color(theme::text_muted())
-                                .child("Custom model"),
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(theme::text_muted())
+                                        .child("Custom model"),
+                                )
+                                .when(has_override, |r| {
+                                    r.child(
+                                        div()
+                                            .id(SharedString::from(format!("{scope}-model-reset")))
+                                            .text_xs()
+                                            .text_color(theme::lavender())
+                                            .cursor_pointer()
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                this.agent_opts.model = None;
+                                                this.agent_opts.provider = None;
+                                                this.model_draft.clear();
+                                                this.set_toast(
+                                                    "Reset to profile default model",
+                                                    cx,
+                                                );
+                                            }))
+                                            .child("Reset to default"),
+                                    )
+                                }),
                         )
                         .child(
                             div()
@@ -5388,8 +5859,14 @@ impl Render for JobHarnessApp {
                 )
             })
             .when_some(self.expanded_reader.clone(), |d, (title, body)| {
-                let local_open = self.client.target.local_root().map(|r| r.join(&title));
+                let local_open = self
+                    .client
+                    .target
+                    .local_root()
+                    .map(|r| r.join(&title))
+                    .filter(|p| p.is_file());
                 let local_reveal = local_open.clone();
+                let copy_reader_body = body.clone();
                 let sections = parse_brief_sections(&body);
                 let sec_count = sections.len();
                 let active_sec = self.brief_section.filter(|&i| i < sec_count);
@@ -5439,41 +5916,46 @@ impl Render for JobHarnessApp {
                                     .gap_4()
                                     .child(
                                         div()
-                                            .id("reader-reveal-ext")
+                                            .id("reader-copy-all")
                                             .text_xs()
                                             .text_color(theme::text_secondary())
                                             .hover(|s| s.text_color(theme::text_primary()))
                                             .cursor_pointer()
                                             .on_click(cx.listener(move |this, _, _, cx| {
-                                                if let Some(p) = &local_reveal {
-                                                    reveal_in_file_manager(p);
-                                                } else {
-                                                    this.set_toast(
-                                                        "Reveal requires local workspace",
-                                                        cx,
-                                                    );
-                                                }
+                                                cx.write_to_clipboard(ClipboardItem::new_string(
+                                                    copy_reader_body.clone(),
+                                                ));
+                                                this.set_toast("Copied text", cx);
                                             }))
-                                            .child("Reveal in Finder"),
+                                            .child("Copy"),
                                     )
-                                    .child(
-                                        div()
-                                            .id("reader-open-ext")
-                                            .text_xs()
-                                            .text_color(theme::lavender())
-                                            .cursor_pointer()
-                                            .on_click(cx.listener(move |this, _, _, cx| {
-                                                if let Some(p) = &local_open {
-                                                    open_in_system(p);
-                                                } else {
-                                                    this.set_toast(
-                                                        "Open requires local workspace",
-                                                        cx,
-                                                    );
-                                                }
-                                            }))
-                                            .child("Open in editor ↗"),
-                                    )
+                                    .when_some(local_reveal, |r, p| {
+                                        r.child(
+                                            div()
+                                                .id("reader-reveal-ext")
+                                                .text_xs()
+                                                .text_color(theme::text_secondary())
+                                                .hover(|s| s.text_color(theme::text_primary()))
+                                                .cursor_pointer()
+                                                .on_click(cx.listener(move |_, _, _, _| {
+                                                    reveal_in_file_manager(&p);
+                                                }))
+                                                .child("Reveal in Finder"),
+                                        )
+                                    })
+                                    .when_some(local_open, |r, p| {
+                                        r.child(
+                                            div()
+                                                .id("reader-open-ext")
+                                                .text_xs()
+                                                .text_color(theme::lavender())
+                                                .cursor_pointer()
+                                                .on_click(cx.listener(move |_, _, _, _| {
+                                                    open_in_system(&p);
+                                                }))
+                                                .child("Open in editor ↗"),
+                                        )
+                                    })
                                     .child(
                                         div()
                                             .id("reader-close")

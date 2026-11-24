@@ -19,12 +19,24 @@ pub enum AgentRuntime {
     Hermes { binary: PathBuf, profile: String },
     ClaudeCode { binary: PathBuf },
     Codex { binary: PathBuf },
+    Custom { name: String, command: String },
     Unconfigured,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum StreamEvent {
     Status(String),
+    ToolStart {
+        id: String,
+        name: String,
+        detail: String,
+    },
+    ToolFinish {
+        id: String,
+        ok: bool,
+        duration_ms: Option<u64>,
+    },
+    Thinking(String),
     Delta(String),
     Done,
     Error(String),
@@ -81,6 +93,18 @@ impl AgentRuntime {
         if let Some(binary) = which_in_path("codex") {
             out.push(Self::Codex { binary });
         }
+        if let Ok(cmd) = std::env::var("JOB_HARNESS_AGENT_CMD")
+            && !cmd.trim().is_empty()
+        {
+            let name = std::env::var("JOB_HARNESS_AGENT_NAME")
+                .ok()
+                .filter(|s| !s.trim().is_empty())
+                .unwrap_or_else(|| "Custom".into());
+            out.push(Self::Custom {
+                name,
+                command: cmd.trim().to_owned(),
+            });
+        }
         out
     }
 
@@ -89,15 +113,17 @@ impl AgentRuntime {
             Self::Hermes { .. } => "hermes",
             Self::ClaudeCode { .. } => "claude",
             Self::Codex { .. } => "codex",
+            Self::Custom { .. } => "custom",
             Self::Unconfigured => "none",
         }
     }
 
-    pub fn short_name(&self) -> &'static str {
+    pub fn short_name(&self) -> &str {
         match self {
             Self::Hermes { .. } => "Hermes",
             Self::ClaudeCode { .. } => "Claude",
             Self::Codex { .. } => "Codex",
+            Self::Custom { name, .. } => name.as_str(),
             Self::Unconfigured => "No agent",
         }
     }
@@ -139,6 +165,7 @@ impl AgentRuntime {
             Self::Hermes { profile, .. } => format!("Hermes ({profile})"),
             Self::ClaudeCode { .. } => "Claude Code".into(),
             Self::Codex { .. } => "Codex".into(),
+            Self::Custom { name, .. } => format!("{name} (custom)"),
             Self::Unconfigured => "Not connected".into(),
         }
     }
@@ -213,18 +240,25 @@ fn run_streaming(
         }
         AgentRuntime::ClaudeCode { binary } => {
             let mut c = Command::new(binary);
-            c.args(["-p", "--continue"]);
+            c.args([
+                "-p",
+                "--continue",
+                "--verbose",
+                "--output-format",
+                "stream-json",
+                "--include-partial-messages",
+            ]);
             if let Some(m) = opts.model.as_deref().filter(|m| !m.is_empty()) {
                 c.args(["--model", m]);
             }
             if let Some(dir) = workspace {
                 c.current_dir(dir);
             }
-            (c, false)
+            (c, true)
         }
         AgentRuntime::Codex { binary } => {
             let mut c = Command::new(binary);
-            c.arg("exec");
+            c.args(["exec", "--json"]);
             if let Some(m) = opts.model.as_deref().filter(|m| !m.is_empty()) {
                 c.args(["-m", m]);
             }
@@ -232,11 +266,19 @@ fn run_streaming(
             if let Some(dir) = workspace {
                 c.current_dir(dir);
             }
-            (c, false)
+            (c, true)
+        }
+        AgentRuntime::Custom { command, .. } => {
+            let mut c = Command::new("sh");
+            c.args(["-lc", command]);
+            if let Some(dir) = workspace {
+                c.current_dir(dir);
+            }
+            (c, true)
         }
         AgentRuntime::Unconfigured => {
             bail!(
-                "No host agent runtime detected (Hermes, Claude Code, or Codex). Install one or run setup from your agent."
+                "No host agent runtime detected (Hermes, Claude Code, Codex, or JOB_HARNESS_AGENT_CMD). Install one or run setup from your agent."
             );
         }
     };
@@ -269,16 +311,11 @@ fn run_streaming(
             continue;
         }
         if json_stream && let Ok(v) = serde_json::from_str::<Value>(&line) {
-            if let Some(chunk) = extract_incremental_delta(&v) {
-                emitted_any = true;
-                saw_incremental_delta = true;
-                let _ = tx.send(StreamEvent::Delta(chunk));
-            } else if !saw_incremental_delta && let Some(final_text) = extract_final_text(&v) {
-                // Only emit final summary object if the runtime didn't already stream deltas
-                emitted_any = true;
-                let _ = tx.send(StreamEvent::Delta(final_text));
-            } else if let Some(status) = extract_stream_status(&v) {
-                let _ = tx.send(StreamEvent::Status(status));
+            for ev in parse_stream_json_value(&v, &mut saw_incremental_delta) {
+                if matches!(ev, StreamEvent::Delta(_)) {
+                    emitted_any = true;
+                }
+                let _ = tx.send(ev);
             }
             continue;
         }
@@ -303,57 +340,263 @@ fn run_streaming(
     Ok(())
 }
 
-fn extract_incremental_delta(v: &Value) -> Option<String> {
-    if let Some(s) = v.get("delta").and_then(Value::as_str)
-        && !s.is_empty()
-    {
-        return Some(s.to_owned());
-    }
-    if let Some(s) = v
-        .pointer("/choices/0/delta/content")
-        .and_then(Value::as_str)
-        && !s.is_empty()
-    {
-        return Some(s.to_owned());
-    }
-    if let Some(kind) = v.get("type").and_then(Value::as_str)
-        && kind.contains("delta")
-        && let Some(s) = v
-            .get("text")
-            .or_else(|| v.get("content"))
-            .and_then(Value::as_str)
-        && !s.is_empty()
-    {
-        return Some(s.to_owned());
-    }
-    None
-}
+/// Parses one NDJSON line from Hermes `stream-json`, Claude Code `stream-json`,
+/// Codex `--json`, or OpenAI-style delta streams into typed live UI events.
+fn parse_stream_json_value(v: &Value, saw_incremental_delta: &mut bool) -> Vec<StreamEvent> {
+    let mut out = Vec::new();
+    let kind = v.get("type").and_then(Value::as_str).unwrap_or("");
 
-fn extract_final_text(v: &Value) -> Option<String> {
-    for key in ["response", "message", "content", "text"] {
-        if let Some(s) = v.get(key).and_then(Value::as_str)
-            && !s.is_empty()
-        {
-            return Some(s.to_owned());
+    match kind {
+        // Hermes & Anthropic tool invocations
+        "tool_use" => {
+            let name = v
+                .get("name")
+                .or_else(|| v.get("tool"))
+                .or_else(|| v.get("tool_name"))
+                .and_then(Value::as_str)
+                .unwrap_or("tool")
+                .to_owned();
+            let id = v
+                .get("tool_call_id")
+                .or_else(|| v.get("id"))
+                .and_then(Value::as_str)
+                .unwrap_or(&name)
+                .to_owned();
+            let detail = summarize_tool_input(&name, v.get("input").or_else(|| v.get("arguments")));
+            out.push(StreamEvent::Status(format!("Running {name}…")));
+            out.push(StreamEvent::ToolStart { id, name, detail });
+            return out;
         }
+        "tool_result" => {
+            let id = v
+                .get("tool_call_id")
+                .or_else(|| v.get("id"))
+                .or_else(|| v.get("name"))
+                .and_then(Value::as_str)
+                .unwrap_or("tool")
+                .to_owned();
+            let ok = !v.get("is_error").and_then(Value::as_bool).unwrap_or(false);
+            let duration_ms = v.get("duration_ms").and_then(Value::as_u64);
+            out.push(StreamEvent::ToolFinish {
+                id,
+                ok,
+                duration_ms,
+            });
+            out.push(StreamEvent::Status("Thinking…".into()));
+            return out;
+        }
+        // Hermes live text chunks (`{"type": "text", "text": "..."}`)
+        "text" => {
+            if let Some(s) = v.get("text").and_then(Value::as_str)
+                && !s.is_empty()
+            {
+                *saw_incremental_delta = true;
+                out.push(StreamEvent::Delta(s.to_owned()));
+            }
+            return out;
+        }
+        "thinking" | "reasoning" => {
+            if let Some(s) = v
+                .get("text")
+                .or_else(|| v.get("thinking"))
+                .or_else(|| v.get("content"))
+                .and_then(Value::as_str)
+                && !s.is_empty()
+            {
+                out.push(StreamEvent::Thinking(s.to_owned()));
+            }
+            return out;
+        }
+        // Final summary object: only emit text if we did NOT already stream incremental deltas
+        "result" => {
+            if !*saw_incremental_delta
+                && let Some(s) = v
+                    .get("text")
+                    .or_else(|| v.get("result"))
+                    .or_else(|| v.get("response"))
+                    .and_then(Value::as_str)
+                && !s.is_empty()
+            {
+                out.push(StreamEvent::Delta(s.to_owned()));
+            }
+            return out;
+        }
+        // Claude Code `--include-partial-messages` wrapper
+        "stream_event" => {
+            if let Some(ev) = v.get("event") {
+                if let Some(s) = ev.pointer("/delta/text").and_then(Value::as_str)
+                    && !s.is_empty()
+                {
+                    *saw_incremental_delta = true;
+                    out.push(StreamEvent::Delta(s.to_owned()));
+                } else if let Some(s) = ev.pointer("/delta/thinking").and_then(Value::as_str)
+                    && !s.is_empty()
+                {
+                    out.push(StreamEvent::Thinking(s.to_owned()));
+                } else if ev.get("type").and_then(Value::as_str) == Some("content_block_start")
+                    && ev.pointer("/content_block/type").and_then(Value::as_str) == Some("tool_use")
+                {
+                    let name = ev
+                        .pointer("/content_block/name")
+                        .and_then(Value::as_str)
+                        .unwrap_or("tool")
+                        .to_owned();
+                    let id = ev
+                        .pointer("/content_block/id")
+                        .and_then(Value::as_str)
+                        .unwrap_or(&name)
+                        .to_owned();
+                    out.push(StreamEvent::Status(format!("Running {name}…")));
+                    out.push(StreamEvent::ToolStart {
+                        id,
+                        name,
+                        detail: String::new(),
+                    });
+                }
+            }
+            return out;
+        }
+        // Claude Code assistant message block (fallback when partial chunks were absent)
+        "assistant" => {
+            if let Some(arr) = v.pointer("/message/content").and_then(Value::as_array) {
+                for block in arr {
+                    match block.get("type").and_then(Value::as_str) {
+                        Some("tool_use") => {
+                            let name = block
+                                .get("name")
+                                .and_then(Value::as_str)
+                                .unwrap_or("tool")
+                                .to_owned();
+                            let id = block
+                                .get("id")
+                                .and_then(Value::as_str)
+                                .unwrap_or(&name)
+                                .to_owned();
+                            let detail = summarize_tool_input(&name, block.get("input"));
+                            out.push(StreamEvent::Status(format!("Running {name}…")));
+                            out.push(StreamEvent::ToolStart { id, name, detail });
+                        }
+                        Some("text") if !*saw_incremental_delta => {
+                            if let Some(s) = block.get("text").and_then(Value::as_str)
+                                && !s.is_empty()
+                            {
+                                *saw_incremental_delta = true;
+                                out.push(StreamEvent::Delta(s.to_owned()));
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            return out;
+        }
+        // Codex `--json` events (`item.started`, `item.completed`)
+        "item.started" | "item.completed" => {
+            if let Some(item) = v.get("item") {
+                let itype = item.get("type").and_then(Value::as_str).unwrap_or("");
+                let id = item
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .unwrap_or(itype)
+                    .to_owned();
+                if itype == "command_execution" {
+                    let cmd = item
+                        .get("command")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_owned();
+                    if kind == "item.started" {
+                        out.push(StreamEvent::Status("Running command…".into()));
+                        out.push(StreamEvent::ToolStart {
+                            id,
+                            name: "shell".into(),
+                            detail: cmd,
+                        });
+                    } else {
+                        let ok = item.get("exit_code").and_then(Value::as_i64).unwrap_or(0) == 0;
+                        out.push(StreamEvent::ToolFinish {
+                            id,
+                            ok,
+                            duration_ms: None,
+                        });
+                    }
+                } else if itype == "reasoning"
+                    && let Some(t) = item.get("text").and_then(Value::as_str)
+                {
+                    out.push(StreamEvent::Thinking(t.to_owned()));
+                } else if itype == "agent_message"
+                    && kind == "item.completed"
+                    && let Some(t) = item.get("text").and_then(Value::as_str)
+                    && !t.is_empty()
+                {
+                    *saw_incremental_delta = true;
+                    out.push(StreamEvent::Delta(t.to_owned()));
+                }
+            }
+            return out;
+        }
+        "system" | "thread.started" | "turn.started" | "turn.completed" => return out,
+        _ => {}
     }
-    None
-}
 
-fn extract_stream_status(v: &Value) -> Option<String> {
-    if let Some(tool) = v
+    // Generic fallback for OpenAI-compatible or custom JSON streams
+    if let Some(s) = v.get("delta").and_then(Value::as_str).or_else(|| {
+        v.pointer("/choices/0/delta/content")
+            .and_then(Value::as_str)
+    }) && !s.is_empty()
+    {
+        *saw_incremental_delta = true;
+        out.push(StreamEvent::Delta(s.to_owned()));
+    } else if let Some(tool) = v
         .get("tool")
         .or_else(|| v.get("tool_name"))
         .and_then(Value::as_str)
     {
-        return Some(format!("Running {tool}…"));
+        out.push(StreamEvent::Status(format!("Running {tool}…")));
+        out.push(StreamEvent::ToolStart {
+            id: tool.to_owned(),
+            name: tool.to_owned(),
+            detail: summarize_tool_input(tool, v.get("input").or_else(|| v.get("arguments"))),
+        });
+    } else if !*saw_incremental_delta {
+        for key in ["response", "message", "content", "text"] {
+            if let Some(s) = v.get(key).and_then(Value::as_str)
+                && !s.is_empty()
+            {
+                out.push(StreamEvent::Delta(s.to_owned()));
+                break;
+            }
+        }
     }
-    if let Some(kind) = v.get("type").and_then(Value::as_str)
-        && (kind.contains("tool") || kind.contains("think") || kind.contains("status"))
+    out
+}
+
+fn summarize_tool_input(tool_name: &str, input: Option<&Value>) -> String {
+    let Some(val) = input else {
+        return String::new();
+    };
+    for key in [
+        "command", "cmd", "path", "file", "query", "q", "url", "tool", "action", "record",
+    ] {
+        if let Some(s) = val.get(key).and_then(Value::as_str) {
+            let one_line = s.lines().next().unwrap_or(s).trim();
+            if !one_line.is_empty() {
+                return one_line.to_owned();
+            }
+        }
+    }
+    if (tool_name.contains("gmail") || tool_name.contains("calendar") || tool_name.contains("mail"))
+        && let Some(obj) = val.as_object()
     {
-        return Some("Working…".into());
+        for (k, v) in obj {
+            if let Some(s) = v.as_str()
+                && !s.is_empty()
+            {
+                return format!("{k}: {}", s.lines().next().unwrap_or(s));
+            }
+        }
     }
-    None
+    String::new()
 }
 
 /// Automatically extracts canonical workspace citations referenced inside any agent reply.
@@ -410,23 +653,46 @@ mod tests {
     }
 
     #[test]
-    fn parses_stream_json_text_and_tool_status() {
-        let delta = serde_json::json!({"delta": "Hello world"});
-        assert_eq!(
-            extract_incremental_delta(&delta).as_deref(),
-            Some("Hello world")
-        );
-        let final_msg = serde_json::json!({"response": "Done reply"});
-        assert_eq!(extract_incremental_delta(&final_msg), None);
-        assert_eq!(
-            extract_final_text(&final_msg).as_deref(),
-            Some("Done reply")
-        );
-        let status = serde_json::json!({"tool": "review_queue"});
-        assert_eq!(
-            extract_stream_status(&status).as_deref(),
-            Some("Running review_queue…")
-        );
+    fn parses_hermes_tool_steps_and_deduplicates_final_result() {
+        let mut saw_delta = false;
+        let start = serde_json::json!({
+            "type": "tool_use",
+            "name": "terminal",
+            "tool_call_id": "call_1",
+            "input": {"command": "jh status"}
+        });
+        let evs = parse_stream_json_value(&start, &mut saw_delta);
+        assert!(matches!(
+            &evs[1],
+            StreamEvent::ToolStart { id, name, detail }
+            if id == "call_1" && name == "terminal" && detail == "jh status"
+        ));
+
+        let done = serde_json::json!({
+            "type": "tool_result",
+            "name": "terminal",
+            "tool_call_id": "call_1",
+            "duration_ms": 971,
+            "is_error": false
+        });
+        let evs = parse_stream_json_value(&done, &mut saw_delta);
+        assert!(matches!(
+            &evs[0],
+            StreamEvent::ToolFinish {
+                id,
+                ok: true,
+                duration_ms: Some(971)
+            } if id == "call_1"
+        ));
+
+        let chunk = serde_json::json!({"type": "text", "text": "Hello Owen"});
+        let evs = parse_stream_json_value(&chunk, &mut saw_delta);
+        assert_eq!(evs, vec![StreamEvent::Delta("Hello Owen".into())]);
+        assert!(saw_delta);
+
+        // Trailing final `result` must NOT duplicate text already streamed
+        let summary = serde_json::json!({"type": "result", "text": "Hello Owen"});
+        assert!(parse_stream_json_value(&summary, &mut saw_delta).is_empty());
     }
 }
 
