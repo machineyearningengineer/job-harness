@@ -30,7 +30,7 @@ impl WorkspaceTarget {
                 .unwrap_or("workspace")
                 .to_owned(),
             Self::Remote { url, .. } => format!(
-                "VPS · {}",
+                "Remote ({})",
                 url.trim_start_matches("http://")
                     .trim_start_matches("https://")
             ),
@@ -162,13 +162,16 @@ pub struct ProfileDoc {
 
 #[derive(Clone, Debug, Default)]
 pub struct ProfileSettings {
+    pub application_email: String,
     pub sender_email: String,
     pub timezone: String,
     pub currency: String,
     pub min_base_salary: u64,
     pub target_base_salary: u64,
     pub location_preferences: String,
+    pub notice_period: String,
     pub target_roles: String,
+    pub avoid_list: String,
     pub tone: String,
     pub applied_ghost_days: u64,
 }
@@ -356,6 +359,10 @@ impl WorkspaceClient {
                 .unwrap_or_default()
         };
         let profile_settings = ProfileSettings {
+            application_email: comm
+                .and_then(|c| c["application_email"].as_str())
+                .unwrap_or("")
+                .to_owned(),
             sender_email: comm
                 .and_then(|c| c["sender_email"].as_str())
                 .unwrap_or("")
@@ -372,7 +379,12 @@ impl WorkspaceClient {
                 .and_then(|d| d["target_base_salary"].as_u64())
                 .unwrap_or(0),
             location_preferences: join_str_array(disc.and_then(|d| d.get("location_preferences"))),
+            notice_period: disc
+                .and_then(|d| d["notice_period"].as_str())
+                .unwrap_or("")
+                .to_owned(),
             target_roles: join_str_array(settings.get("target_roles")),
+            avoid_list: join_str_array(disc.and_then(|d| d.get("avoid_list"))),
             tone: comm
                 .and_then(|c| c["tone"].as_str())
                 .unwrap_or("")
@@ -652,7 +664,7 @@ impl WorkspaceClient {
             unresolved_attempts,
             healthy: unfinished_runs == 0,
             status_note: if unfinished_runs == 0 {
-                format!("SQLite WAL · {total_records} roles")
+                format!("Local ledger ({total_records} roles)")
             } else {
                 format!("{unfinished_runs} unfinished run(s) need reconcile")
             },
@@ -1260,7 +1272,7 @@ fn concise_reason(reason: &str) -> String {
         } else {
             "Active"
         };
-        return format!("Quiet {days}d · {stage}");
+        return format!("Quiet {days}d ({stage})");
     }
     if reason.contains("within 24 hours") {
         return "Interview within 24h".into();
@@ -1392,7 +1404,7 @@ fn extract_location_hint(text: &str) -> Option<String> {
         None
     };
     match (city, mode) {
-        (Some(c), Some(m)) => Some(format!("{c} · {m}")),
+        (Some(c), Some(m)) => Some(format!("{c} ({m})")),
         (Some(c), None) => Some(c.into()),
         (None, Some(m)) => Some(m.into()),
         (None, None) => None,

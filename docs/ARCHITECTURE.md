@@ -2,6 +2,10 @@
 
 Job Harness is a deterministic local state, safety, and workflow engine. It never embeds an agent runtime or stores external credentials.
 
+<p align="center">
+  <img src="assets/architecture.svg" alt="Job Harness technical system architecture whiteboard" width="100%">
+</p>
+
 ## Layers
 
 1. **Core engine (`crates/harness-core`):** SQLite WAL coordinator (`applications/operations/harness.sqlite`), exact deduplication, immutable SHA-256 submission packets, atomic total + per-channel daily caps, derived attention (`review_queue`), and typed v2 JSON schemas (`resources/schemas/tools.json`).

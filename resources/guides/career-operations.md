@@ -59,6 +59,30 @@ Archive/reply/book actions remain external transactions. Save immutable provider
 
 Never put credentials, OTPs, cookies, private session tokens, transport headers or unrelated mail in records or packets. Preserve only necessary evidence. URLs supplied to a local tool are references; the agent/driver must actually read and verify their contents.
 
+## Fast path for single-role updates (keep tokens low)
+
+- **Never open `applications/pipeline.md` or `applications/pipeline.json` with a file reader.** They are generated views that can exceed 1,000+ rows. Query roles through `query_batch` (`read_record`, `list_roles`, `list_attention`) instead.
+- **Archive, close, or update a single role in 1–2 tool calls:** when the user confirms a single-role change (for example, archiving an expired role), do **not** re-read repository guides, `AGENTS.md`, or run `reconcile_tracker` across the whole ledger. Call `update_application` once (it updates the canonical record and rebuilds the pipeline automatically):
+  ```json
+  {
+    "path": "applications/<slug>.md",
+    "stage": "closed",
+    "next_action": "Archive — expired before submission",
+    "record_evidence": "User confirmed closing expired lead on YYYY-MM-DD."
+  }
+  ```
+- **Delete/remove means archive:** removing a role marks it `closed` while preserving cooldown notes, receipts, and audit history. Never `rm` canonical evidence files.
+
+## Scannable writing, emails & avoid-list rules
+
+- **Role `status_detail` (Summary):** Keep to ≤ 2 lines (≤ 160 chars): `<fit or outcome> — <comp / location / key date>`. Never write walls of prose.
+- **Role `next_action`:** One crisp action starting with a canonical verb (`review_fit`, `prepare_packet`, `submit_application`, `wait_employer`, `follow_up`, `reply_recruiter`, `book_interview`, `prep_interview`, `check_outcome`, `none`).
+- **4 Canonical buckets** in role notes and 2-layer briefs: `## Summary & fit`, `## Prep & stories`, `## Questions & risks`, `## Timeline`. Lead every bullet with the fact or decision; no paragraph longer than 3 lines.
+- **Interviewer & company hooks:** When preparing an interview brief and the interviewer's name or role is known, include a concise **Interviewer & company hooks** subsection inside `## Prep & stories` with 2–3 publicly verifiable hooks tailored to the round (recent product launches, talks, blog posts, open-source/prior work, or a light shared-interest ice-breaker). Keep it strictly public and factual; skip cleanly if no reliable public info exists.
+- **Dual emails & discrepancy check:** Respect `communication.application_email` (for ATS forms & CVs) and `communication.sender_email` (for recruiter replies). Before sending, verify the connected inbox matches `sender_email` (or a verified Send-As alias); if mismatched, draft and flag the discrepancy instead of sending. Check receipts across both addresses.
+- **Avoid list:** Check `discovery.avoid_list` before pitching or applying; never submit to avoided companies, sectors, or work patterns.
+- **Ephemeral secrets:** Never ask for passwords in plain chat. Use the host ADE's native `request_secret` if available, otherwise `jh secret request ...` (auto-opens the Desktop Secret Modal or terminal hidden prompt, 1-use, 0600 temp file, auto-shred).
+
 ## Local transport
 
 The supported transport is local stdio JSON-RPC following the [MCP tool contract](https://modelcontextprotocol.io/specification/2025-06-18/server/tools). No network listener, unattended scheduler or credential-reading tool is exposed. Trusted launch configuration chooses the root; an agent cannot switch it through a tool argument. Paths reject traversal and escaping symlinks.

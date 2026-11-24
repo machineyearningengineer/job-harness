@@ -3,7 +3,7 @@
 //! every click, toggle, scroll, and drag runs smoothly at 120Hz.
 use crate::{
     chat_bridge::{
-        AgentOptions, AgentRuntime, CapabilityAccess, DiscoveredMcpServer, HostSession, McpScope,
+        AgentOptions, AgentRuntime, CapabilityAccess, DiscoveredMcpServer, HostSession,
         StreamEvent, discover_mcp_servers, evaluate_capability, extract_citations, is_image_path,
     },
     markdown::{self, LinkTarget},
@@ -71,6 +71,8 @@ enum ColumnMode {
     Standard,
     ExpandInterviews,
     CollapseInterviews,
+    ExpandArchive,
+    CollapseArchive,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -141,6 +143,8 @@ enum CommandAction {
     RefreshWorkspace,
     ImportMasterCv,
     PassSecret,
+    CopyTranscript,
+    ExportTranscript,
     AskAgent(String),
 }
 
@@ -215,6 +219,9 @@ pub struct JobHarnessApp {
     host_sessions: Vec<HostSession>,
     resumed_session_label: Option<String>,
     show_connect_help: bool,
+    show_mcp_servers: bool,
+    copied_flash: Option<(SharedString, u64)>,
+    copied_flash_epoch: u64,
     agent_opts: AgentOptions,
     model_draft: String,
     last_seen_activity_at: Option<String>,
@@ -245,6 +252,9 @@ pub struct JobHarnessApp {
     command_index: usize,
     show_archive: bool,
     archive_toggled: bool,
+    archive_expanded: bool,
+    archive_split_toggled: bool,
+    archive_split_anim_epoch: u64,
     only_attention: bool,
     attention_toggled: bool,
     interviews_expanded: bool,
@@ -291,8 +301,8 @@ pub struct JobHarnessApp {
     attached_role: Option<(String, String)>,
     quoted_reply: Option<String>,
     input_all_selected: bool,
-    text_selection: Option<(SharedString, usize, usize, String)>,
-    selecting_block: Option<SharedString>,
+    text_selection: Option<(markdown::ActiveSelection, Rc<Vec<String>>)>,
+    selecting_doc: Option<SharedString>,
     popover_pinned: bool,
     popover_hover_trigger: Option<ActivePopover>,
     popover_hover_panel: bool,
@@ -382,6 +392,9 @@ impl JobHarnessApp {
             host_sessions: Vec::new(),
             resumed_session_label: None,
             show_connect_help: false,
+            show_mcp_servers: false,
+            copied_flash: None,
+            copied_flash_epoch: 0,
             agent_opts,
             model_draft: String::new(),
             last_seen_activity_at: saved.last_seen_activity_at.clone(),
@@ -424,6 +437,9 @@ impl JobHarnessApp {
             command_index: 0,
             show_archive: saved.show_archive,
             archive_toggled: false,
+            archive_expanded: false,
+            archive_split_toggled: false,
+            archive_split_anim_epoch: 1,
             only_attention: saved.only_attention,
             attention_toggled: false,
             interviews_expanded: saved.interviews_expanded,
@@ -465,7 +481,7 @@ impl JobHarnessApp {
             quoted_reply: None,
             input_all_selected: false,
             text_selection: None,
-            selecting_block: None,
+            selecting_doc: None,
             popover_pinned: false,
             popover_hover_trigger: None,
             popover_hover_panel: false,
@@ -709,13 +725,32 @@ impl JobHarnessApp {
     }
 
     fn active_text_selection(&self) -> Option<markdown::ActiveSelection> {
-        self.text_selection
-            .as_ref()
-            .map(|(block_id, start, end, _)| markdown::ActiveSelection {
-                block_id: block_id.clone(),
-                start: *start,
-                end: *end,
-            })
+        self.text_selection.as_ref().map(|(sel, _)| sel.clone())
+    }
+
+    fn selected_markdown_text(&self) -> Option<String> {
+        let (sel, blocks) = self.text_selection.as_ref()?;
+        if sel.is_empty() || blocks.is_empty() {
+            return None;
+        }
+        let ((sb, si), (eb, ei)) = sel.ordered();
+        let mut parts = Vec::new();
+        for (bi, text) in blocks.iter().enumerate() {
+            if bi < sb || bi > eb {
+                continue;
+            }
+            let len = text.len();
+            let lo = if bi == sb { si.min(len) } else { 0 };
+            let hi = if bi == eb { ei.min(len) } else { len };
+            if lo < hi && text.is_char_boundary(lo) && text.is_char_boundary(hi) {
+                parts.push(&text[lo..hi]);
+            }
+        }
+        if parts.is_empty() {
+            None
+        } else {
+            Some(parts.join("\n\n"))
+        }
     }
 
     fn md_select_handler(&self, cx: &mut Context<Self>) -> markdown::SelectHandler {
@@ -723,29 +758,44 @@ impl JobHarnessApp {
         Rc::new(move |ev, _window, cx| {
             let _ = weak.update(cx, |app, cx| match ev {
                 markdown::TextSelectEvent::Start {
-                    block_id,
+                    doc_id,
+                    block_ix,
                     index,
-                    full_text,
+                    doc_blocks,
                 } => {
-                    app.selecting_block = Some(block_id.clone());
-                    app.text_selection = Some((block_id, index, index, full_text));
+                    app.selecting_doc = Some(doc_id.clone());
+                    app.text_selection = Some((
+                        markdown::ActiveSelection {
+                            doc_id,
+                            anchor_block: block_ix,
+                            anchor_index: index,
+                            focus_block: block_ix,
+                            focus_index: index,
+                        },
+                        doc_blocks,
+                    ));
                     cx.notify();
                 }
-                markdown::TextSelectEvent::Move { block_id, index } => {
-                    if app.selecting_block.as_ref() == Some(&block_id)
-                        && let Some((_, _, end, _)) = app.text_selection.as_mut()
-                        && *end != index
+                markdown::TextSelectEvent::Move {
+                    doc_id,
+                    block_ix,
+                    index,
+                } => {
+                    if app.selecting_doc.as_ref() == Some(&doc_id)
+                        && let Some((sel, _)) = app.text_selection.as_mut()
+                        && (sel.focus_block != block_ix || sel.focus_index != index)
                     {
-                        *end = index;
+                        sel.focus_block = block_ix;
+                        sel.focus_index = index;
                         cx.notify();
                     }
                 }
                 markdown::TextSelectEvent::End => {
-                    if app.selecting_block.take().is_some() {
+                    if app.selecting_doc.take().is_some() {
                         if app
                             .text_selection
                             .as_ref()
-                            .is_some_and(|(_, s, e, _)| s == e)
+                            .is_some_and(|(sel, _)| sel.is_empty())
                         {
                             app.text_selection = None;
                         }
@@ -754,6 +804,143 @@ impl JobHarnessApp {
                 }
             });
         })
+    }
+
+    fn format_chat_transcript_markdown(&self) -> String {
+        let date = chrono::Local::now().format("%Y-%m-%d %H:%M");
+        let agent = self.runtime.short_name();
+        let mut out = format!("# Job Harness Chat ({agent}, {date})\n");
+        for msg in &self.chat_messages {
+            let who = if msg.is_user { "You" } else { agent };
+            out.push_str(&format!("\n## {who}"));
+            if !msg.sent_label.is_empty() {
+                out.push_str(&format!(" ({})", msg.sent_label));
+            }
+            out.push_str("\n\n");
+            out.push_str(msg.text.trim());
+            out.push('\n');
+        }
+        out
+    }
+
+    fn is_copied_flash(&self, tag: &str) -> bool {
+        self.copied_flash
+            .as_ref()
+            .is_some_and(|(t, _)| t.as_ref() == tag)
+    }
+
+    fn flash_copied(&mut self, tag: impl Into<SharedString>, cx: &mut Context<Self>) {
+        self.copied_flash_epoch = self.copied_flash_epoch.wrapping_add(1);
+        let epoch = self.copied_flash_epoch;
+        self.copied_flash = Some((tag.into(), epoch));
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(1400))
+                .await;
+            let _ = this.update(cx, |app, cx| {
+                if app.copied_flash.as_ref().is_some_and(|(_, e)| *e == epoch) {
+                    app.copied_flash = None;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn copy_chat_transcript(&mut self, cx: &mut Context<Self>) {
+        if self.chat_messages.is_empty() {
+            self.set_toast("No chat messages to copy yet", cx);
+            return;
+        }
+        let md = self.format_chat_transcript_markdown();
+        let count = self.chat_messages.len();
+        cx.write_to_clipboard(ClipboardItem::new_string(md));
+        self.flash_copied("chat-copy-transcript", cx);
+        self.set_toast(format!("Copied transcript ({count} messages)"), cx);
+    }
+
+    fn export_chat_transcript(&mut self, cx: &mut Context<Self>) {
+        if self.chat_messages.is_empty() {
+            self.set_toast("No chat messages to export yet", cx);
+            return;
+        }
+        let md = self.format_chat_transcript_markdown();
+        let default_name = format!(
+            "job-harness-chat-{}.md",
+            chrono::Local::now().format("%Y-%m-%d")
+        );
+        cx.spawn(async move |this, cx| {
+            let picked = cx
+                .background_executor()
+                .spawn(async move {
+                    rfd::FileDialog::new()
+                        .set_file_name(&default_name)
+                        .add_filter("Markdown", &["md"])
+                        .save_file()
+                })
+                .await;
+            let Some(path) = picked else {
+                return;
+            };
+            let res = cx
+                .background_executor()
+                .spawn(async move { std::fs::write(&path, md).map(|()| path) })
+                .await;
+            let _ = this.update(cx, |app, cx| match res {
+                Ok(p) => {
+                    let name = p
+                        .file_name()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("transcript.md");
+                    app.set_toast(format!("Exported {name}"), cx);
+                }
+                Err(err) => app.set_toast(format!("Export failed: {err}"), cx),
+            });
+        })
+        .detach();
+    }
+
+    fn set_delegation_preset(&mut self, preset: &'static str, cx: &mut Context<Self>) {
+        let (portal, cold_email, reply, archive) = match preset {
+            "drafts" => (false, false, false, false),
+            "assisted" => (true, false, false, true),
+            "autonomous" => (true, true, true, true),
+            _ => return,
+        };
+        let p = &mut self.snapshot.permissions;
+        p.auto_apply_portal = portal;
+        p.auto_send_first_contact_email = cold_email;
+        p.auto_reply_threads = reply;
+        p.auto_archive_mail = archive;
+        self.mark_sync_working("Saving…", cx);
+
+        let client = self.client.clone();
+        cx.spawn(async move |this, cx| {
+            let res = cx
+                .background_executor()
+                .spawn(async move {
+                    client.update_ledger_config(|cfg| {
+                        if !cfg["permissions"].is_object() {
+                            cfg["permissions"] = json!({});
+                        }
+                        cfg["permissions"]["auto_apply_portal"] = json!(portal);
+                        cfg["permissions"]["auto_send_first_contact_email"] = json!(cold_email);
+                        cfg["permissions"]["auto_reply_threads"] = json!(reply);
+                        cfg["permissions"]["auto_archive_mail"] = json!(archive);
+                    })
+                })
+                .await;
+            let _ = this.update(cx, |app, cx| match res {
+                Ok(()) => app.mark_sync_saved("Saved", cx),
+                Err(err) => {
+                    app.mark_sync_failed("Save failed", cx);
+                    app.set_toast(format!("Save failed: {err}"), cx);
+                    app.refresh_snapshot_async(false, cx);
+                }
+            });
+        })
+        .detach();
     }
 
     fn pick_chat_attachments(&mut self, cx: &mut Context<Self>) {
@@ -1397,13 +1584,14 @@ impl JobHarnessApp {
                     Err(_) => Err("Enter a whole number ≥ 0".into()),
                 }
             }
-            "sender_email" => {
-                if t.contains('@') && t.contains('.') && !t.contains(' ') {
+            "sender_email" | "application_email" => {
+                if t.is_empty() || (t.contains('@') && t.contains('.') && !t.contains(' ')) {
                     Ok(())
                 } else {
-                    Err("Enter a valid email address".into())
+                    Err("Enter a valid email address (or leave blank to inherit default)".into())
                 }
             }
+            "avoid_list" | "notice_period" => Ok(()),
             "timezone" => {
                 if !t.is_empty() && !t.contains(' ') {
                     Ok(())
@@ -1455,6 +1643,9 @@ impl JobHarnessApp {
             "applied_ghost_days" => {
                 self.snapshot.profile_settings.applied_ghost_days = clean_num(&raw);
             }
+            "application_email" => {
+                self.snapshot.profile_settings.application_email = raw.clone();
+            }
             "sender_email" => self.snapshot.profile_settings.sender_email = raw.clone(),
             "timezone" => self.snapshot.profile_settings.timezone = raw.clone(),
             "min_base_salary" => {
@@ -1466,8 +1657,12 @@ impl JobHarnessApp {
             "location_preferences" => {
                 self.snapshot.profile_settings.location_preferences = split_csv(&raw).join(", ");
             }
+            "notice_period" => self.snapshot.profile_settings.notice_period = raw.clone(),
             "target_roles" => {
                 self.snapshot.profile_settings.target_roles = split_csv(&raw).join(", ");
+            }
+            "avoid_list" => {
+                self.snapshot.profile_settings.avoid_list = split_csv(&raw).join(", ");
             }
             "tone" => self.snapshot.profile_settings.tone = raw.clone(),
             _ => {}
@@ -1501,6 +1696,12 @@ impl JobHarnessApp {
                             }
                             cfg["time_and_reminders"]["applied_ghost_days"] = json!(v);
                         }
+                        "application_email" => {
+                            if !cfg["communication"].is_object() {
+                                cfg["communication"] = json!({});
+                            }
+                            cfg["communication"]["application_email"] = json!(raw);
+                        }
                         "sender_email" => {
                             if !cfg["communication"].is_object() {
                                 cfg["communication"] = json!({});
@@ -1530,8 +1731,20 @@ impl JobHarnessApp {
                             }
                             cfg["discovery"]["location_preferences"] = json!(split_csv(&raw));
                         }
+                        "notice_period" => {
+                            if !cfg["discovery"].is_object() {
+                                cfg["discovery"] = json!({});
+                            }
+                            cfg["discovery"]["notice_period"] = json!(raw);
+                        }
                         "target_roles" => {
                             cfg["target_roles"] = json!(split_csv(&raw));
+                        }
+                        "avoid_list" => {
+                            if !cfg["discovery"].is_object() {
+                                cfg["discovery"] = json!({});
+                            }
+                            cfg["discovery"]["avoid_list"] = json!(split_csv(&raw));
                         }
                         "tone" => {
                             if !cfg["communication"].is_object() {
@@ -1571,7 +1784,70 @@ impl JobHarnessApp {
             None
         };
         let all_sel = is_editing && self.input_all_selected;
-        let is_long = self.config_draft.len() > 26;
+        let is_long = self.config_draft.len() > 24
+            || matches!(
+                key,
+                "location_preferences"
+                    | "target_roles"
+                    | "avoid_list"
+                    | "tone"
+                    | "application_email"
+                    | "sender_email"
+            );
+        if is_editing && is_long {
+            // Full-width left-aligned wrapping editor so long lists/emails NEVER clip on the left!
+            return div()
+                .flex()
+                .flex_col()
+                .gap(px(4.0))
+                .py(px(2.0))
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(theme::text_secondary())
+                        .child(label.to_owned()),
+                )
+                .child(
+                    div()
+                        .id(SharedString::from(format!("cfg-edit-{key}")))
+                        .w_full()
+                        .min_w_0()
+                        .max_h(px(108.0))
+                        .overflow_y_scroll()
+                        .px_2()
+                        .py(px(5.0))
+                        .rounded(theme::r_sm())
+                        .bg(theme::surface_subtle())
+                        .border_1()
+                        .border_color(if err.is_some() {
+                            theme::rose_text()
+                        } else {
+                            theme::lavender()
+                        })
+                        .cursor_text()
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                            cx.stop_propagation();
+                        })
+                        .on_scroll_wheel(|_, _, cx| {
+                            cx.stop_propagation();
+                        })
+                        .child(inline_editable_text_left(
+                            &self.config_draft,
+                            placeholder,
+                            all_sel,
+                            self.reduce_motion,
+                            key,
+                        )),
+                )
+                .when_some(err, |d, msg| {
+                    d.child(
+                        div()
+                            .text_size(px(11.0))
+                            .text_color(theme::rose_text())
+                            .child(msg),
+                    )
+                });
+        }
         div()
             .flex()
             .flex_col()
@@ -1594,7 +1870,7 @@ impl JobHarnessApp {
                             .child(label.to_owned()),
                     )
                     .child(if is_editing {
-                        // Seamless borderless inline text editor: hugs text width (no 200px line on short numbers!)
+                        // Seamless borderless inline text editor for short values (numbers / timezone)
                         let editor = div()
                             .id(SharedString::from(format!("cfg-edit-{key}")))
                             .max_w_full()
@@ -1610,11 +1886,6 @@ impl JobHarnessApp {
                             .cursor_text()
                             .on_mouse_down(MouseButton::Left, |_, _, cx| {
                                 cx.stop_propagation();
-                            })
-                            .on_scroll_wheel(move |_, _, cx| {
-                                if is_long {
-                                    cx.stop_propagation();
-                                }
                             })
                             .child(inline_editable_text(
                                 &self.config_draft,
@@ -1849,6 +2120,16 @@ impl JobHarnessApp {
                 CommandAction::PassSecret,
             ),
             (
+                "Copy full chat transcript (Markdown)",
+                "Chat",
+                CommandAction::CopyTranscript,
+            ),
+            (
+                "Export chat transcript (.md)…",
+                "Save",
+                CommandAction::ExportTranscript,
+            ),
+            (
                 "Import / Replace Master CV PDF",
                 "CV",
                 CommandAction::ImportMasterCv,
@@ -1907,6 +2188,8 @@ impl JobHarnessApp {
             }
             CommandAction::ImportMasterCv => self.import_cv_dialog(cx),
             CommandAction::PassSecret => self.open_proactive_secret_modal(cx),
+            CommandAction::CopyTranscript => self.copy_chat_transcript(cx),
+            CommandAction::ExportTranscript => self.export_chat_transcript(cx),
             CommandAction::AskAgent(prompt) => self.submit_prompt(prompt, false, cx),
         }
     }
@@ -2589,16 +2872,10 @@ impl JobHarnessApp {
         }
         if cmd && key == "c" {
             // 1. Prioritize active drag-selection inside Markdown (Chat / Role Inspector / Focused Reader)
-            if let Some((_, s_idx, e_idx, full)) = &self.text_selection
-                && s_idx != e_idx
-            {
-                let lo = (*s_idx).min(*e_idx).min(full.len());
-                let hi = (*s_idx).max(*e_idx).min(full.len());
-                if lo < hi && full.is_char_boundary(lo) && full.is_char_boundary(hi) {
-                    cx.write_to_clipboard(ClipboardItem::new_string(full[lo..hi].to_owned()));
-                    self.set_toast("Copied selection", cx);
-                    return;
-                }
+            if let Some(selected) = self.selected_markdown_text() {
+                cx.write_to_clipboard(ClipboardItem::new_string(selected));
+                self.set_toast("Copied selection", cx);
+                return;
             }
             // 2. Otherwise copy focused input buffer (or latest assistant reply)
             let to_copy = match self.active_input {
@@ -3358,7 +3635,27 @@ impl JobHarnessApp {
     fn suggest_chat_followups(&self, msg: &ChatMessage) -> Vec<(String, String)> {
         let mut out = Vec::new();
         let lower = msg.text.to_ascii_lowercase();
-        if let Some(brief) = msg.citations.iter().find(|c| c.contains("briefs/"))
+
+        // 1. If the assistant explicitly suggested a confirmation phrase (`say "..."`, `reply "..."`), offer it verbatim!
+        if let Some(phrase) = extract_suggested_reply_phrase(&msg.text) {
+            let mut chars = phrase.chars();
+            let label = match chars.next() {
+                Some(first) => format!("{}{}", first.to_uppercase(), chars.as_str()),
+                None => phrase.clone(),
+            };
+            out.push((truncate_end(&label, 44), phrase));
+        } else if lower.contains("haven't changed anything")
+            || lower.contains("haven’t changed anything")
+            || lower.contains("want me to ")
+            || lower.contains("would you like me to ")
+            || lower.contains("should i ")
+        {
+            out.push(("Yes, go ahead".into(), "Yes, go ahead.".into()));
+        }
+
+        // 2. If this specific reply cited a prep brief, offer a 1-question-at-a-time mock drill.
+        if out.len() < 2
+            && let Some(brief) = msg.citations.iter().find(|c| c.contains("briefs/"))
             && let Some((company, stage)) = self.resolve_company_for_brief(brief)
         {
             let stage_noun = match stage.as_str() {
@@ -3374,48 +3671,53 @@ impl JobHarnessApp {
                 ),
             ));
         }
-        if lower.contains("availability") || lower.contains("rsvp") || lower.contains("reply") {
+
+        // 3. Only suggest drafting a reply when this reply actually discusses scheduling/emailing someone.
+        if out.len() < 2
+            && (lower.contains("availability")
+                || lower.contains("rsvp")
+                || lower.contains("draft a reply")
+                || lower.contains("waiting for your reply"))
+        {
             let reply_co = self
                 .snapshot
                 .active_cards
                 .iter()
                 .find(|c| {
                     let co_low = c.company.to_ascii_lowercase();
-                    !co_low.is_empty()
-                        && lower.contains(&co_low)
-                        && (lower.contains("availability") || lower.contains("waiting"))
+                    !co_low.is_empty() && lower.contains(&co_low)
                 })
                 .map(|c| c.company.clone());
             let (label, prompt) = match reply_co {
                 Some(co) => (
                     format!("Draft reply to {co}"),
                     format!(
-                        "Draft a short reply to {co} in my voice (check Gmail Sent first; save as draft only)."
+                        "Draft a short reply to {co} in my voice (check Sent mail first; save as draft only)."
                     ),
                 ),
                 None => (
                     "Draft the reply email".into(),
-                    "Draft the short reply email in my voice (check Gmail Sent first; save as draft only).".into(),
+                    "Draft the short reply email in my voice (check Sent mail first; save as draft only).".into(),
                 ),
             };
             out.push((label, prompt));
         }
-        if out.len() < 2 && self.snapshot.unresolved_attempts > 0 && !lower.contains("reconcil") {
+
+        // 4. Only suggest checking unconfirmed receipts when this reply itself brought them up!
+        if out.len() < 2
+            && self.snapshot.unresolved_attempts > 0
+            && (lower.contains("outcome_unknown")
+                || lower.contains("unconfirmed")
+                || lower.contains("unverified")
+                || lower.contains("receipt"))
+            && !lower.contains("reconciled")
+        {
             out.push((
-                format!(
-                    "Check {} unconfirmed submission(s)",
-                    self.snapshot.unresolved_attempts
-                ),
-                "Reconcile unknown submission outcomes against Gmail Sent.".into(),
+                "Check email receipts for these".into(),
+                "Check live Sent & inbox receipts for the unconfirmed submissions we just discussed and update their recorded outcomes.".into(),
             ));
         }
-        if out.len() < 2 {
-            out.push((
-                "What's the highest-leverage move next?".into(),
-                "What is the single highest-leverage next action across my active roles right now?"
-                    .into(),
-            ));
-        }
+
         out.truncate(2);
         out
     }
@@ -3807,6 +4109,50 @@ impl JobHarnessApp {
                                                 .size(px(13.5))
                                                 .text_color(if sess_open || resuming {
                                                     theme::text_primary()
+                                                } else {
+                                                    theme::text_muted()
+                                                }),
+                                        ),
+                                )
+                            })
+                            .when(!self.chat_messages.is_empty(), |d| {
+                                let copied = self.is_copied_flash("chat-copy-transcript");
+                                d.child(
+                                    div()
+                                        .id("chat-copy-transcript")
+                                        .w(px(26.0))
+                                        .h(px(26.0))
+                                        .rounded(theme::r_sm())
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .cursor_pointer()
+                                        .hover(|s| s.bg(theme::row_hover()))
+                                        .on_click(cx.listener(
+                                            |this, ev: &gpui::ClickEvent, _, cx| {
+                                                if ev.modifiers().shift {
+                                                    this.export_chat_transcript(cx);
+                                                } else {
+                                                    this.copy_chat_transcript(cx);
+                                                }
+                                            },
+                                        ))
+                                        .on_mouse_down(
+                                            MouseButton::Right,
+                                            cx.listener(|this, _, _, cx| {
+                                                this.export_chat_transcript(cx);
+                                            }),
+                                        )
+                                        .child(
+                                            svg()
+                                                .path(if copied {
+                                                    "icons/check.svg"
+                                                } else {
+                                                    "icons/copy.svg"
+                                                })
+                                                .size(px(13.0))
+                                                .text_color(if copied {
+                                                    theme::emerald()
                                                 } else {
                                                     theme::text_muted()
                                                 }),
@@ -4377,23 +4723,26 @@ impl JobHarnessApp {
                                                     let step_code_id = SharedString::from(format!(
                                                         "step-json-{idx}-{si}"
                                                     ));
+                                                    let step_text = truncate_end(trimmed_out, 600);
                                                     let step_sel =
                                                         active_sel.as_ref().and_then(|s| {
-                                                            if s.block_id == step_code_id
-                                                                && s.start != s.end
-                                                            {
-                                                                Some(
-                                                                    s.start.min(s.end)
-                                                                        ..s.start.max(s.end),
-                                                                )
-                                                            } else {
-                                                                None
-                                                            }
+                                                            s.range_for_block(
+                                                                step_code_id.as_ref(),
+                                                                0,
+                                                                step_text.len(),
+                                                            )
                                                         });
+                                                    let blocks_rc =
+                                                        Rc::new(std::cell::RefCell::new(vec![
+                                                            step_text.clone(),
+                                                        ]));
                                                     step_wrap = step_wrap.child(
                                                         markdown::render_syntax_code(
+                                                            step_code_id.clone(),
                                                             step_code_id,
-                                                            &truncate_end(trimmed_out, 600),
+                                                            0,
+                                                            blocks_rc,
+                                                            &step_text,
                                                             "json",
                                                             false,
                                                             step_sel,
@@ -4524,9 +4873,11 @@ impl JobHarnessApp {
                                                 .text_color(theme::text_muted())
                                                 .child(msg.sent_label.clone()),
                                         )
-                                        .child(
+                                        .child({
+                                            let u_tag = format!("umsg-copy-{idx}");
+                                            let copied = self.is_copied_flash(&u_tag);
                                             div()
-                                                .id(SharedString::from(format!("umsg-copy-{idx}")))
+                                                .id(SharedString::from(u_tag.clone()))
                                                 .p(px(3.0))
                                                 .rounded(theme::r_xs())
                                                 .cursor_pointer()
@@ -4535,15 +4886,24 @@ impl JobHarnessApp {
                                                     cx.write_to_clipboard(
                                                         ClipboardItem::new_string(copy_u.clone()),
                                                     );
+                                                    this.flash_copied(u_tag.clone(), cx);
                                                     this.set_toast("Copied message", cx);
                                                 }))
                                                 .child(
                                                     svg()
-                                                        .path("icons/copy.svg")
+                                                        .path(if copied {
+                                                            "icons/check.svg"
+                                                        } else {
+                                                            "icons/copy.svg"
+                                                        })
                                                         .size(px(12.0))
-                                                        .text_color(theme::text_muted()),
-                                                ),
-                                        )
+                                                        .text_color(if copied {
+                                                            theme::emerald()
+                                                        } else {
+                                                            theme::text_muted()
+                                                        }),
+                                                )
+                                        })
                                         .child(
                                             div()
                                                 .id(SharedString::from(format!("umsg-reply-{idx}")))
@@ -4632,9 +4992,11 @@ impl JobHarnessApp {
                                         .flex()
                                         .items_center()
                                         .gap_1()
-                                        .child(
+                                        .child({
+                                            let m_tag = format!("msg-copy-{idx}");
+                                            let copied = self.is_copied_flash(&m_tag);
                                             div()
-                                                .id(SharedString::from(format!("msg-copy-{idx}")))
+                                                .id(SharedString::from(m_tag.clone()))
                                                 .p(px(4.0))
                                                 .rounded(theme::r_xs())
                                                 .cursor_pointer()
@@ -4645,15 +5007,24 @@ impl JobHarnessApp {
                                                             copy_text.clone(),
                                                         ),
                                                     );
+                                                    this.flash_copied(m_tag.clone(), cx);
                                                     this.set_toast("Copied message", cx);
                                                 }))
                                                 .child(
                                                     svg()
-                                                        .path("icons/copy.svg")
+                                                        .path(if copied {
+                                                            "icons/check.svg"
+                                                        } else {
+                                                            "icons/copy.svg"
+                                                        })
                                                         .size(px(13.0))
-                                                        .text_color(theme::text_muted()),
-                                                ),
-                                        )
+                                                        .text_color(if copied {
+                                                            theme::emerald()
+                                                        } else {
+                                                            theme::text_muted()
+                                                        }),
+                                                )
+                                        })
                                         .child(
                                             div()
                                                 .id(SharedString::from(format!("msg-reply-{idx}")))
@@ -5706,14 +6077,13 @@ impl JobHarnessApp {
     fn render_agent_controls(
         &self,
         scope: &'static str,
-        show_custom_input: bool,
+        show_settings_link: bool,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let presets = self.runtime.model_presets();
         let cur_model = self.agent_opts.model.clone();
         let cur_provider = self.agent_opts.provider.clone();
         let cur_reasoning = self.agent_opts.reasoning.clone();
-        let model_input_active = self.active_input == ActiveInput::ModelField;
         let reasoning_opts: [(&str, Option<&str>); 5] = [
             ("Auto", None),
             ("Low", Some("low")),
@@ -6054,111 +6424,8 @@ impl JobHarnessApp {
                         ),
                 )
             })
-            // 4. Custom model override lives cleanly in Settings (with 1-click Reset guard)
-            .when(show_custom_input, |d| {
-                let has_override =
-                    self.agent_opts.model.is_some() || self.agent_opts.provider.is_some();
-                d.child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap_1()
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .justify_between()
-                                .child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(theme::text_muted())
-                                        .child("Custom model"),
-                                )
-                                .when(has_override, |r| {
-                                    r.child(
-                                        div()
-                                            .id(SharedString::from(format!("{scope}-model-reset")))
-                                            .text_xs()
-                                            .text_color(theme::lavender())
-                                            .cursor_pointer()
-                                            .on_click(cx.listener(|this, _, _, cx| {
-                                                this.agent_opts.model = None;
-                                                this.agent_opts.provider = None;
-                                                this.model_draft.clear();
-                                                this.set_toast(
-                                                    "Reset to profile default model",
-                                                    cx,
-                                                );
-                                            }))
-                                            .child("Reset to default"),
-                                    )
-                                }),
-                        )
-                        .child(
-                            div()
-                                .id(SharedString::from(format!("{scope}-model-input")))
-                                .px_2()
-                                .py(px(6.0))
-                                .rounded(theme::r_sm())
-                                .bg(if model_input_active {
-                                    theme::surface_active()
-                                } else {
-                                    theme::surface_subtle()
-                                })
-                                .border_1()
-                                .border_color(if model_input_active {
-                                    theme::hairline_strong()
-                                } else {
-                                    gpui::rgba(0x00000000)
-                                })
-                                .hover(|s| {
-                                    if model_input_active {
-                                        s
-                                    } else {
-                                        s.bg(gpui::rgba(0xffffff0e))
-                                    }
-                                })
-                                .flex()
-                                .items_center()
-                                .justify_between()
-                                .gap_2()
-                                .cursor_text()
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    if this.model_draft.is_empty()
-                                        && let Some(m) = &this.agent_opts.model
-                                    {
-                                        this.model_draft = m.clone();
-                                    }
-                                    this.active_input = ActiveInput::ModelField;
-                                    cx.notify();
-                                }))
-                                .child(input_line(
-                                    &self.model_draft,
-                                    "Type a model ID…",
-                                    model_input_active,
-                                    self.reduce_motion,
-                                    scope,
-                                    28,
-                                ))
-                                .child(
-                                    div()
-                                        .id(SharedString::from(format!("{scope}-model-apply")))
-                                        .px(px(6.0))
-                                        .py(px(1.0))
-                                        .rounded(theme::r_xs())
-                                        .hover(|s| s.bg(theme::row_hover()))
-                                        .cursor_pointer()
-                                        .text_xs()
-                                        .text_color(theme::lavender())
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.apply_model_draft(cx);
-                                        }))
-                                        .child("Apply"),
-                                ),
-                        ),
-                )
-            })
-            .when(!show_custom_input, |d| {
+            // 4. Quick jump to Settings (shown ONLY inside the Chat agent popover, never inside Settings itself)
+            .when(show_settings_link, |d| {
                 d.child(
                     div()
                         .pt_2()
@@ -6178,7 +6445,7 @@ impl JobHarnessApp {
                                     this.active_popover = ActivePopover::None;
                                     this.open_right_drawer(RightDrawer::Settings, cx);
                                 }))
-                                .child("Custom model & rules →"),
+                                .child("Delegation & tools →"),
                         ),
                 )
             })
@@ -6276,6 +6543,8 @@ impl JobHarnessApp {
     ) -> AnyElement {
         let expandable_interviews = mode == ColumnMode::ExpandInterviews;
         let collapse_interviews_inline = mode == ColumnMode::CollapseInterviews;
+        let expandable_archive = mode == ColumnMode::ExpandArchive;
+        let collapse_archive_inline = mode == ColumnMode::CollapseArchive;
         let scroll_handle = self.col_scrolls.get(col_name).cloned();
         let hidden =
             (self.only_attention && col_total == 0) || self.collapsed_cols.contains(col_name);
@@ -6343,6 +6612,44 @@ impl JobHarnessApp {
                             }))
                             .child(format!("‹  {col_name}"))
                             .into_any_element()
+                    } else if expandable_archive {
+                        div()
+                            .id("expand-archive-col")
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .cursor_pointer()
+                            .text_xs()
+                            .text_color(theme::text_secondary())
+                            .hover(|s| s.text_color(theme::text_primary()))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.archive_expanded = true;
+                                this.archive_split_toggled = true;
+                                this.archive_split_anim_epoch =
+                                    this.archive_split_anim_epoch.wrapping_add(1);
+                                cx.notify();
+                            }))
+                            .child("Archive  ›")
+                            .into_any_element()
+                    } else if collapse_archive_inline {
+                        div()
+                            .id("collapse-archive-col")
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .cursor_pointer()
+                            .text_xs()
+                            .text_color(theme::text_secondary())
+                            .hover(|s| s.text_color(theme::text_primary()))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.archive_expanded = false;
+                                this.archive_split_toggled = true;
+                                this.archive_split_anim_epoch =
+                                    this.archive_split_anim_epoch.wrapping_add(1);
+                                cx.notify();
+                            }))
+                            .child(format!("‹  {col_name}"))
+                            .into_any_element()
                     } else {
                         div()
                             .text_xs()
@@ -6364,7 +6671,12 @@ impl JobHarnessApp {
                             .when(
                                 !expandable_interviews
                                     && !collapse_interviews_inline
-                                    && !matches!(col_name, "Final" | "Offer"),
+                                    && !expandable_archive
+                                    && !collapse_archive_inline
+                                    && !matches!(
+                                        col_name,
+                                        "Final" | "Offer" | "Withdrawn" | "Other closed"
+                                    ),
                                 |d| {
                                     d.child(
                                         div()
@@ -6621,72 +6933,52 @@ impl JobHarnessApp {
                                 )
                                 .into_any_element()
                         } else {
+                            let expanded = self.sankey_expand_all;
                             div()
+                                .id("sk-toggle-expand")
+                                .px_2()
+                                .py(px(3.0))
+                                .rounded(theme::r_sm())
+                                .bg(if expanded {
+                                    theme::surface_active()
+                                } else {
+                                    theme::surface_subtle()
+                                })
+                                .hover(|s| s.bg(theme::row_hover()))
+                                .cursor_pointer()
                                 .flex()
                                 .items_center()
-                                .gap_1()
+                                .gap(px(5.0))
+                                .text_xs()
+                                .text_color(if expanded {
+                                    theme::text_primary()
+                                } else {
+                                    theme::text_secondary()
+                                })
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.sankey_expand_all = !this.sankey_expand_all;
+                                    this.sankey_zoom = None;
+                                    this.sankey_bucket = None;
+                                    this.sankey_filter.clear();
+                                    this.sankey_hover = None;
+                                    this.flow_anim_epoch = this.flow_anim_epoch.wrapping_add(1);
+                                    cx.notify();
+                                }))
                                 .child(
-                                    div()
-                                        .id("sk-mode-overview")
-                                        .px_2()
-                                        .py(px(3.0))
-                                        .rounded(theme::r_sm())
-                                        .when(!self.sankey_expand_all, |d| {
-                                            d.bg(theme::surface_subtle())
+                                    svg()
+                                        .path(if expanded {
+                                            "icons/minimize.svg"
+                                        } else {
+                                            "icons/expand.svg"
                                         })
-                                        .hover(|s| s.bg(theme::row_hover()))
-                                        .cursor_pointer()
-                                        .text_xs()
-                                        .text_color(if !self.sankey_expand_all {
+                                        .size(px(11.5))
+                                        .text_color(if expanded {
                                             theme::text_primary()
                                         } else {
                                             theme::text_muted()
-                                        })
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            if this.sankey_expand_all {
-                                                this.sankey_expand_all = false;
-                                                this.sankey_zoom = None;
-                                                this.sankey_bucket = None;
-                                                this.sankey_filter.clear();
-                                                this.sankey_hover = None;
-                                                this.flow_anim_epoch =
-                                                    this.flow_anim_epoch.wrapping_add(1);
-                                                cx.notify();
-                                            }
-                                        }))
-                                        .child("Overview"),
+                                        }),
                                 )
-                                .child(
-                                    div()
-                                        .id("sk-mode-expand")
-                                        .px_2()
-                                        .py(px(3.0))
-                                        .rounded(theme::r_sm())
-                                        .when(self.sankey_expand_all, |d| {
-                                            d.bg(theme::surface_subtle())
-                                        })
-                                        .hover(|s| s.bg(theme::row_hover()))
-                                        .cursor_pointer()
-                                        .text_xs()
-                                        .text_color(if self.sankey_expand_all {
-                                            theme::text_primary()
-                                        } else {
-                                            theme::text_muted()
-                                        })
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            if !this.sankey_expand_all {
-                                                this.sankey_expand_all = true;
-                                                this.sankey_zoom = None;
-                                                this.sankey_bucket = None;
-                                                this.sankey_filter.clear();
-                                                this.sankey_hover = None;
-                                                this.flow_anim_epoch =
-                                                    this.flow_anim_epoch.wrapping_add(1);
-                                                cx.notify();
-                                            }
-                                        }))
-                                        .child("Expand all"),
-                                )
+                                .child(if expanded { "Collapse" } else { "Expand all" })
                                 .into_any_element()
                         }
                     } else {
@@ -6732,7 +7024,7 @@ impl JobHarnessApp {
                             .gap_2()
                             .when(self.flow_view, |bar| {
                                 let scale_pct =
-                                    (self.sankey_scale.clamp(0.75, 1.45) * 100.0).round() as i32;
+                                    (self.sankey_scale.clamp(0.75, 1.50) * 100.0).round() as i32;
                                 bar.child(
                                     div()
                                         .flex()
@@ -6798,7 +7090,7 @@ impl JobHarnessApp {
                                                 .cursor_pointer()
                                                 .on_click(cx.listener(|this, _, _, cx| {
                                                     this.sankey_scale =
-                                                        (this.sankey_scale + 0.15).min(1.45);
+                                                        (this.sankey_scale + 0.15).min(1.50);
                                                     cx.notify();
                                                 }))
                                                 .child("+"),
@@ -7043,6 +7335,7 @@ impl JobHarnessApp {
                     cx,
                 )
             } else {
+                let q = self.search_query.trim().to_ascii_lowercase();
                 let mut board_scroller = div()
                     .id("kanban-scroll-x")
                     .track_scroll(&self.board_scroll_x)
@@ -7135,24 +7428,83 @@ impl JobHarnessApp {
                         )
                     }))
                     .child({
-                        let inner = self.render_kanban_column(
+                        let inner = if !self.archive_expanded {
+                            self.render_kanban_column(
+                                "Archive",
+                                archive_cards.clone(),
+                                archive_total,
+                                ColumnMode::ExpandArchive,
+                                0.0,
+                                cx,
+                            )
+                        } else {
+                            let rej_all: Vec<&RoleCard> = self
+                                .snapshot
+                                .archived_cards
+                                .iter()
+                                .filter(|c| {
+                                    (q.is_empty() || c.search_blob.contains(&q))
+                                        && c.outcome
+                                            .as_deref()
+                                            .is_some_and(|o| o.contains("reject"))
+                                })
+                                .collect();
+                            let rej_total = rej_all.len();
+                            self.render_kanban_column(
+                                "Rejected",
+                                rej_all.into_iter().take(28).collect(),
+                                rej_total,
+                                ColumnMode::CollapseArchive,
+                                16.0,
+                                cx,
+                            )
+                        };
+                        clip_column_slide(
+                            inner,
                             "Archive",
-                            archive_cards,
-                            archive_total,
+                            268.0,
+                            if self.archive_expanded { 16.0 } else { 0.0 },
+                            !self.show_archive,
+                            self.archive_toggled && !self.reduce_motion,
+                            self.archive_anim_epoch,
+                        )
+                    })
+                    .children(["Withdrawn", "Other closed"].into_iter().map(|label| {
+                        let matching: Vec<&RoleCard> = self
+                            .snapshot
+                            .archived_cards
+                            .iter()
+                            .filter(|c| {
+                                if !q.is_empty() && !c.search_blob.contains(&q) {
+                                    return false;
+                                }
+                                let out = c.outcome.as_deref().unwrap_or("");
+                                if label == "Withdrawn" {
+                                    out.contains("withdraw")
+                                } else {
+                                    !out.contains("reject") && !out.contains("withdraw")
+                                }
+                            })
+                            .collect();
+                        let total = matching.len();
+                        let inner = self.render_kanban_column(
+                            label,
+                            matching.into_iter().take(28).collect(),
+                            total,
                             ColumnMode::Standard,
                             0.0,
                             cx,
                         );
                         clip_column_slide(
                             inner,
-                            "Archive",
+                            label,
                             268.0,
-                            0.0,
-                            !self.show_archive,
-                            self.archive_toggled && !self.reduce_motion,
-                            self.archive_anim_epoch,
+                            16.0,
+                            !(self.show_archive && self.archive_expanded),
+                            self.archive_split_toggled && !self.reduce_motion,
+                            self.archive_split_anim_epoch,
                         )
-                    });
+                    }));
                 if !self.reduce_motion && self.flow_anim_epoch > 0 {
                     let fe = self.flow_anim_epoch;
                     board_el
@@ -7442,8 +7794,32 @@ impl JobHarnessApp {
                                         }),
                                 )
                             })
-                            // Animated T3 Code-style live Save/Sync pill right beside `0 / 25  ●`
-                            .when(!matches!(self.sync_state, SyncIndicator::Idle), |d| {
+                            // 1-click Refresh button that morphs in-place into the live Save/Sync status pill right beside `1 / 25  ●`
+                            .child(if matches!(self.sync_state, SyncIndicator::Idle) {
+                                div()
+                                    .id("btn-dock-refresh")
+                                    .w(px(22.0))
+                                    .h(px(22.0))
+                                    .rounded(theme::r_sm())
+                                    .hover(|s| s.bg(theme::row_hover()))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .cursor_pointer()
+                                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                        cx.stop_propagation();
+                                    })
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.refresh_snapshot_async(true, cx);
+                                    }))
+                                    .child(
+                                        svg()
+                                            .path("icons/refresh-cw.svg")
+                                            .size(px(12.5))
+                                            .text_color(theme::text_muted()),
+                                    )
+                                    .into_any_element()
+                            } else {
                                 let epoch = self.sync_epoch;
                                 let pill = match &self.sync_state {
                                     SyncIndicator::Working(lbl) => div()
@@ -7506,10 +7882,9 @@ impl JobHarnessApp {
                                     self.sync_state,
                                     SyncIndicator::Saved(_, _) | SyncIndicator::Failed(_, _)
                                 );
-                                d.child(if self.reduce_motion {
+                                if self.reduce_motion {
                                     pill.into_any_element()
                                 } else if is_ephemeral {
-                                    // Fade in smoothly -> hold crisp -> dissolve gently back to nothing!
                                     pill.with_animation(
                                         SharedString::from(format!("sync-pill-{epoch}")),
                                         Animation::new(Duration::from_millis(2350)),
@@ -7533,7 +7908,7 @@ impl JobHarnessApp {
                                         |el, t| el.opacity(t),
                                     )
                                     .into_any_element()
-                                })
+                                }
                             })
                             .child(
                                 div()
@@ -8472,15 +8847,31 @@ impl JobHarnessApp {
                                                 .child("Personal defaults (click to edit)"),
                                         )
                                         .child(self.render_editable_kv(
+                                            "application_email",
+                                            "Application email",
+                                            if ps.application_email.is_empty() {
+                                                if ps.sender_email.is_empty() {
+                                                    "Set email".into()
+                                                } else {
+                                                    format!("Same as reply ({})", truncate_label(&ps.sender_email, 16))
+                                                }
+                                            } else {
+                                                truncate_label(&ps.application_email, 26)
+                                            },
+                                            ps.application_email.clone(),
+                                            "cv@domain.com (forms & portals)",
+                                            cx,
+                                        ))
+                                        .child(self.render_editable_kv(
                                             "sender_email",
-                                            "Email",
+                                            "Reply email",
                                             if ps.sender_email.is_empty() {
-                                                "Set email".into()
+                                                "Set reply email".into()
                                             } else {
                                                 truncate_label(&ps.sender_email, 26)
                                             },
                                             ps.sender_email.clone(),
-                                            "you@domain.com",
+                                            "you@domain.com (connected inbox)",
                                             cx,
                                         ))
                                         .child(self.render_editable_kv(
@@ -8489,6 +8880,21 @@ impl JobHarnessApp {
                                             ps.timezone.clone(),
                                             ps.timezone.clone(),
                                             "Europe/London",
+                                            cx,
+                                        ))
+                                        .child(self.render_editable_kv(
+                                            "notice_period",
+                                            "Notice period",
+                                            truncate_end(
+                                                if ps.notice_period.is_empty() {
+                                                    "Set notice period"
+                                                } else {
+                                                    &ps.notice_period
+                                                },
+                                                26,
+                                            ),
+                                            ps.notice_period.clone(),
+                                            "1 month / Immediate",
                                             cx,
                                         ))
                                         .child(self.render_editable_kv(
@@ -8535,6 +8941,21 @@ impl JobHarnessApp {
                                             ),
                                             ps.target_roles.clone(),
                                             "Senior Backend, Product, AI",
+                                            cx,
+                                        ))
+                                        .child(self.render_editable_kv(
+                                            "avoid_list",
+                                            "Avoid list",
+                                            truncate_end(
+                                                if ps.avoid_list.is_empty() {
+                                                    "Companies or sectors to skip"
+                                                } else {
+                                                    &ps.avoid_list
+                                                },
+                                                26,
+                                            ),
+                                            ps.avoid_list.clone(),
+                                            "e.g. gambling, defence, agencies",
                                             cx,
                                         ))
                                         .child(self.render_editable_kv(
@@ -8743,20 +9164,28 @@ impl JobHarnessApp {
                                                                                 copy_ws.clone(),
                                                                             ),
                                                                         );
+                                                                        this.flash_copied("ws-copy", cx);
                                                                         this.set_toast(
                                                                             "Copied workspace path",
                                                                             cx,
                                                                         );
                                                                     },
                                                                 ))
-                                                                .child(
+                                                                .child({
+                                                                    let copied = self.is_copied_flash("ws-copy");
                                                                     svg()
-                                                                        .path("icons/copy.svg")
+                                                                        .path(if copied {
+                                                                            "icons/check.svg"
+                                                                        } else {
+                                                                            "icons/copy.svg"
+                                                                        })
                                                                         .size(px(12.0))
-                                                                        .text_color(
-                                                                            theme::text_muted(),
-                                                                        ),
-                                                                ),
+                                                                        .text_color(if copied {
+                                                                            theme::emerald()
+                                                                        } else {
+                                                                            theme::text_muted()
+                                                                        })
+                                                                }),
                                                         ),
                                                 )
                                         })
@@ -8929,14 +9358,24 @@ impl JobHarnessApp {
                                                 cx.write_to_clipboard(ClipboardItem::new_string(
                                                     copy_str.clone(),
                                                 ));
+                                                this.flash_copied(format!("cv-copy-{i}"), cx);
                                                 this.set_toast("Copied CV path", cx);
                                             }))
-                                            .child(
+                                            .child({
+                                                let copied = self.is_copied_flash(&format!("cv-copy-{i}"));
                                                 svg()
-                                                    .path("icons/copy.svg")
+                                                    .path(if copied {
+                                                        "icons/check.svg"
+                                                    } else {
+                                                        "icons/copy.svg"
+                                                    })
                                                     .size(px(13.0))
-                                                    .text_color(theme::text_muted()),
-                                            ),
+                                                    .text_color(if copied {
+                                                        theme::emerald()
+                                                    } else {
+                                                        theme::text_muted()
+                                                    })
+                                            }),
                                     ),
                             )
                             .child(
@@ -9512,7 +9951,313 @@ impl JobHarnessApp {
                                         })
                                 }),
                         )
-                        // Section 1b: Tools & connectors (capability matrix for active runtime + shared vs agent-only scope)
+                        // Section 2: Delegation & Automation rules (3-state preset + fine-grained overrides, stored in config/career-ledger.json)
+                        .child({
+                            let active_preset = if !p.auto_apply_portal
+                                && !p.auto_send_first_contact_email
+                                && !p.auto_reply_threads
+                                && !p.auto_archive_mail
+                            {
+                                Some("drafts")
+                            } else if p.auto_apply_portal
+                                && !p.auto_send_first_contact_email
+                                && !p.auto_reply_threads
+                                && p.auto_archive_mail
+                            {
+                                Some("assisted")
+                            } else if p.auto_apply_portal
+                                && p.auto_send_first_contact_email
+                                && p.auto_reply_threads
+                                && p.auto_archive_mail
+                            {
+                                Some("autonomous")
+                            } else {
+                                None
+                            };
+                            let preset_desc = match active_preset {
+                                Some("drafts") => {
+                                    "Prepares packets and saves Gmail drafts only — you submit and send."
+                                }
+                                Some("assisted") => {
+                                    "Recommended: auto-submits clean ATS portals in your cap and archives verified receipts; cold emails & replies stay drafts."
+                                }
+                                Some("autonomous") => {
+                                    "Submits eligible portals, sends verified cold emails & routine replies, and archives receipts."
+                                }
+                                _ => "Custom mix of fine-grained rules below.",
+                            };
+                            let presets: [(&'static str, &'static str); 3] = [
+                                ("drafts", "Drafts only"),
+                                ("assisted", "Assisted"),
+                                ("autonomous", "Autonomous"),
+                            ];
+                            div()
+                                .pt_3()
+                                .border_t_1()
+                                .border_color(theme::hairline())
+                                .flex()
+                                .flex_col()
+                                .gap_2()
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .justify_between()
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .font_weight(FontWeight::MEDIUM)
+                                                .text_color(theme::text_primary())
+                                                .child("Delegation"),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_size(px(10.5))
+                                                .text_color(if active_preset == Some("assisted") {
+                                                    theme::emerald()
+                                                } else {
+                                                    theme::text_muted()
+                                                })
+                                                .child(match active_preset {
+                                                    Some("assisted") => "Recommended",
+                                                    None => "Custom",
+                                                    _ => "",
+                                                }),
+                                        ),
+                                )
+                                .child(
+                                    div()
+                                        .w_full()
+                                        .p(px(2.0))
+                                        .rounded(theme::r_sm())
+                                        .bg(theme::surface_subtle())
+                                        .flex()
+                                        .items_center()
+                                        .gap(px(2.0))
+                                        .children(presets.into_iter().map(|(id, label)| {
+                                            let on = active_preset == Some(id);
+                                            div()
+                                                .id(SharedString::from(format!("del-mode-{id}")))
+                                                .flex_1()
+                                                .py(px(4.5))
+                                                .rounded(theme::r_sm())
+                                                .bg(if on {
+                                                    theme::surface_active()
+                                                } else {
+                                                    gpui::rgba(0x00000000)
+                                                })
+                                                .hover(|s| {
+                                                    if on { s } else { s.bg(theme::row_hover()) }
+                                                })
+                                                .cursor_pointer()
+                                                .flex()
+                                                .items_center()
+                                                .justify_center()
+                                                .text_xs()
+                                                .font_weight(if on {
+                                                    FontWeight::MEDIUM
+                                                } else {
+                                                    FontWeight::NORMAL
+                                                })
+                                                .text_color(if on {
+                                                    theme::text_primary()
+                                                } else {
+                                                    theme::text_muted()
+                                                })
+                                                .on_click(cx.listener(move |this, _, _, cx| {
+                                                    this.set_delegation_preset(id, cx);
+                                                }))
+                                                .child(label)
+                                        })),
+                                )
+                                .child(
+                                    div()
+                                        .text_size(px(11.0))
+                                        .line_height(px(16.0))
+                                        .text_color(theme::text_muted())
+                                        .child(preset_desc),
+                                )
+                                .child(perm_row(
+                                    "Auto-apply portals",
+                                    p.auto_apply_portal,
+                                    "auto_apply_portal",
+                                    "Off = prepares packets for approval. On = submits eligible ATS portals inside your daily cap.",
+                                    info == Some("auto_apply_portal"),
+                                    cx,
+                                ))
+                                .child(perm_row(
+                                    "First-contact direct email",
+                                    p.auto_send_first_contact_email,
+                                    "auto_send_first_contact_email",
+                                    "Off = drafts in Gmail. On = sends initial cold applications after verifying zero prior Sent mail.",
+                                    info == Some("auto_send_first_contact_email"),
+                                    cx,
+                                ))
+                                .child(perm_row(
+                                    "Auto-reply threads",
+                                    p.auto_reply_threads,
+                                    "auto_reply_threads",
+                                    "Off = drafts replies in your voice. On = replies to routine threads (still re-checks live Sent first).",
+                                    info == Some("auto_reply_threads"),
+                                    cx,
+                                ))
+                                .child(perm_row(
+                                    "Auto-archive mail",
+                                    p.auto_archive_mail,
+                                    "auto_archive_mail",
+                                    "Archives verified receipts and rejections once recorded in your ledger.",
+                                    info == Some("auto_archive_mail"),
+                                    cx,
+                                ))
+                                .child(
+                                    div()
+                                        .pt_1()
+                                        .text_size(px(11.0))
+                                        .line_height(px(16.0))
+                                        .text_color(theme::text_muted())
+                                        .child("Always asks you first: booking slots, live interviews, offers, CAPTCHAs, and secrets."),
+                                )
+                        })
+                        // Section 3: Interface & Timing
+                        .child(
+                            div()
+                                .pt_3()
+                                .border_t_1()
+                                .border_color(theme::hairline())
+                                .flex()
+                                .flex_col()
+                                .gap_2()
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .text_color(theme::text_primary())
+                                        .child("Interface & timing"),
+                                )
+                                .child(
+                                    div()
+                                        .py_1()
+                                        .flex()
+                                        .items_center()
+                                        .justify_between()
+                                        .gap_2()
+                                        .child(
+                                            div()
+                                                .flex()
+                                                .items_center()
+                                                .gap_1()
+                                                .child(
+                                                    div()
+                                                        .text_xs()
+                                                        .text_color(theme::text_primary())
+                                                        .child("Keep Mac awake during runs"),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .id("info-keep_awake")
+                                                        .px(px(4.0))
+                                                        .rounded(theme::r_xs())
+                                                        .cursor_pointer()
+                                                        .hover(|s| {
+                                                            s.text_color(theme::text_primary())
+                                                        })
+                                                        .text_xs()
+                                                        .text_color(
+                                                            if info == Some("keep_awake") {
+                                                                theme::lavender()
+                                                            } else {
+                                                                theme::text_muted()
+                                                            },
+                                                        )
+                                                        .on_click(cx.listener(|this, _, _, cx| {
+                                                            this.expanded_info = if this
+                                                                .expanded_info
+                                                                == Some("keep_awake")
+                                                            {
+                                                                None
+                                                            } else {
+                                                                Some("keep_awake")
+                                                            };
+                                                            cx.notify();
+                                                        }))
+                                                        .child("ⓘ"),
+                                                ),
+                                        )
+                                        .child(
+                                            div()
+                                                .id("toggle-keep-awake")
+                                                .cursor_pointer()
+                                                .on_click(cx.listener(|this, _, _, cx| {
+                                                    this.agent_opts.keep_awake =
+                                                        !this.agent_opts.keep_awake;
+                                                    let on = this.agent_opts.keep_awake;
+                                                    this.set_toast(
+                                                        if on {
+                                                            "Mac stays awake while an agent turn is running"
+                                                        } else {
+                                                            "Normal Mac sleep restored"
+                                                        },
+                                                        cx,
+                                                    );
+                                                }))
+                                                .child(switch_pill(self.agent_opts.keep_awake)),
+                                        ),
+                                )
+                                .when(info == Some("keep_awake"), |d| {
+                                    d.child(
+                                        div()
+                                            .pb_1()
+                                            .text_xs()
+                                            .text_color(theme::text_muted())
+                                            .child("Uses macOS caffeinate only while a run is active; releases immediately when the turn ends."),
+                                    )
+                                })
+                                .child(
+                                    div()
+                                        .py_1()
+                                        .flex()
+                                        .items_center()
+                                        .justify_between()
+                                        .gap_2()
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .text_color(theme::text_primary())
+                                                .child("Reduce motion"),
+                                        )
+                                        .child(
+                                            div()
+                                                .id("toggle-reduce-motion")
+                                                .cursor_pointer()
+                                                .on_click(cx.listener(|this, _, _, cx| {
+                                                    this.reduce_motion = !this.reduce_motion;
+                                                    cx.notify();
+                                                }))
+                                                .child(switch_pill(self.reduce_motion)),
+                                        ),
+                                )
+                                .child(self.render_editable_kv(
+                                    "prep_reminder_minutes",
+                                    "Prep reminder",
+                                    format!("{} min prior", p.brief_lead_time_minutes),
+                                    p.brief_lead_time_minutes.to_string(),
+                                    "Minutes (e.g. 90, 1440)",
+                                    cx,
+                                ))
+                                .child(self.render_editable_kv(
+                                    "applied_ghost_days",
+                                    "Ghost archive",
+                                    format!(
+                                        "{} days",
+                                        self.snapshot.profile_settings.applied_ghost_days
+                                    ),
+                                    self.snapshot.profile_settings.applied_ghost_days.to_string(),
+                                    "Days (e.g. 30)",
+                                    cx,
+                                ))
+                                .child(kv_row("Storage", self.snapshot.status_note.clone())),
+                        )
+                        // Section 4: Tools & connectors (placed below actionable settings; compact & actionable)
                         .child({
                             let active_kind = self.runtime.kind();
                             let active_name = self.runtime.short_name().to_owned();
@@ -9560,10 +10305,9 @@ impl JobHarnessApp {
                                 }
                                 other => other,
                             };
-                            let caps: [(&str, &str, CapabilityAccess); 4] = [
+                            let caps: [(&str, CapabilityAccess); 4] = [
                                 (
                                     "Email",
-                                    "Recommended",
                                     evaluate_capability(
                                         &self.mcp_servers,
                                         active_kind,
@@ -9572,29 +10316,21 @@ impl JobHarnessApp {
                                 ),
                                 (
                                     "Calendar",
-                                    "Recommended",
                                     evaluate_capability(
                                         &self.mcp_servers,
                                         active_kind,
                                         &["calendar", "google", "cal", "gcal"],
                                     ),
                                 ),
-                                ("Web Search", "Optional", web_search_access),
-                                ("Browser", "Optional", browser_access),
+                                ("Web Search", web_search_access),
+                                ("Browser", browser_access),
                             ];
-                            let shared_servers: Vec<_> = self
+                            let visible_servers: Vec<_> = self
                                 .mcp_servers
                                 .iter()
-                                .filter(|s| matches!(s.scope, McpScope::Global))
+                                .filter(|s| s.visible_to(active_kind))
                                 .collect();
-                            let agent_servers: Vec<_> = self
-                                .mcp_servers
-                                .iter()
-                                .filter(|s| {
-                                    matches!(s.scope, McpScope::AgentOnly(_))
-                                        && s.visible_to(active_kind)
-                                })
-                                .collect();
+                            let mcp_open = self.show_mcp_servers;
                             div()
                                 .pt_3()
                                 .border_t_1()
@@ -9621,30 +10357,40 @@ impl JobHarnessApp {
                                                 .child(format!("for {active_name}")),
                                         ),
                                 )
-                                // Capability rows (what Job Harness needs vs what is active for this runtime)
                                 .child(
                                     div()
                                         .flex()
                                         .flex_col()
-                                        .gap(px(4.0))
-                                        // Built-in Required capability: Career Ledger
+                                        .gap(px(2.0))
+                                        // Career Ledger: 1-click copy MCP command
                                         .child(
                                             div()
+                                                .id("set-copy-mcp-cmd")
                                                 .px_2()
-                                                .py(px(6.0))
+                                                .py(px(5.0))
+                                                .mx(px(-8.0))
                                                 .rounded(theme::r_sm())
-                                                .bg(theme::window_glass())
-                                                .border_1()
-                                                .border_color(theme::hairline())
+                                                .hover(|s| s.bg(theme::row_hover()))
+                                                .cursor_pointer()
                                                 .flex()
                                                 .items_center()
                                                 .justify_between()
                                                 .gap_2()
+                                                .on_click(cx.listener(move |this, _, _, cx| {
+                                                    cx.write_to_clipboard(
+                                                        ClipboardItem::new_string(mcp_cmd.clone()),
+                                                    );
+                                                    this.flash_copied("set-copy-mcp-cmd", cx);
+                                                    this.set_toast(
+                                                        "Copied `jh connect mcp` command",
+                                                        cx,
+                                                    );
+                                                }))
                                                 .child(
                                                     div()
                                                         .flex()
                                                         .items_center()
-                                                        .gap(px(6.0))
+                                                        .gap_2()
                                                         .child(
                                                             div()
                                                                 .w(px(6.0))
@@ -9654,385 +10400,189 @@ impl JobHarnessApp {
                                                         )
                                                         .child(
                                                             div()
-                                                                .text_size(px(11.5))
+                                                                .text_xs()
                                                                 .text_color(theme::text_primary())
                                                                 .child("Career Ledger"),
-                                                        )
-                                                        .child(
-                                                            div()
-                                                                .text_size(px(10.0))
-                                                                .text_color(theme::text_muted())
-                                                                .child("Required"),
                                                         ),
                                                 )
-                                                .child(
+                                                .child({
+                                                    let copied = self.is_copied_flash("set-copy-mcp-cmd");
                                                     div()
-                                                        .id("set-copy-mcp-cmd")
-                                                        .px(px(6.0))
-                                                        .py(px(2.0))
-                                                        .rounded(theme::r_xs())
-                                                        .bg(theme::surface_subtle())
-                                                        .hover(|s| s.bg(theme::row_hover()))
-                                                        .cursor_pointer()
-                                                        .text_size(px(10.5))
-                                                        .text_color(theme::text_primary())
-                                                        .on_click(cx.listener(
-                                                            move |this, _, _, cx| {
-                                                                cx.write_to_clipboard(
-                                                                    ClipboardItem::new_string(
-                                                                        mcp_cmd.clone(),
-                                                                    ),
-                                                                );
-                                                                this.set_toast(
-                                                                    "Copied `jh connect mcp` command",
-                                                                    cx,
-                                                                );
-                                                            },
-                                                        ))
-                                                        .child("Connected"),
-                                                ),
-                                        )
-                                        .children(caps.into_iter().map(|(label, tier, access)| {
-                                            let (dot_col, status_txt, status_col) = match access {
-                                                CapabilityAccess::Active { global: true, .. } => (
-                                                    theme::emerald(),
-                                                    "Shared".to_owned(),
-                                                    theme::text_primary(),
-                                                ),
-                                                CapabilityAccess::Active { global: false, .. } => (
-                                                    theme::emerald(),
-                                                    active_name.clone(),
-                                                    theme::text_primary(),
-                                                ),
-                                                CapabilityAccess::BuiltIn => (
-                                                    theme::emerald(),
-                                                    "Built-in".to_owned(),
-                                                    theme::text_primary(),
-                                                ),
-                                                CapabilityAccess::OtherRuntime { owner, .. } => (
-                                                    theme::amber_accent(),
-                                                    format!("In {owner} only"),
-                                                    theme::amber_text(),
-                                                ),
-                                                CapabilityAccess::NotConnected => (
-                                                    theme::text_muted(),
-                                                    "Not connected".to_owned(),
-                                                    theme::text_muted(),
-                                                ),
-                                            };
-                                            div()
-                                                .px_2()
-                                                .py(px(5.5))
-                                                .rounded(theme::r_sm())
-                                                .bg(theme::window_glass())
-                                                .border_1()
-                                                .border_color(theme::hairline())
-                                                .flex()
-                                                .items_center()
-                                                .justify_between()
-                                                .gap_2()
-                                                .child(
-                                                    div()
-                                                        .flex()
-                                                        .items_center()
-                                                        .gap(px(6.0))
-                                                        .child(
-                                                            div()
-                                                                .w(px(6.0))
-                                                                .h(px(6.0))
-                                                                .rounded(px(99.0))
-                                                                .bg(dot_col),
-                                                        )
-                                                        .child(
-                                                            div()
-                                                                .text_size(px(11.5))
-                                                                .text_color(theme::text_primary())
-                                                                .child(label),
-                                                        )
-                                                        .child(
-                                                            div()
-                                                                .text_size(px(10.0))
-                                                                .text_color(theme::text_muted())
-                                                                .child(tier),
-                                                        ),
-                                                )
-                                                .child(
-                                                    div()
-                                                        .text_size(px(10.5))
-                                                        .text_color(status_col)
-                                                        .child(status_txt),
-                                                )
-                                        })),
-                                )
-                                // Discovered MCP scope tree: Shared across agents vs Agent-only
-                                .when(!shared_servers.is_empty(), |box_d| {
-                                    box_d.child(
-                                        div()
-                                            .pt_1()
-                                            .flex()
-                                            .flex_col()
-                                            .gap(px(4.0))
-                                            .child(
-                                                div()
-                                                    .text_size(px(10.0))
-                                                    .text_color(theme::text_muted())
-                                                    .child("Shared across agents"),
-                                            )
-                                            .child(div().flex().flex_wrap().gap(px(5.0)).children(
-                                                shared_servers.into_iter().take(8).map(|srv| {
-                                                    div()
-                                                        .px_2()
-                                                        .py(px(3.0))
-                                                        .rounded(theme::r_sm())
-                                                        .bg(theme::surface_subtle())
-                                                        .border_1()
-                                                        .border_color(theme::hairline())
-                                                        .flex()
-                                                        .items_center()
-                                                        .gap(px(5.0))
-                                                        .text_size(px(10.5))
-                                                        .text_color(theme::text_secondary())
-                                                        .child(
-                                                            div()
-                                                                .w(px(5.0))
-                                                                .h(px(5.0))
-                                                                .rounded(px(99.0))
-                                                                .bg(theme::emerald()),
-                                                        )
-                                                        .child(srv.name.clone())
-                                                        .child(
-                                                            div()
-                                                                .text_size(px(9.5))
-                                                                .text_color(theme::text_muted())
-                                                                .child(srv.source.clone()),
-                                                        )
-                                                }),
-                                            )),
-                                    )
-                                })
-                                .when(!agent_servers.is_empty(), |box_d| {
-                                    box_d.child(
-                                        div()
-                                            .pt_1()
-                                            .flex()
-                                            .flex_col()
-                                            .gap(px(4.0))
-                                            .child(
-                                                div()
-                                                    .text_size(px(10.0))
-                                                    .text_color(theme::text_muted())
-                                                    .child(format!("Only in {active_name}")),
-                                            )
-                                            .child(div().flex().flex_wrap().gap(px(5.0)).children(
-                                                agent_servers.into_iter().take(8).map(|srv| {
-                                                    let vis = srv.visible_to(active_kind);
-                                                    div()
-                                                        .px_2()
-                                                        .py(px(3.0))
-                                                        .rounded(theme::r_sm())
-                                                        .bg(theme::window_glass())
-                                                        .border_1()
-                                                        .border_color(theme::hairline())
-                                                        .when(!vis, |d| d.opacity(0.6))
-                                                        .flex()
-                                                        .items_center()
-                                                        .gap(px(5.0))
-                                                        .text_size(px(10.5))
-                                                        .text_color(if vis {
-                                                            theme::text_primary()
+                                                        .text_size(px(11.0))
+                                                        .text_color(if copied {
+                                                            theme::emerald()
                                                         } else {
                                                             theme::text_muted()
                                                         })
-                                                        .child(
-                                                            div()
-                                                                .w(px(5.0))
-                                                                .h(px(5.0))
-                                                                .rounded(px(99.0))
-                                                                .bg(if vis {
-                                                                    theme::emerald()
-                                                                } else {
-                                                                    theme::text_muted()
-                                                                }),
-                                                        )
-                                                        .child(srv.name.clone())
-                                                        .child(
-                                                            div()
-                                                                .text_size(px(9.5))
-                                                                .text_color(theme::text_muted())
-                                                                .child(srv.source.clone()),
-                                                        )
+                                                        .child(if copied { "Copied ✓" } else { "Copy MCP" })
                                                 }),
-                                            )),
-                                    )
-                                })
-                        })
-                        // Section 2: Automation Permissions (stored in config/career-ledger.json)
-                        .child(
-                            div()
-                                .pt_3()
-                                .border_t_1()
-                                .border_color(theme::hairline())
-                                .flex()
-                                .flex_col()
-                                .gap_2()
-                                .child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(theme::text_muted())
-                                        .child("Automation rules"),
-                                )
-                                .child(perm_row(
-                                    "Auto-apply portals",
-                                    p.auto_apply_portal,
-                                    "auto_apply_portal",
-                                    "Off = prepares packets for approval. On = submits eligible ATS portals inside your daily cap.",
-                                    info == Some("auto_apply_portal"),
-                                    cx,
-                                ))
-                                .child(perm_row(
-                                    "First-contact direct email",
-                                    p.auto_send_first_contact_email,
-                                    "auto_send_first_contact_email",
-                                    "Off = drafts in Gmail. On = sends initial cold applications after verifying zero prior Sent mail.",
-                                    info == Some("auto_send_first_contact_email"),
-                                    cx,
-                                ))
-                                .child(perm_row(
-                                    "Auto-reply threads",
-                                    p.auto_reply_threads,
-                                    "auto_reply_threads",
-                                    "Off = drafts replies in your voice. On = replies to routine threads (still re-checks live Sent first).",
-                                    info == Some("auto_reply_threads"),
-                                    cx,
-                                ))
-                                .child(perm_row(
-                                    "Auto-archive mail",
-                                    p.auto_archive_mail,
-                                    "auto_archive_mail",
-                                    "Archives verified receipts and rejections once recorded in your ledger.",
-                                    info == Some("auto_archive_mail"),
-                                    cx,
-                                )),
-                        )
-                        // Section 3: Interface & Motion
-                        .child(
-                            div()
-                                .pt_3()
-                                .border_t_1()
-                                .border_color(theme::hairline())
-                                .flex()
-                                .flex_col()
-                                .gap_2()
-                                .child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(theme::text_muted())
-                                        .child("Interface"),
-                                )
-                                .child(
-                                    div()
-                                        .py_1()
-                                        .flex()
-                                        .items_center()
-                                        .justify_between()
-                                        .gap_2()
-                                        .child(
-                                            div()
-                                                .flex()
-                                                .items_center()
-                                                .gap_1()
-                                                .child(
-                                                    div()
-                                                        .text_xs()
-                                                        .text_color(theme::text_primary())
-                                                        .child("Reduce motion"),
-                                                )
-                                                .child(
-                                                    div()
-                                                        .id("info-reduce_motion")
-                                                        .px(px(4.0))
-                                                        .rounded(theme::r_xs())
-                                                        .cursor_pointer()
-                                                        .hover(|s| {
-                                                            s.text_color(theme::text_primary())
-                                                        })
-                                                        .text_xs()
-                                                        .text_color(
-                                                            if info == Some("reduce_motion") {
-                                                                theme::lavender()
-                                                            } else {
-                                                                theme::text_muted()
-                                                            },
-                                                        )
-                                                        .on_click(cx.listener(|this, _, _, cx| {
-                                                            this.expanded_info = if this
-                                                                .expanded_info
-                                                                == Some("reduce_motion")
-                                                            {
-                                                                None
-                                                            } else {
-                                                                Some("reduce_motion")
-                                                            };
-                                                            cx.notify();
-                                                        }))
-                                                        .child("ⓘ"),
-                                                ),
                                         )
-                                        .child(
-                                            div()
-                                                .id("toggle-reduce-motion")
-                                                .cursor_pointer()
-                                                .on_click(cx.listener(|this, _, _, cx| {
-                                                    this.reduce_motion = !this.reduce_motion;
-                                                    cx.notify();
-                                                }))
-                                                .child(switch_pill(self.reduce_motion)),
-                                        ),
+                                        .children(caps.into_iter().enumerate().map(
+                                            |(ci, (label, access))| {
+                                                let (dot_col, status_txt, status_col, action_kind) =
+                                                    match access {
+                                                        CapabilityAccess::Active {
+                                                            server, ..
+                                                        } => (
+                                                            theme::emerald(),
+                                                            truncate_end(&server, 18),
+                                                            theme::text_muted(),
+                                                            0u8,
+                                                        ),
+                                                        CapabilityAccess::BuiltIn => (
+                                                            theme::emerald(),
+                                                            "Built-in".to_owned(),
+                                                            theme::text_muted(),
+                                                            0u8,
+                                                        ),
+                                                        CapabilityAccess::OtherRuntime {
+                                                            owner,
+                                                            ..
+                                                        } => (
+                                                            theme::amber_accent(),
+                                                            format!("Switch to {owner} →"),
+                                                            theme::amber_text(),
+                                                            1u8,
+                                                        ),
+                                                        CapabilityAccess::NotConnected => (
+                                                            theme::text_muted(),
+                                                            "Connect →".to_owned(),
+                                                            theme::lavender(),
+                                                            2u8,
+                                                        ),
+                                                    };
+                                                let cap_label = label.to_owned();
+                                                let owner_target = status_txt.clone();
+                                                div()
+                                                    .id(SharedString::from(format!("cap-row-{ci}")))
+                                                    .px_2()
+                                                    .py(px(5.0))
+                                                    .mx(px(-8.0))
+                                                    .rounded(theme::r_sm())
+                                                    .when(action_kind > 0, |d| {
+                                                        d.hover(|s| s.bg(theme::row_hover()))
+                                                            .cursor_pointer()
+                                                            .on_click(cx.listener(
+                                                                move |this, _, _, cx| {
+                                                                    if action_kind == 1 {
+                                                                        let low = owner_target
+                                                                            .to_ascii_lowercase();
+                                                                        if let Some(rt) = this
+                                                                            .available_runtimes
+                                                                            .iter()
+                                                                            .find(|r| {
+                                                                                low.contains(
+                                                                                    &r.short_name()
+                                                                                        .to_ascii_lowercase(),
+                                                                                )
+                                                                            })
+                                                                            .cloned()
+                                                                        {
+                                                                            let nm = rt
+                                                                                .short_name()
+                                                                                .to_owned();
+                                                                            this.runtime = rt;
+                                                                            this.set_toast(
+                                                                                format!(
+                                                                                    "Switched to {nm}"
+                                                                                ),
+                                                                                cx,
+                                                                            );
+                                                                        }
+                                                                    } else {
+                                                                        this.submit_prompt(
+                                                                            format!(
+                                                                                "Help me connect {cap_label} tools for {} in this Job Harness workspace.",
+                                                                                this.runtime.short_name()
+                                                                            ),
+                                                                            false,
+                                                                            cx,
+                                                                        );
+                                                                    }
+                                                                },
+                                                            ))
+                                                    })
+                                                    .flex()
+                                                    .items_center()
+                                                    .justify_between()
+                                                    .gap_2()
+                                                    .child(
+                                                        div()
+                                                            .flex()
+                                                            .items_center()
+                                                            .gap_2()
+                                                            .child(
+                                                                div()
+                                                                    .w(px(6.0))
+                                                                    .h(px(6.0))
+                                                                    .rounded(px(99.0))
+                                                                    .bg(dot_col),
+                                                            )
+                                                            .child(
+                                                                div()
+                                                                    .text_xs()
+                                                                    .text_color(
+                                                                        theme::text_primary(),
+                                                                    )
+                                                                    .child(label),
+                                                            ),
+                                                    )
+                                                    .child(
+                                                        div()
+                                                            .text_size(px(11.0))
+                                                            .text_color(status_col)
+                                                            .child(status_txt),
+                                                    )
+                                            },
+                                        )),
                                 )
-                                .when(info == Some("reduce_motion"), |d| {
+                                .when(!visible_servers.is_empty(), |d| {
+                                    let srv_count = visible_servers.len();
                                     d.child(
                                         div()
-                                            .pb_1()
-                                            .text_xs()
+                                            .id("toggle-mcp-servers")
+                                            .pt_1()
+                                            .cursor_pointer()
+                                            .text_size(px(11.0))
                                             .text_color(theme::text_muted())
-                                            .child("Disables sliding transitions and lands layout changes immediately."),
+                                            .hover(|s| s.text_color(theme::text_primary()))
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                this.show_mcp_servers = !this.show_mcp_servers;
+                                                cx.notify();
+                                            }))
+                                            .child(if mcp_open {
+                                                format!("All MCP servers ({srv_count}) ▾")
+                                            } else {
+                                                format!("All MCP servers ({srv_count}) ▸")
+                                            }),
                                     )
-                                }),
-                        )
-                        // Section 4: Timing & Workspace facts
-                        .child(
-                            div()
-                                .pt_3()
-                                .border_t_1()
-                                .border_color(theme::hairline())
-                                .flex()
-                                .flex_col()
-                                .gap_2()
-                                .child(self.render_editable_kv(
-                                    "prep_reminder_minutes",
-                                    "Prep reminder",
-                                    format!("{} min prior", p.brief_lead_time_minutes),
-                                    p.brief_lead_time_minutes.to_string(),
-                                    "Minutes (e.g. 90, 1440)",
-                                    cx,
-                                ))
-                                .child(self.render_editable_kv(
-                                    "applied_ghost_days",
-                                    "Ghost archive",
-                                    format!("{} days", self.snapshot.profile_settings.applied_ghost_days),
-                                    self.snapshot.profile_settings.applied_ghost_days.to_string(),
-                                    "Days (e.g. 30)",
-                                    cx,
-                                ))
-                                .child(kv_row("Storage", self.snapshot.status_note.clone()))
-                                .child(
-                                    div()
-                                        .pt_1()
-                                        .text_xs()
-                                        .text_color(theme::text_muted())
-                                        .child("Interviews always check your live calendar and ask before committing a new time."),
-                                ),
-                        )
+                                    .when(mcp_open, |box_d| {
+                                        box_d.child(div().flex().flex_wrap().gap(px(5.0)).children(
+                                            visible_servers.into_iter().take(12).map(|srv| {
+                                                div()
+                                                    .px_2()
+                                                    .py(px(3.0))
+                                                    .rounded(theme::r_sm())
+                                                    .bg(theme::surface_subtle())
+                                                    .border_1()
+                                                    .border_color(theme::hairline())
+                                                    .flex()
+                                                    .items_center()
+                                                    .gap(px(5.0))
+                                                    .text_size(px(10.5))
+                                                    .text_color(theme::text_secondary())
+                                                    .child(srv.name.clone())
+                                                    .child(
+                                                        div()
+                                                            .text_size(px(9.5))
+                                                            .text_color(theme::text_muted())
+                                                            .child(srv.source.clone()),
+                                                    )
+                                            }),
+                                        ))
+                                    })
+                                })
+                        })
                         .into_any_element(),
                 )
             }
@@ -10214,21 +10764,51 @@ impl JobHarnessApp {
                                                 .child("Draft follow-up")
                                                 .into_any_element()
                                         })
-                                        .child(
+                                        .child({
+                                            let stage_keep = card.stage.clone();
+                                            let next_keep = card.next_action.clone();
+                                            let has_sched_keep = card.scheduled_start.is_some();
                                             div()
                                                 .id(SharedString::from(format!("tidy-keep-{i}")))
                                                 .text_xs()
                                                 .text_color(theme::text_muted())
+                                                .hover(|s| s.text_color(theme::text_primary()))
                                                 .cursor_pointer()
                                                 .on_click(cx.listener(move |this, _, _, cx| {
                                                     this.dismissed_tidy.insert(path_keep.clone());
+                                                    let client = this.client.clone();
+                                                    let rp = path_keep.clone();
+                                                    let st = stage_keep.clone();
+                                                    let na = next_keep.clone();
+                                                    cx.spawn(async move |this, cx| {
+                                                        let res = cx
+                                                            .background_executor()
+                                                            .spawn(async move {
+                                                                client.move_role_stage(
+                                                                    &rp,
+                                                                    &st,
+                                                                    &st,
+                                                                    &na,
+                                                                    has_sched_keep,
+                                                                )
+                                                            })
+                                                            .await;
+                                                        let _ = this.update(cx, |app, cx| {
+                                                            if res.is_ok() {
+                                                                app.refresh_snapshot_async(
+                                                                    false, cx,
+                                                                );
+                                                            }
+                                                        });
+                                                    })
+                                                    .detach();
                                                     this.set_toast(
-                                                        "Kept active — hidden from Tidy",
+                                                        "Kept active — check date refreshed",
                                                         cx,
                                                     );
                                                 }))
-                                                .child("Keep active"),
-                                        ),
+                                                .child("Keep active")
+                                        }),
                                 )
                         }))
                         .into_any_element(),
@@ -10380,6 +10960,12 @@ impl JobHarnessApp {
                                                         "icons/upload.svg"
                                                     }
                                                     CommandAction::PassSecret => "icons/lock.svg",
+                                                    CommandAction::CopyTranscript => {
+                                                        "icons/copy.svg"
+                                                    }
+                                                    CommandAction::ExportTranscript => {
+                                                        "icons/file-text.svg"
+                                                    }
                                                     CommandAction::AskAgent(_) => {
                                                         "icons/terminal.svg"
                                                     }
@@ -10533,7 +11119,7 @@ impl JobHarnessApp {
                     .border_color(theme::hairline_strong())
                     .shadow_lg()
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .child(self.render_agent_controls("pop", false, cx));
+                    .child(self.render_agent_controls("pop", true, cx));
                 Some(
                     div()
                         .id("agent-backdrop")
@@ -10579,7 +11165,10 @@ impl JobHarnessApp {
                 let card = div()
                     .id("sessions-popover")
                     .absolute()
-                    .left(px(12.0))
+                    .when(self.chat_fullscreen, |d| d.right(px(14.0)))
+                    .when(!self.chat_fullscreen, |d| {
+                        d.left(px((self.chat_width - pop_w - 12.0).max(12.0)))
+                    })
                     .top(px(96.0))
                     .w(px(pop_w))
                     .p_4()
@@ -11242,42 +11831,6 @@ impl JobHarnessApp {
                                     .child("All clear")
                                     .into_any_element()
                             }),
-                    )
-                    .child(
-                        div()
-                            .pt_2()
-                            .border_t_1()
-                            .border_color(theme::hairline())
-                            .flex()
-                            .items_center()
-                            .justify_between()
-                            .text_size(px(11.0))
-                            .child(
-                                div()
-                                    .text_color(theme::text_muted())
-                                    .child(match &self.sync_state {
-                                        SyncIndicator::Working(msg) => msg.clone(),
-                                        SyncIndicator::Saved(msg, _) => msg.clone(),
-                                        SyncIndicator::Failed(msg, _) => msg.clone(),
-                                        SyncIndicator::Idle => "Ledger up to date".to_owned(),
-                                    }),
-                            )
-                            .child(
-                                div()
-                                    .id("health-refresh-now")
-                                    .px(px(6.0))
-                                    .py(px(2.0))
-                                    .rounded(theme::r_xs())
-                                    .hover(|s| {
-                                        s.bg(theme::row_hover()).text_color(theme::text_primary())
-                                    })
-                                    .cursor_pointer()
-                                    .text_color(theme::text_secondary())
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.refresh_snapshot_async(true, cx);
-                                    }))
-                                    .child("Refresh"),
-                            ),
                     );
                 Some(if self.reduce_motion {
                     card.into_any_element()
@@ -11676,7 +12229,8 @@ impl Render for JobHarnessApp {
                                             })
                                             .child(truncate_label(&title, 50))
                                     })
-                                    .child(
+                                    .child({
+                                        let copied = self.is_copied_flash("reader-copy-all");
                                         div()
                                             .id("reader-copy-all")
                                             .p(px(4.0))
@@ -11687,15 +12241,24 @@ impl Render for JobHarnessApp {
                                                 cx.write_to_clipboard(ClipboardItem::new_string(
                                                     copy_reader_body.clone(),
                                                 ));
+                                                this.flash_copied("reader-copy-all", cx);
                                                 this.set_toast("Copied text", cx);
                                             }))
                                             .child(
                                                 svg()
-                                                    .path("icons/copy.svg")
+                                                    .path(if copied {
+                                                        "icons/check.svg"
+                                                    } else {
+                                                        "icons/copy.svg"
+                                                    })
                                                     .size(px(13.5))
-                                                    .text_color(theme::text_muted()),
-                                            ),
-                                    ),
+                                                    .text_color(if copied {
+                                                        theme::emerald()
+                                                    } else {
+                                                        theme::text_muted()
+                                                    }),
+                                            )
+                                    }),
                             )
                             .child(
                                 div()
@@ -11941,14 +12504,15 @@ impl Render for JobHarnessApp {
                                     .unwrap_or_else(|_| body.clone());
                                 let code_id = SharedString::from("reader-json-raw-code");
                                 let sr = reader_sel.as_ref().and_then(|s| {
-                                    if s.block_id == code_id && s.start != s.end {
-                                        Some(s.start.min(s.end)..s.start.max(s.end))
-                                    } else {
-                                        None
-                                    }
+                                    s.range_for_block(code_id.as_ref(), 0, pretty.len())
                                 });
+                                let blocks_rc =
+                                    Rc::new(std::cell::RefCell::new(vec![pretty.clone()]));
                                 markdown::render_syntax_code(
+                                    code_id.clone(),
                                     code_id,
+                                    0,
+                                    blocks_rc,
                                     &pretty,
                                     "json",
                                     true,
@@ -11966,15 +12530,15 @@ impl Render for JobHarnessApp {
                             }
                         } else if title.ends_with(".json") {
                             let code_id = SharedString::from("reader-json-fallback");
-                            let sr = reader_sel.as_ref().and_then(|s| {
-                                if s.block_id == code_id && s.start != s.end {
-                                    Some(s.start.min(s.end)..s.start.max(s.end))
-                                } else {
-                                    None
-                                }
-                            });
+                            let sr = reader_sel
+                                .as_ref()
+                                .and_then(|s| s.range_for_block(code_id.as_ref(), 0, body.len()));
+                            let blocks_rc = Rc::new(std::cell::RefCell::new(vec![body.clone()]));
                             markdown::render_syntax_code(
+                                code_id.clone(),
                                 code_id,
+                                0,
+                                blocks_rc,
                                 &body,
                                 "json",
                                 true,
@@ -12189,7 +12753,90 @@ fn parse_brief_sections(text: &str) -> Vec<BriefSection> {
             body: current_lines.join("\n"),
         });
     }
+    // Fold ad-hoc `## ` headings (> 4) into at most 4 predictable canonical buckets
+    if split_prefix == "## " && sections.len() > 4 {
+        let mut buckets: [(&'static str, Vec<String>); 4] = [
+            ("Summary & fit", Vec::new()),
+            ("Prep & stories", Vec::new()),
+            ("Questions & risks", Vec::new()),
+            ("Timeline", Vec::new()),
+        ];
+        for sec in sections {
+            let low = sec.label.to_ascii_lowercase();
+            let ix = if low.contains("update")
+                || low.contains("log")
+                || low.contains("timeline")
+                || low.contains("history")
+                || low.contains("debrief")
+                || low.contains("email")
+                || low.contains("attempt")
+                || low.contains("overnight")
+                || low.contains("note")
+            {
+                3
+            } else if low.contains("question")
+                || low.contains("ask")
+                || low.contains("risk")
+                || low.contains("gap")
+                || low.contains("concern")
+                || low.contains("objection")
+                || low.contains("flag")
+            {
+                2
+            } else if low.contains("prep")
+                || low.contains("stor")
+                || low.contains("opening")
+                || low.contains("pitch")
+                || low.contains("demo")
+                || low.contains("angle")
+                || low.contains("talk")
+                || low.contains("hook")
+                || low.contains("interviewer")
+                || low.contains("architect")
+            {
+                1
+            } else {
+                0
+            };
+            buckets[ix].1.push(sec.body);
+        }
+        return buckets
+            .into_iter()
+            .filter(|(_, parts)| !parts.is_empty())
+            .map(|(label, parts)| BriefSection {
+                label: label.to_owned(),
+                body: parts.join("\n\n"),
+            })
+            .collect();
+    }
     sections
+}
+
+/// Extracts an explicit quoted confirmation phrase from an assistant message (e.g. `say "yes, clean it up"`).
+fn extract_suggested_reply_phrase(text: &str) -> Option<String> {
+    let lower = text.to_ascii_lowercase();
+    for trigger in ["say ", "reply ", "type ", "respond with "] {
+        if let Some(pos) = lower.rfind(trigger) {
+            let rest = text[pos + trigger.len()..].trim_start();
+            let (open, close) = if rest.starts_with('“') {
+                ('“', '”')
+            } else if rest.starts_with('"') {
+                ('"', '"')
+            } else if rest.starts_with('`') {
+                ('`', '`')
+            } else {
+                continue;
+            };
+            let after_open = rest.strip_prefix(open)?;
+            if let Some(end_ix) = after_open.find(close) {
+                let phrase = after_open[..end_ix].trim();
+                if !phrase.is_empty() && phrase.len() <= 72 && !phrase.contains('\n') {
+                    return Some(phrase.to_owned());
+                }
+            }
+        }
+    }
+    None
 }
 
 fn short_section_pill(heading: &str) -> String {
@@ -12521,6 +13168,56 @@ fn crisp_caret(id_tag: &'static str, height: f32, reduce_motion: bool) -> AnyEle
         )
         .into_any_element()
     }
+}
+
+/// Left-aligned wrapping inline editor for long profile fields (Target roles, Location, Avoid list, emails).
+fn inline_editable_text_left(
+    text: &str,
+    placeholder: &str,
+    all_selected: bool,
+    reduce_motion: bool,
+    id_tag: &'static str,
+) -> impl IntoElement {
+    let has_text = !text.is_empty();
+    if !has_text {
+        return div()
+            .relative()
+            .w_full()
+            .flex()
+            .items_center()
+            .text_xs()
+            .line_height(px(18.0))
+            .child(crisp_caret(id_tag, 14.0, reduce_motion))
+            .child(
+                div()
+                    .pl(px(3.0))
+                    .text_color(theme::text_muted())
+                    .child(placeholder.to_owned()),
+            )
+            .into_any_element();
+    }
+    div()
+        .w_full()
+        .min_w_0()
+        .text_xs()
+        .line_height(px(18.0))
+        .child(
+            div()
+                .w_full()
+                .min_w_0()
+                .when(all_selected, |d| {
+                    d.px(px(2.0))
+                        .rounded(theme::r_xs())
+                        .bg(theme::lavender_wash())
+                })
+                .text_color(theme::text_primary())
+                .child(if all_selected {
+                    text.to_owned()
+                } else {
+                    format!("{text}▏")
+                }),
+        )
+        .into_any_element()
 }
 
 /// Seamless borderless wrapping inline text editor (zero chrome, expands smoothly to show full value).

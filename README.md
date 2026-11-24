@@ -59,26 +59,22 @@ AI agents are great at researching companies, tailoring CVs, and drafting recrui
 ## How It Works
 
 <p align="center">
-  <img src="docs/assets/architecture.svg" alt="Job Harness architecture showing Interfaces, Deterministic Rust Engine, Private Local Workspace, and Host Boundary" width="100%">
+  <img src="docs/assets/product-flow.svg" alt="Four-step product flow: Find and vet roles, Tailor CV and briefs, Review and approve, Track outcomes honestly — stored privately on your machine" width="100%">
 </p>
 
-Your agent (Hermes, Claude Code, Codex, Cursor, or a local model) handles reasoning and external connectors. Job Harness enforces exact state, deduplication, and fail-closed permissions — so you can switch models or runtimes anytime with zero migration.
+Your agent (Hermes, Claude Code, Codex, Pi, Cursor, or a local model) handles reasoning and external connectors. Job Harness enforces exact state, deduplication, and fail-closed permissions — so you can switch models or runtimes anytime with zero migration. *(See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full technical system whiteboard.)*
 
 ---
 
-## Permissions & Safety
+## Delegation & Safety
 
-Every new workspace starts **review-only**: all external action switches in `config/career-ledger.json` default to `false`.
+Pick one of three delegation modes in **Settings** (or override any individual rule in `config/career-ledger.json`):
 
-| Guardrail | Default | What it protects |
-|---|---|---|
-| `auto_apply_portal` | `false` | Prepares packets for approval instead of submitting ATS forms automatically |
-| `auto_send_first_contact_email` | `false` | Drafts outreach in Gmail; checks live Sent mail before sending |
-| `auto_reply_threads` | `false` | Drafts recruiter replies in your voice; never double-replies if you answered on your phone |
-| `auto_archive_mail` | `false` | Leaves inbox untouched until you opt in |
-| **Ephemeral secrets** | `0600` · 1-use | Pass portal logins via a focused secret modal (`jh secret`) — auto-shreds after use or TTL, never enters chat or Git |
+<p align="center">
+  <img src="docs/assets/delegation-modes.svg" alt="Three delegation modes: Drafts only (default), Assisted (recommended), and Autonomous, with an always-human boundary for booking slots, interviews, offers, CAPTCHAs, and ephemeral secrets" width="100%">
+</p>
 
-Scheduling new interview times, live interviews, and offers are **always human-confirmed**.
+Every external submission freezes an immutable packet, enforces your daily cap, and checks live Sent mail before sending or replying. Portal logins and tokens pass through an out-of-band **1-use secret modal** (`jh secret`, see [docs/SECRETS.md](docs/SECRETS.md)) that auto-shreds after read and never enters chat history or Git.
 
 ---
 
@@ -121,8 +117,10 @@ All technical specifications, connector guides, and contracts are organized unde
 | Topic | Guide |
 |---|---|
 | **Recommended tooling & browser auth** | [docs/TOOLING.md](docs/TOOLING.md) |
+| **Background automation & delegation modes** | [docs/AUTOMATION.md](docs/AUTOMATION.md) |
 | **Ephemeral secret handoff (`jh secret`)** | [docs/SECRETS.md](docs/SECRETS.md) |
 | **Architecture & invariants** | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) |
+| **Design & writing principles** | [docs/DESIGN-PRINCIPLES.md](docs/DESIGN-PRINCIPLES.md) |
 | **Agent setup & installation** | [docs/AGENT-SETUP.md](docs/AGENT-SETUP.md) · [docs/INSTALL.md](docs/INSTALL.md) |
 | **Desktop workbench & remote sync** | [apps/desktop/README.md](apps/desktop/README.md) |
 | **Daily workflow, CVs & backups** | [resources/guides/career-operations.md](resources/guides/career-operations.md) · [docs/CV.md](docs/CV.md) · [docs/BUNDLES.md](docs/BUNDLES.md) |

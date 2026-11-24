@@ -1,0 +1,97 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="440" viewBox="0 0 1280 440" role="img" aria-labelledby="title desc">
+  <title id="title">How Job Harness Works</title>
+  <desc id="desc">Four simple steps: Find and vet roles, Tailor CV and prep briefs, Review and approve drafts, and Track outcomes honestly — stored privately on your machine.</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M 1 1 L 9 5 L 1 9 z" fill="#525768"/>
+    </marker>
+    <style>
+      .sans { font-family: -apple-system, BlinkMacSystemFont, "Inter", "SF Pro Text", "Segoe UI", sans-serif; }
+      .h1 { font-size: 22px; font-weight: 600; fill: #f1f2f6; }
+      .sub { font-size: 13.5px; fill: #9397a6; }
+      .step-num { font-size: 11px; font-weight: 600; letter-spacing: 0.9px; fill: #767b8c; }
+      .card-h { font-size: 15.5px; font-weight: 600; fill: #eceef4; }
+      .card-p { font-size: 12.5px; fill: #9a9eaa; }
+      .foot-h { font-size: 12.5px; font-weight: 600; fill: #d7dae4; }
+      .foot-p { font-size: 12px; fill: #8b90a0; }
+    </style>
+  </defs>
+
+  <!-- Clean dark frame -->
+  <rect x="1" y="1" width="1278" height="438" rx="12" fill="#0d0d11" stroke="#22232d" stroke-width="1.5"/>
+
+  <!-- Header -->
+  <text x="44" y="52" class="sans h1">How Job Harness works for your search</text>
+  <text x="44" y="76" class="sans sub">Your AI agent handles the busywork. You stay in control of every application, email, and interview.</text>
+
+  <!-- Step 1 -->
+  <rect x="44" y="108" width="268" height="196" rx="10" fill="#13141b" stroke="#262836"/>
+  <rect x="64" y="128" width="28" height="28" rx="6" fill="#38bdf8" fill-opacity="0.14"/>
+  <circle cx="77" cy="141" r="5" fill="none" stroke="#38bdf8" stroke-width="1.8"/>
+  <line x1="81" y1="145" x2="85" y2="149" stroke="#38bdf8" stroke-width="1.8" stroke-linecap="round"/>
+  <text x="104" y="146" class="sans step-num">STEP 1</text>
+  <text x="64" y="186" class="sans card-h">Find and vet roles</text>
+  <text x="64" y="212" class="sans card-p">Scouts job boards and checks</text>
+  <text x="64" y="232" class="sans card-p">salary, location, and your</text>
+  <text x="64" y="252" class="sans card-p">avoid list before saving leads.</text>
+  <text x="64" y="284" class="sans foot-p" fill="#38bdf8">Deduplicates automatically</text>
+
+  <!-- Arrow 1 -> 2 -->
+  <line x1="318" y1="206" x2="346" y2="206" stroke="#525768" stroke-width="1.6" marker-end="url(#arrow)"/>
+
+  <!-- Step 2 -->
+  <rect x="352" y="108" width="268" height="196" rx="10" fill="#13141b" stroke="#262836"/>
+  <rect x="372" y="128" width="28" height="28" rx="6" fill="#a78bfa" fill-opacity="0.14"/>
+  <path d="M381 136 h10 v12 h-10 z M384 140 h4 M384 144 h4" fill="none" stroke="#a78bfa" stroke-width="1.6" stroke-linecap="round"/>
+  <text x="412" y="146" class="sans step-num">STEP 2</text>
+  <text x="372" y="186" class="sans card-h">Tailor CV and briefs</text>
+  <text x="372" y="212" class="sans card-p">Picks the closest verified CV</text>
+  <text x="372" y="232" class="sans card-p">track and prepares focused</text>
+  <text x="372" y="252" class="sans card-p">company and round prep notes.</text>
+  <text x="372" y="284" class="sans foot-p" fill="#a78bfa">Never invents CV facts</text>
+
+  <!-- Arrow 2 -> 3 -->
+  <line x1="626" y1="206" x2="654" y2="206" stroke="#525768" stroke-width="1.6" marker-end="url(#arrow)"/>
+
+  <!-- Step 3 -->
+  <rect x="660" y="108" width="268" height="196" rx="10" fill="#13141b" stroke="#3c3320"/>
+  <rect x="680" y="128" width="28" height="28" rx="6" fill="#facc15" fill-opacity="0.14"/>
+  <path d="M688 142 l4 4 l8 -8" fill="none" stroke="#facc15" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+  <text x="720" y="146" class="sans step-num" fill="#d4b157">STEP 3</text>
+  <text x="680" y="186" class="sans card-h">You review and approve</text>
+  <text x="680" y="212" class="sans card-p">Drafts recruiter replies in your</text>
+  <text x="680" y="232" class="sans card-p">voice and freezes exact packets</text>
+  <text x="680" y="252" class="sans card-p">within your chosen safety mode.</text>
+  <text x="680" y="284" class="sans foot-p" fill="#fde047">Review-only by default</text>
+
+  <!-- Arrow 3 -> 4 -->
+  <line x1="934" y1="206" x2="962" y2="206" stroke="#525768" stroke-width="1.6" marker-end="url(#arrow)"/>
+
+  <!-- Step 4 -->
+  <rect x="968" y="108" width="268" height="196" rx="10" fill="#13141b" stroke="#234136"/>
+  <rect x="988" y="128" width="28" height="28" rx="6" fill="#34d399" fill-opacity="0.14"/>
+  <path d="M995 147 v-6 M1002 147 v-10 M1009 147 v-14" fill="none" stroke="#34d399" stroke-width="1.9" stroke-linecap="round"/>
+  <text x="1028" y="146" class="sans step-num" fill="#34d399">STEP 4</text>
+  <text x="988" y="186" class="sans card-h">Track outcomes honestly</text>
+  <text x="988" y="212" class="sans card-p">Follow every role on Kanban or</text>
+  <text x="988" y="232" class="sans card-p">Sankey with clear rejections,</text>
+  <text x="988" y="252" class="sans card-p">withdrawals, and debriefs.</text>
+  <text x="988" y="284" class="sans foot-p" fill="#34d399">Zero duplicate applies</text>
+
+  <!-- Calm foundation bar -->
+  <rect x="44" y="332" width="1192" height="72" rx="10" fill="#121218" stroke="#22232d"/>
+
+  <circle cx="72" cy="368" r="4" fill="#34d399"/>
+  <text x="86" y="364" class="sans foot-h">Private on your machine</text>
+  <text x="86" y="383" class="sans foot-p">Plain Markdown, JSON, and local SQLite — no cloud lock-in</text>
+
+  <line x1="452" y1="348" x2="452" y2="388" stroke="#22232d"/>
+  <circle cx="480" cy="368" r="4" fill="#38bdf8"/>
+  <text x="494" y="364" class="sans foot-h">Works with any AI agent</text>
+  <text x="494" y="383" class="sans foot-p">Hermes, Claude Code, Codex, Pi, Cursor, or local models</text>
+
+  <line x1="864" y1="348" x2="864" y2="388" stroke="#22232d"/>
+  <circle cx="892" cy="368" r="4" fill="#facc15"/>
+  <text x="906" y="364" class="sans foot-h">No credentials in workspace</text>
+  <text x="906" y="383" class="sans foot-p">CLI OAuth and 1-use self-destructing secret handoff</text>
+</svg>

@@ -19,12 +19,14 @@ pub enum LinkTarget {
 #[derive(Clone, Debug)]
 pub enum TextSelectEvent {
     Start {
-        block_id: SharedString,
+        doc_id: SharedString,
+        block_ix: usize,
         index: usize,
-        full_text: String,
+        doc_blocks: Rc<Vec<String>>,
     },
     Move {
-        block_id: SharedString,
+        doc_id: SharedString,
+        block_ix: usize,
         index: usize,
     },
     End,
@@ -32,9 +34,45 @@ pub enum TextSelectEvent {
 
 #[derive(Clone, Debug)]
 pub struct ActiveSelection {
-    pub block_id: SharedString,
-    pub start: usize,
-    pub end: usize,
+    pub doc_id: SharedString,
+    pub anchor_block: usize,
+    pub anchor_index: usize,
+    pub focus_block: usize,
+    pub focus_index: usize,
+}
+
+impl ActiveSelection {
+    pub fn ordered(&self) -> ((usize, usize), (usize, usize)) {
+        let a = (self.anchor_block, self.anchor_index);
+        let b = (self.focus_block, self.focus_index);
+        if a <= b { (a, b) } else { (b, a) }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.anchor_block == self.focus_block && self.anchor_index == self.focus_index
+    }
+
+    pub fn range_for_block(
+        &self,
+        doc_id: &str,
+        block_ix: usize,
+        block_len: usize,
+    ) -> Option<Range<usize>> {
+        if self.doc_id.as_ref() != doc_id || self.is_empty() {
+            return None;
+        }
+        let ((sb, si), (eb, ei)) = self.ordered();
+        if block_ix < sb || block_ix > eb {
+            return None;
+        }
+        let start = if block_ix == sb { si.min(block_len) } else { 0 };
+        let end = if block_ix == eb {
+            ei.min(block_len)
+        } else {
+            block_len
+        };
+        (start < end).then_some(start..end)
+    }
 }
 
 pub type LinkHandler = Rc<dyn Fn(LinkTarget, &mut Window, &mut App)>;
@@ -48,7 +86,7 @@ struct InlineParsed {
 }
 
 /// Renders Markdown into clean, well-proportioned GPUI blocks with true inline bold/italic/code,
-/// clickable URLs, clickable workspace citations, and native drag-to-select inline text.
+/// clickable URLs, clickable workspace citations, and smooth cross-block drag-to-select text.
 pub fn render_markdown(
     id_prefix: &str,
     source: &str,
@@ -61,19 +99,12 @@ pub fn render_markdown(
     let mut in_code = false;
     let mut code_buf: Vec<String> = Vec::new();
     let mut block_ix: usize = 0;
+    let doc_id = SharedString::from(id_prefix.to_owned());
+    let doc_blocks_cell: Rc<std::cell::RefCell<Vec<String>>> =
+        Rc::new(std::cell::RefCell::new(Vec::new()));
 
     let body_size = if spacious { px(14.0) } else { px(12.5) };
     let body_lh = if spacious { px(22.0) } else { px(19.0) };
-
-    let sel_for = |el_id: &SharedString| -> Option<Range<usize>> {
-        selection.and_then(|s| {
-            if &s.block_id == el_id && s.start != s.end {
-                Some(s.start.min(s.end)..s.start.max(s.end))
-            } else {
-                None
-            }
-        })
-    };
 
     let lines: Vec<&str> = source.lines().collect();
     let mut li = 0usize;
@@ -88,14 +119,20 @@ pub fn render_markdown(
             if in_code {
                 if !code_buf.is_empty() {
                     let code_str = code_buf.join("\n");
+                    let cur_ix = block_ix;
                     block_ix += 1;
-                    let code_id = SharedString::from(format!("{id_prefix}-code-{block_ix}"));
+                    doc_blocks_cell.borrow_mut().push(code_str.clone());
+                    let code_id = SharedString::from(format!("{id_prefix}-code-{cur_ix}"));
                     blocks.push(render_syntax_code(
                         code_id,
+                        doc_id.clone(),
+                        cur_ix,
+                        doc_blocks_cell.clone(),
                         &code_str,
                         &code_lang,
                         spacious,
-                        sel_for(&SharedString::from(format!("{id_prefix}-code-{block_ix}"))),
+                        selection
+                            .and_then(|s| s.range_for_block(id_prefix, cur_ix, code_str.len())),
                         on_select.clone(),
                     ));
                     code_buf.clear();
@@ -133,7 +170,6 @@ pub fn render_markdown(
                 .len()
                 .max(rows.iter().map(Vec::len).max().unwrap_or(0))
                 .max(1);
-            // Smart proportional column weights based on content length so prose columns get room!
             let mut weights: Vec<f32> = vec![12.0; col_count];
             for (ci, h) in headers.iter().enumerate() {
                 weights[ci] = weights[ci].max(h.chars().count().min(32) as f32);
@@ -162,7 +198,6 @@ pub fn render_markdown(
                 .flex()
                 .flex_col();
 
-            // Header row
             let mut hdr_row = div()
                 .w_full()
                 .bg(theme::surface_subtle())
@@ -170,9 +205,9 @@ pub fn render_markdown(
                 .border_color(theme::hairline_strong())
                 .flex();
             for (ci, w) in weights.iter().enumerate() {
+                let cur_ix = block_ix;
                 block_ix += 1;
-                let cell_id = SharedString::from(format!("{id_prefix}-th-{block_ix}"));
-                let cell_sel = sel_for(&cell_id);
+                let cell_id = SharedString::from(format!("{id_prefix}-th-{cur_ix}"));
                 let txt = headers.get(ci).map(String::as_str).unwrap_or("");
                 let mut cell = div()
                     .min_w_0()
@@ -184,8 +219,11 @@ pub fn render_markdown(
                     .text_color(theme::text_primary())
                     .child(render_inline(
                         cell_id,
+                        doc_id.clone(),
+                        cur_ix,
+                        doc_blocks_cell.clone(),
                         txt,
-                        cell_sel,
+                        selection,
                         on_link.clone(),
                         on_select.clone(),
                     ));
@@ -198,7 +236,6 @@ pub fn render_markdown(
             }
             table_el = table_el.child(hdr_row);
 
-            // Body rows
             for (ri, r) in rows.iter().enumerate() {
                 let mut row_el = div().w_full().flex();
                 if ri > 0 {
@@ -208,9 +245,9 @@ pub fn render_markdown(
                     row_el = row_el.bg(gpui::rgba(0xffffff05));
                 }
                 for (ci, w) in weights.iter().enumerate() {
+                    let cur_ix = block_ix;
                     block_ix += 1;
-                    let cell_id = SharedString::from(format!("{id_prefix}-td-{block_ix}"));
-                    let cell_sel = sel_for(&cell_id);
+                    let cell_id = SharedString::from(format!("{id_prefix}-td-{cur_ix}"));
                     let txt = r.get(ci).map(String::as_str).unwrap_or("");
                     let mut cell = div()
                         .min_w_0()
@@ -225,8 +262,11 @@ pub fn render_markdown(
                         })
                         .child(render_inline(
                             cell_id,
+                            doc_id.clone(),
+                            cur_ix,
+                            doc_blocks_cell.clone(),
                             txt,
-                            cell_sel,
+                            selection,
                             on_link.clone(),
                             on_select.clone(),
                         ));
@@ -244,10 +284,6 @@ pub fn render_markdown(
             continue;
         }
 
-        block_ix += 1;
-        let el_id = SharedString::from(format!("{id_prefix}-b-{block_ix}"));
-        let sel_range = sel_for(&el_id);
-
         if line == "---" || line == "***" || line == "___" {
             blocks.push(
                 div()
@@ -257,7 +293,14 @@ pub fn render_markdown(
                     .bg(theme::hairline())
                     .into_any_element(),
             );
-        } else if let Some(h1) = line.strip_prefix("# ") {
+            continue;
+        }
+
+        let cur_ix = block_ix;
+        block_ix += 1;
+        let el_id = SharedString::from(format!("{id_prefix}-b-{cur_ix}"));
+
+        if let Some(h1) = line.strip_prefix("# ") {
             blocks.push(
                 div()
                     .pt_2()
@@ -267,8 +310,11 @@ pub fn render_markdown(
                     .text_color(theme::text_primary())
                     .child(render_inline(
                         el_id,
+                        doc_id.clone(),
+                        cur_ix,
+                        doc_blocks_cell.clone(),
                         h1,
-                        sel_range,
+                        selection,
                         on_link.clone(),
                         on_select.clone(),
                     ))
@@ -287,8 +333,11 @@ pub fn render_markdown(
                     .text_color(theme::text_primary())
                     .child(render_inline(
                         el_id,
+                        doc_id.clone(),
+                        cur_ix,
+                        doc_blocks_cell.clone(),
                         h2,
-                        sel_range,
+                        selection,
                         on_link.clone(),
                         on_select.clone(),
                     ))
@@ -304,8 +353,11 @@ pub fn render_markdown(
                     .text_color(theme::lavender())
                     .child(render_inline(
                         el_id,
+                        doc_id.clone(),
+                        cur_ix,
+                        doc_blocks_cell.clone(),
                         h3,
-                        sel_range,
+                        selection,
                         on_link.clone(),
                         on_select.clone(),
                     ))
@@ -339,12 +391,15 @@ pub fn render_markdown(
                     .text_color(theme::text_muted())
                     .child(render_inline(
                         el_id,
+                        doc_id.clone(),
+                        cur_ix,
+                        doc_blocks_cell.clone(),
                         if text_part.is_empty() {
                             quote
                         } else {
                             text_part
                         },
-                        sel_range,
+                        selection,
                         on_link.clone(),
                         on_select.clone(),
                     ))
@@ -391,8 +446,11 @@ pub fn render_markdown(
                     )
                     .child(div().flex_1().min_w_0().child(render_inline(
                         el_id,
+                        doc_id.clone(),
+                        cur_ix,
+                        doc_blocks_cell.clone(),
                         task,
-                        sel_range,
+                        selection,
                         on_link.clone(),
                         on_select.clone(),
                     )))
@@ -411,8 +469,11 @@ pub fn render_markdown(
                     .child(div().text_color(theme::text_muted()).child("•"))
                     .child(div().flex_1().min_w_0().child(render_inline(
                         el_id,
+                        doc_id.clone(),
+                        cur_ix,
+                        doc_blocks_cell.clone(),
                         bullet,
-                        sel_range,
+                        selection,
                         on_link.clone(),
                         on_select.clone(),
                     )))
@@ -435,8 +496,11 @@ pub fn render_markdown(
                     )
                     .child(div().flex_1().min_w_0().child(render_inline(
                         el_id,
+                        doc_id.clone(),
+                        cur_ix,
+                        doc_blocks_cell.clone(),
                         rest,
-                        sel_range,
+                        selection,
                         on_link.clone(),
                         on_select.clone(),
                     )))
@@ -451,8 +515,11 @@ pub fn render_markdown(
                     .text_color(theme::text_secondary())
                     .child(render_inline(
                         el_id,
+                        doc_id.clone(),
+                        cur_ix,
+                        doc_blocks_cell.clone(),
                         line,
-                        sel_range,
+                        selection,
                         on_link.clone(),
                         on_select.clone(),
                     ))
@@ -463,11 +530,19 @@ pub fn render_markdown(
 
     if in_code && !code_buf.is_empty() {
         let code_str = code_buf.join("\n");
-        block_ix += 1;
-        let code_id = SharedString::from(format!("{id_prefix}-code-{block_ix}"));
-        let code_sel = sel_for(&code_id);
+        let cur_ix = block_ix;
+        doc_blocks_cell.borrow_mut().push(code_str.clone());
+        let code_id = SharedString::from(format!("{id_prefix}-code-{cur_ix}"));
         blocks.push(render_syntax_code(
-            code_id, &code_str, &code_lang, spacious, code_sel, on_select,
+            code_id,
+            doc_id,
+            cur_ix,
+            doc_blocks_cell,
+            &code_str,
+            &code_lang,
+            spacious,
+            selection.and_then(|s| s.range_for_block(id_prefix, cur_ix, code_str.len())),
+            on_select,
         ));
     }
 
@@ -480,15 +555,20 @@ pub fn render_markdown(
 }
 
 /// Lightweight zero-dependency syntax-highlighted code / JSON block with exact indentation
-/// and native drag-to-select support.
+/// and native cross-block drag-to-select support.
+#[allow(clippy::too_many_arguments)]
 pub fn render_syntax_code(
     id: SharedString,
+    doc_id: SharedString,
+    block_ix: usize,
+    doc_blocks: Rc<std::cell::RefCell<Vec<String>>>,
     code: &str,
     lang: &str,
     spacious: bool,
     sel_range: Option<Range<usize>>,
     on_select: SelectHandler,
 ) -> AnyElement {
+    let _ = id;
     let normalized = lang.trim().to_ascii_lowercase();
     let is_json = normalized == "json" || normalized == "jsonc";
     let mut highlights = if is_json {
@@ -517,9 +597,8 @@ pub fn render_syntax_code(
     let styled = StyledText::new(code.to_owned()).with_highlights(highlights);
     let layout_down = styled.layout().clone();
     let layout_move = styled.layout().clone();
-    let id_down = id.clone();
-    let id_move = id;
-    let full_text = code.to_owned();
+    let doc_down = doc_id.clone();
+    let doc_move = doc_id;
     let on_sel_down = on_select.clone();
     let on_sel_move = on_select.clone();
     let on_sel_up = on_select;
@@ -565,9 +644,10 @@ pub fn render_syntax_code(
                 };
                 on_sel_down(
                     TextSelectEvent::Start {
-                        block_id: id_down.clone(),
+                        doc_id: doc_down.clone(),
+                        block_ix,
                         index: idx,
-                        full_text: full_text.clone(),
+                        doc_blocks: Rc::new(doc_blocks.borrow().clone()),
                     },
                     window,
                     cx,
@@ -580,7 +660,8 @@ pub fn render_syntax_code(
                     };
                     on_sel_move(
                         TextSelectEvent::Move {
-                            block_id: id_move.clone(),
+                            doc_id: doc_move.clone(),
+                            block_ix,
                             index: idx,
                         },
                         window,
@@ -605,8 +686,13 @@ pub fn render_json_structured(
     on_select: SelectHandler,
 ) -> AnyElement {
     let mut counter = 0usize;
+    let doc_id = SharedString::from(id_prefix.to_owned());
+    let doc_blocks: Rc<std::cell::RefCell<Vec<String>>> =
+        Rc::new(std::cell::RefCell::new(Vec::new()));
     render_json_node(
         id_prefix,
+        &doc_id,
+        &doc_blocks,
         val,
         0,
         &mut counter,
@@ -635,8 +721,11 @@ fn humanize_json_key(key: &str) -> String {
     if out.is_empty() { key.to_owned() } else { out }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_json_node(
     id_prefix: &str,
+    doc_id: &SharedString,
+    doc_blocks: &Rc<std::cell::RefCell<Vec<String>>>,
     val: &serde_json::Value,
     depth: usize,
     counter: &mut usize,
@@ -644,16 +733,6 @@ fn render_json_node(
     on_link: &LinkHandler,
     on_select: &SelectHandler,
 ) -> AnyElement {
-    let sel_for = |el_id: &SharedString| -> Option<Range<usize>> {
-        selection.and_then(|s| {
-            if &s.block_id == el_id && s.start != s.end {
-                Some(s.start.min(s.end)..s.start.max(s.end))
-            } else {
-                None
-            }
-        })
-    };
-
     match val {
         serde_json::Value::Object(map) => {
             let mut col = div()
@@ -695,6 +774,8 @@ fn render_json_node(
                         }
                         sec = sec.child(render_json_node(
                             id_prefix,
+                            doc_id,
+                            doc_blocks,
                             v,
                             depth + 1,
                             counter,
@@ -705,10 +786,12 @@ fn render_json_node(
                         col = col.child(sec);
                     }
                     _ => {
+                        let cur_ix = *counter;
                         *counter += 1;
-                        let cid = SharedString::from(format!("{id_prefix}-jv-{counter}"));
-                        let csel = sel_for(&cid);
-                        let val_el = render_json_scalar(cid, v, csel, on_link, on_select);
+                        let cid = SharedString::from(format!("{id_prefix}-jv-{cur_ix}"));
+                        let val_el = render_json_scalar(
+                            cid, doc_id, cur_ix, doc_blocks, v, selection, on_link, on_select,
+                        );
                         col = col.child(
                             div()
                                 .flex()
@@ -744,6 +827,8 @@ fn render_json_node(
                                 .border_color(theme::hairline())
                                 .child(render_json_node(
                                     id_prefix,
+                                    doc_id,
+                                    doc_blocks,
                                     item,
                                     depth + 1,
                                     counter,
@@ -754,10 +839,12 @@ fn render_json_node(
                         );
                     }
                     _ => {
+                        let cur_ix = *counter;
                         *counter += 1;
-                        let cid = SharedString::from(format!("{id_prefix}-ja-{counter}"));
-                        let csel = sel_for(&cid);
-                        let val_el = render_json_scalar(cid, item, csel, on_link, on_select);
+                        let cid = SharedString::from(format!("{id_prefix}-ja-{cur_ix}"));
+                        let val_el = render_json_scalar(
+                            cid, doc_id, cur_ix, doc_blocks, item, selection, on_link, on_select,
+                        );
                         col = col.child(
                             div()
                                 .pl_1()
@@ -775,18 +862,24 @@ fn render_json_node(
             col.into_any_element()
         }
         _ => {
+            let cur_ix = *counter;
             *counter += 1;
-            let cid = SharedString::from(format!("{id_prefix}-js-{counter}"));
-            let csel = sel_for(&cid);
-            render_json_scalar(cid, val, csel, on_link, on_select)
+            let cid = SharedString::from(format!("{id_prefix}-js-{cur_ix}"));
+            render_json_scalar(
+                cid, doc_id, cur_ix, doc_blocks, val, selection, on_link, on_select,
+            )
         }
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_json_scalar(
     id: SharedString,
+    doc_id: &SharedString,
+    block_ix: usize,
+    doc_blocks: &Rc<std::cell::RefCell<Vec<String>>>,
     val: &serde_json::Value,
-    sel_range: Option<Range<usize>>,
+    selection: Option<&ActiveSelection>,
     on_link: &LinkHandler,
     on_select: &SelectHandler,
 ) -> AnyElement {
@@ -795,29 +888,45 @@ fn render_json_scalar(
             .text_color(theme::text_primary())
             .child(render_inline(
                 id,
+                doc_id.clone(),
+                block_ix,
+                doc_blocks.clone(),
                 s,
-                sel_range,
+                selection,
                 on_link.clone(),
                 on_select.clone(),
             ))
             .into_any_element(),
-        serde_json::Value::Number(n) => div()
-            .text_color(theme::amber_text())
-            .child(n.to_string())
-            .into_any_element(),
-        serde_json::Value::Bool(b) => div()
-            .text_color(if *b {
-                theme::emerald()
-            } else {
-                theme::rose_text()
-            })
-            .child(if *b { "true" } else { "false" })
-            .into_any_element(),
-        serde_json::Value::Null => div()
-            .text_color(theme::text_muted())
-            .child("null")
-            .into_any_element(),
-        _ => div().into_any_element(),
+        serde_json::Value::Number(n) => {
+            doc_blocks.borrow_mut().push(n.to_string());
+            div()
+                .text_color(theme::amber_text())
+                .child(n.to_string())
+                .into_any_element()
+        }
+        serde_json::Value::Bool(b) => {
+            let s = if *b { "true" } else { "false" };
+            doc_blocks.borrow_mut().push(s.to_owned());
+            div()
+                .text_color(if *b {
+                    theme::emerald()
+                } else {
+                    theme::rose_text()
+                })
+                .child(s)
+                .into_any_element()
+        }
+        serde_json::Value::Null => {
+            doc_blocks.borrow_mut().push("null".to_owned());
+            div()
+                .text_color(theme::text_muted())
+                .child("null")
+                .into_any_element()
+        }
+        _ => {
+            doc_blocks.borrow_mut().push(String::new());
+            div().into_any_element()
+        }
     }
 }
 
@@ -1098,16 +1207,22 @@ fn split_numbered_list(line: &str) -> Option<(&str, &str)> {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_inline(
     id: SharedString,
+    doc_id: SharedString,
+    block_ix: usize,
+    doc_blocks: Rc<std::cell::RefCell<Vec<String>>>,
     raw: &str,
-    sel_range: Option<Range<usize>>,
+    selection: Option<&ActiveSelection>,
     on_link: LinkHandler,
     on_select: SelectHandler,
 ) -> AnyElement {
     let mut parsed = parse_inline(raw);
-    let full_text = parsed.text.clone();
-    if let Some(sr) = sel_range {
+    doc_blocks.borrow_mut().push(parsed.text.clone());
+    if let Some(sr) =
+        selection.and_then(|s| s.range_for_block(doc_id.as_ref(), block_ix, parsed.text.len()))
+    {
         let len = parsed.text.len();
         let s = sr.start.min(len);
         let e = sr.end.min(len);
@@ -1126,8 +1241,8 @@ fn render_inline(
     let styled = StyledText::new(parsed.text).with_highlights(parsed.highlights);
     let layout_down = styled.layout().clone();
     let layout_move = styled.layout().clone();
-    let id_down = id.clone();
-    let id_move = id.clone();
+    let doc_down = doc_id.clone();
+    let doc_move = doc_id;
     let on_sel_down = on_select.clone();
     let on_sel_move = on_select.clone();
     let on_sel_up = on_select;
@@ -1154,9 +1269,10 @@ fn render_inline(
             };
             on_sel_down(
                 TextSelectEvent::Start {
-                    block_id: id_down.clone(),
+                    doc_id: doc_down.clone(),
+                    block_ix,
                     index: idx,
-                    full_text: full_text.clone(),
+                    doc_blocks: Rc::new(doc_blocks.borrow().clone()),
                 },
                 window,
                 cx,
@@ -1169,7 +1285,8 @@ fn render_inline(
                 };
                 on_sel_move(
                     TextSelectEvent::Move {
-                        block_id: id_move.clone(),
+                        doc_id: doc_move.clone(),
+                        block_ix,
                         index: idx,
                     },
                     window,

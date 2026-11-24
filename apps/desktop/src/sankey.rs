@@ -333,8 +333,9 @@ pub fn render_sankey_view<V: 'static>(
     let applied_all = total.saturating_sub(saved);
     let focus_bucket = hovered.or(selected);
 
-    let effective_scale = zoom_scale.clamp(0.75, 1.45);
-    let diagram_h = (470.0 * effective_scale).clamp(340.0, 660.0);
+    let effective_scale = zoom_scale.clamp(0.75, 1.50);
+    let diagram_w = (760.0 * effective_scale).clamp(570.0, 1140.0);
+    let diagram_h = (440.0 * effective_scale).clamp(330.0, 660.0);
     let top_pad = 30.0_f32;
     let two_col = zoom_root.is_some();
 
@@ -677,7 +678,9 @@ pub fn render_sankey_view<V: 'static>(
         .id("sankey-interactive-stage")
         .relative()
         .flex_shrink_0()
-        .w_full()
+        .min_w(px(diagram_w))
+        .when(effective_scale > 1.01, |d| d.w(px(diagram_w)))
+        .when(effective_scale <= 1.01, |d| d.w_full())
         .h(px(diagram_h + top_pad * 2.0))
         .pt(px(top_pad))
         .pb(px(top_pad))
@@ -930,13 +933,14 @@ pub fn render_sankey_view<V: 'static>(
         .overflow_hidden()
         .flex()
         .flex_col()
-        // Scrollable canvas wrapper so zoomed-in (>100%) diagrams pan cleanly (controls live inline in the board/flow toolbar!)
+        // 2D scrollable canvas wrapper so proportional zoom & narrow side-rail splits pan cleanly without squashing ribbons
         .child(
             div()
                 .id("sankey-canvas-scroll")
                 .flex_1()
                 .min_h_0()
-                .overflow_y_scroll()
+                .min_w_0()
+                .overflow_scroll()
                 .flex()
                 .flex_col()
                 .justify_center()

@@ -62,6 +62,8 @@ pub struct AgentOptions {
     pub provider: Option<String>,
     pub reasoning: Option<String>,
     pub fast_mode: bool,
+    /// When true on macOS, spawns `caffeinate -di -w <pid>` only for the duration of an active turn.
+    pub keep_awake: bool,
     /// Ephemeral per-chat session key rotated on New Chat so fresh threads start clean.
     #[serde(skip)]
     pub session_name: Option<String>,
@@ -706,6 +708,14 @@ fn run_streaming(
     // Immediate cancel watchdog: kills the child within 50ms even while `reader.lines()`
     // is blocked waiting for stdout (fixes Steer/Stop leaving zombie agent processes).
     let child_pid = child.id();
+    #[cfg(target_os = "macos")]
+    if opts.keep_awake {
+        let _ = Command::new("/usr/bin/caffeinate")
+            .args(["-di", "-w", &child_pid.to_string()])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn();
+    }
     let watchdog_done = Arc::new(AtomicBool::new(false));
     {
         let cancel_w = cancel.clone();
