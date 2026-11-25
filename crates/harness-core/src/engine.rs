@@ -394,6 +394,9 @@ impl Engine {
             ),
             "read_record" => self.read_record(s(args, "path")?),
             "find_application" => self.find_application(args),
+            "suggest_meeting_times" => {
+                crate::scheduling::suggest(args, &self.settings()?, chrono::Utc::now())
+            }
             "search_workspace" => {
                 crate::index::search(&self.root, s(args, "query")?, n(args, "limit", 20))
             }

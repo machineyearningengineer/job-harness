@@ -329,6 +329,309 @@
       "required": [],
       "additionalProperties": false
     },
+    "scheduling": {
+      "type": "object",
+      "description": "Interview scheduling preferences used by suggest_meeting_times. Windows are wall-clock times in the workspace timezone (screen, interview, deep = technical or final, assessment = self-scheduled test block); omitted values use built-in defaults.",
+      "properties": {
+        "hours": {
+          "type": "object",
+          "properties": {
+            "start": {
+              "type": "string",
+              "pattern": "^([01][0-9]|2[0-3]):[0-5][0-9]$"
+            },
+            "end": {
+              "type": "string",
+              "pattern": "^([01][0-9]|2[0-3]):[0-5][0-9]$"
+            }
+          },
+          "required": [],
+          "additionalProperties": false
+        },
+        "max_per_day": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 12
+        },
+        "kinds": {
+          "type": "object",
+          "properties": {
+            "screen": {
+              "type": "object",
+              "properties": {
+                "windows": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "days": {
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "enum": [
+                            "mon",
+                            "tue",
+                            "wed",
+                            "thu",
+                            "fri",
+                            "sat",
+                            "sun"
+                          ]
+                        },
+                        "minItems": 1,
+                        "maxItems": 7
+                      },
+                      "start": {
+                        "type": "string",
+                        "pattern": "^([01][0-9]|2[0-3]):[0-5][0-9]$"
+                      },
+                      "end": {
+                        "type": "string",
+                        "pattern": "^([01][0-9]|2[0-3]):[0-5][0-9]$"
+                      }
+                    },
+                    "required": [
+                      "days",
+                      "start",
+                      "end"
+                    ],
+                    "additionalProperties": false
+                  },
+                  "maxItems": 20
+                },
+                "daily_limit": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 12
+                },
+                "buffer_minutes": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 240
+                },
+                "min_notice_hours": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 336
+                },
+                "deadline_margin_hours": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 336
+                }
+              },
+              "required": [],
+              "additionalProperties": false
+            },
+            "interview": {
+              "type": "object",
+              "properties": {
+                "windows": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "days": {
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "enum": [
+                            "mon",
+                            "tue",
+                            "wed",
+                            "thu",
+                            "fri",
+                            "sat",
+                            "sun"
+                          ]
+                        },
+                        "minItems": 1,
+                        "maxItems": 7
+                      },
+                      "start": {
+                        "type": "string",
+                        "pattern": "^([01][0-9]|2[0-3]):[0-5][0-9]$"
+                      },
+                      "end": {
+                        "type": "string",
+                        "pattern": "^([01][0-9]|2[0-3]):[0-5][0-9]$"
+                      }
+                    },
+                    "required": [
+                      "days",
+                      "start",
+                      "end"
+                    ],
+                    "additionalProperties": false
+                  },
+                  "maxItems": 20
+                },
+                "daily_limit": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 12
+                },
+                "buffer_minutes": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 240
+                },
+                "min_notice_hours": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 336
+                },
+                "deadline_margin_hours": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 336
+                }
+              },
+              "required": [],
+              "additionalProperties": false
+            },
+            "deep": {
+              "type": "object",
+              "properties": {
+                "windows": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "days": {
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "enum": [
+                            "mon",
+                            "tue",
+                            "wed",
+                            "thu",
+                            "fri",
+                            "sat",
+                            "sun"
+                          ]
+                        },
+                        "minItems": 1,
+                        "maxItems": 7
+                      },
+                      "start": {
+                        "type": "string",
+                        "pattern": "^([01][0-9]|2[0-3]):[0-5][0-9]$"
+                      },
+                      "end": {
+                        "type": "string",
+                        "pattern": "^([01][0-9]|2[0-3]):[0-5][0-9]$"
+                      }
+                    },
+                    "required": [
+                      "days",
+                      "start",
+                      "end"
+                    ],
+                    "additionalProperties": false
+                  },
+                  "maxItems": 20
+                },
+                "daily_limit": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 12
+                },
+                "buffer_minutes": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 240
+                },
+                "min_notice_hours": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 336
+                },
+                "deadline_margin_hours": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 336
+                }
+              },
+              "required": [],
+              "additionalProperties": false
+            },
+            "assessment": {
+              "type": "object",
+              "properties": {
+                "windows": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "days": {
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "enum": [
+                            "mon",
+                            "tue",
+                            "wed",
+                            "thu",
+                            "fri",
+                            "sat",
+                            "sun"
+                          ]
+                        },
+                        "minItems": 1,
+                        "maxItems": 7
+                      },
+                      "start": {
+                        "type": "string",
+                        "pattern": "^([01][0-9]|2[0-3]):[0-5][0-9]$"
+                      },
+                      "end": {
+                        "type": "string",
+                        "pattern": "^([01][0-9]|2[0-3]):[0-5][0-9]$"
+                      }
+                    },
+                    "required": [
+                      "days",
+                      "start",
+                      "end"
+                    ],
+                    "additionalProperties": false
+                  },
+                  "maxItems": 20
+                },
+                "daily_limit": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 12
+                },
+                "buffer_minutes": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 240
+                },
+                "min_notice_hours": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 336
+                },
+                "deadline_margin_hours": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 336
+                }
+              },
+              "required": [],
+              "additionalProperties": false
+            }
+          },
+          "required": [],
+          "additionalProperties": false
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    },
     "browser_policy": {
       "type": "object",
       "description": "Browser concurrency, session batching, and tab retirement policy.",
