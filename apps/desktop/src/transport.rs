@@ -181,6 +181,10 @@ pub struct ProfileSettings {
     pub cover_letter_template: String,
     pub post_rejection_reply: String,
     pub applied_ghost_days: u64,
+    /// Effective interview windows per kind (defaults merged with config), e.g. "Mon-Fri 10:00-12:00".
+    pub schedule_windows: Vec<(&'static str, String)>,
+    pub schedule_hours: String,
+    pub schedule_max_per_day: u64,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -365,7 +369,25 @@ impl WorkspaceClient {
                 })
                 .unwrap_or_default()
         };
+        let policy = job_harness_core::scheduling::Policy::from_settings(settings)
+            .or_else(|_| job_harness_core::scheduling::Policy::from_settings(&json!({})))
+            .expect("built-in scheduling defaults are valid");
         let profile_settings = ProfileSettings {
+            schedule_windows: job_harness_core::scheduling::KINDS
+                .iter()
+                .map(|k| {
+                    (
+                        *k,
+                        job_harness_core::scheduling::format_windows(&policy.kinds[k].windows),
+                    )
+                })
+                .collect(),
+            schedule_hours: format!(
+                "{}-{}",
+                policy.earliest.format("%H:%M"),
+                policy.latest.format("%H:%M")
+            ),
+            schedule_max_per_day: policy.max_per_day,
             application_email: comm
                 .and_then(|c| c["application_email"].as_str())
                 .unwrap_or("")

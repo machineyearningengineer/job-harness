@@ -1862,6 +1862,21 @@ impl JobHarnessApp {
                 }
             }
             "avoid_list" | "notice_period" | "discovery_sources" => Ok(()),
+            k if k.starts_with("schedule_") && schedule_kind(k).is_some() => {
+                if t.is_empty() {
+                    return Ok(()); // blank restores the built-in default windows
+                }
+                job_harness_core::scheduling::parse_windows(t)
+                    .map(|_| ())
+                    .map_err(|e| e.message)
+            }
+            "schedule_hours" => job_harness_core::scheduling::parse_hours(t)
+                .map(|_| ())
+                .map_err(|e| e.message),
+            "schedule_max_per_day" => match t.parse::<u64>() {
+                Ok(1..=12) => Ok(()),
+                _ => Err("Enter a whole number from 1 to 12".into()),
+            },
             "timezone" => {
                 if !t.is_empty() && !t.contains(' ') {
                     Ok(())
@@ -1938,6 +1953,25 @@ impl JobHarnessApp {
                 self.snapshot.profile_settings.avoid_list = split_csv(&raw).join(", ");
             }
             "tone" => self.snapshot.profile_settings.tone = raw.clone(),
+            "schedule_hours" => self.snapshot.profile_settings.schedule_hours = raw.clone(),
+            "schedule_max_per_day" => {
+                self.snapshot.profile_settings.schedule_max_per_day = clean_num(&raw);
+            }
+            k if schedule_kind(k).is_some() => {
+                let kind = schedule_kind(k).unwrap_or_default();
+                if let Some(entry) = self
+                    .snapshot
+                    .profile_settings
+                    .schedule_windows
+                    .iter_mut()
+                    .find(|(name, _)| *name == kind)
+                {
+                    // Show the canonical form; a blank edit shows defaults after the refresh.
+                    entry.1 = job_harness_core::scheduling::parse_windows(&raw)
+                        .map(|w| job_harness_core::scheduling::format_windows(&w))
+                        .unwrap_or_else(|_| raw.clone());
+                }
+            }
             _ => {}
         }
 
@@ -2043,6 +2077,40 @@ impl JobHarnessApp {
                                 cfg["discovery"] = json!({});
                             }
                             cfg["discovery"]["avoid_list"] = json!(split_csv(&raw));
+                        }
+                        "schedule_hours" => {
+                            if let Ok((start, end)) =
+                                job_harness_core::scheduling::parse_hours(&raw)
+                            {
+                                schedule_cfg(cfg)["hours"] = json!({
+                                    "start": start.format("%H:%M").to_string(),
+                                    "end": end.format("%H:%M").to_string(),
+                                });
+                            }
+                        }
+                        "schedule_max_per_day" => {
+                            schedule_cfg(cfg)["max_per_day"] = json!(clean_num(&raw));
+                        }
+                        k if schedule_kind(k).is_some() => {
+                            let kind = schedule_kind(k).unwrap_or_default();
+                            let sched = schedule_cfg(cfg);
+                            if !sched["kinds"].is_object() {
+                                sched["kinds"] = json!({});
+                            }
+                            if !sched["kinds"][kind].is_object() {
+                                sched["kinds"][kind] = json!({});
+                            }
+                            match job_harness_core::scheduling::parse_windows(&raw) {
+                                Ok(w) if !w.is_empty() => {
+                                    sched["kinds"][kind]["windows"] =
+                                        job_harness_core::scheduling::windows_json(&w);
+                                }
+                                _ => {
+                                    if let Some(obj) = sched["kinds"][kind].as_object_mut() {
+                                        obj.remove("windows");
+                                    }
+                                }
+                            }
                         }
                         "tone" => {
                             if !cfg["communication"].is_object() {
@@ -9820,6 +9888,47 @@ impl JobHarnessApp {
                                             "e.g. gambling, defence, agencies",
                                             cx,
                                         ))
+                                        .child(
+                                            div()
+                                                .pt_2()
+                                                .text_xs()
+                                                .text_color(theme::text_muted())
+                                                .child(format!(
+                                                    "Interview scheduling ({} local time) — agents rank booking times by these",
+                                                    ps.timezone
+                                                )),
+                                        )
+                                        .children({
+                                            let mut rows = Vec::new();
+                                            for (kind, text) in &ps.schedule_windows {
+                                                let (key, label, placeholder) = schedule_row(kind);
+                                                rows.push(self.render_editable_kv(
+                                                    key,
+                                                    label,
+                                                    truncate_end(text, 26),
+                                                    text.clone(),
+                                                    placeholder,
+                                                    cx,
+                                                ).into_any_element());
+                                            }
+                                            rows
+                                        })
+                                        .child(self.render_editable_kv(
+                                            "schedule_hours",
+                                            "Meeting hours",
+                                            ps.schedule_hours.clone(),
+                                            ps.schedule_hours.clone(),
+                                            "09:00-18:00",
+                                            cx,
+                                        ))
+                                        .child(self.render_editable_kv(
+                                            "schedule_max_per_day",
+                                            "Max interviews a day",
+                                            ps.schedule_max_per_day.to_string(),
+                                            ps.schedule_max_per_day.to_string(),
+                                            "4",
+                                            cx,
+                                        ))
                                         .child(self.render_editable_kv(
                                             "tone",
                                             "Voice & tone",
@@ -16317,4 +16426,37 @@ fn cmd_keycap(label: &'static str) -> impl IntoElement {
         .text_size(px(10.5))
         .text_color(theme::text_secondary())
         .child(label)
+}
+
+/// Settings key such as "schedule_deep" -> meeting kind "deep".
+fn schedule_kind(key: &str) -> Option<&'static str> {
+    job_harness_core::scheduling::KINDS
+        .iter()
+        .copied()
+        .find(|k| key.strip_prefix("schedule_") == Some(*k))
+}
+
+/// Editor key, label and example for one meeting kind's windows.
+fn schedule_row(kind: &str) -> (&'static str, &'static str, &'static str) {
+    match kind {
+        "screen" => (
+            "schedule_screen",
+            "Screens",
+            "Mon-Fri 09:30-10:00, 16:30-17:30",
+        ),
+        "interview" => (
+            "schedule_interview",
+            "Interviews",
+            "Mon-Fri 10:00-12:00, 13:30-15:30",
+        ),
+        "deep" => ("schedule_deep", "Technical & finals", "Tue-Thu 10:00-12:00"),
+        _ => ("schedule_assessment", "Test blocks", "Mon-Fri 13:30-17:30"),
+    }
+}
+
+fn schedule_cfg(cfg: &mut serde_json::Value) -> &mut serde_json::Value {
+    if !cfg["scheduling"].is_object() {
+        cfg["scheduling"] = serde_json::json!({});
+    }
+    &mut cfg["scheduling"]
 }

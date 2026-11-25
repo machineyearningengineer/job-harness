@@ -306,6 +306,7 @@ pub fn validate_settings(value: &Value) -> Result<()> {
             "target_roles",
             "cv_tracks",
             "time_and_reminders",
+            "scheduling",
             "browser_policy",
             "primary_cv",
             "preferred_browser",

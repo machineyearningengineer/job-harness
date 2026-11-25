@@ -10,6 +10,7 @@ pub mod index;
 pub mod intake;
 pub mod pipeline;
 pub mod presentation;
+pub mod scheduling;
 pub mod secrets;
 pub mod semantic;
 pub mod state;

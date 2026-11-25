@@ -726,6 +726,386 @@
       "additionalProperties": false
     }
   },
+  "suggest_meeting_times": {
+    "description": "Rank interview times for one meeting kind against the workspace's scheduling windows, daily limits, buffers and notice. Pass calendar busy periods and any booking-page times as RFC 3339 instants with an offset or Z; preferred windows are local wall-clock in the workspace timezone and stay correct across daylight-saving changes. Read-only; it never books or replies.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": [
+            "screen",
+            "interview",
+            "deep",
+            "assessment"
+          ],
+          "description": "screen, interview, deep (technical or final) or assessment (a block to do an online test or take-home)."
+        },
+        "duration_minutes": {
+          "type": "integer",
+          "minimum": 5,
+          "maximum": 480
+        },
+        "candidates": {
+          "type": "array",
+          "description": "Times offered by a booking page. Omit to search the calendar between from and until.",
+          "items": {
+            "type": "object",
+            "properties": {
+              "start": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 64
+              },
+              "end": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 64
+              }
+            },
+            "required": [
+              "start"
+            ],
+            "additionalProperties": false
+          },
+          "minItems": 1,
+          "maxItems": 200
+        },
+        "busy": {
+          "type": "array",
+          "description": "Calendar periods to avoid. Tag interview events with their kind so daily limits and buffers apply.",
+          "items": {
+            "type": "object",
+            "properties": {
+              "start": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 64
+              },
+              "end": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 64
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "screen",
+                  "interview",
+                  "deep",
+                  "assessment"
+                ]
+              },
+              "label": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 200
+              }
+            },
+            "required": [
+              "start",
+              "end"
+            ],
+            "additionalProperties": false
+          },
+          "maxItems": 500
+        },
+        "from": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "until": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "deadline": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "now": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "timezone": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "description": "IANA zone override; defaults to the workspace timezone."
+        },
+        "allow_outside_hours": {
+          "type": "boolean"
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 10
+        }
+      },
+      "required": [
+        "kind",
+        "duration_minutes"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    },
+    "outputSchema": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "type": "integer",
+          "enum": [
+            2
+          ]
+        },
+        "ok": {
+          "type": "boolean"
+        },
+        "data": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "timezone": {
+                  "type": "string"
+                },
+                "kind": {
+                  "type": "string"
+                },
+                "duration_minutes": {
+                  "type": "integer"
+                },
+                "suggestions": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "start": {
+                        "type": "string"
+                      },
+                      "end": {
+                        "type": "string"
+                      },
+                      "local_start": {
+                        "type": "string"
+                      },
+                      "local_end": {
+                        "type": "string"
+                      },
+                      "label": {
+                        "type": "string"
+                      },
+                      "in_window": {
+                        "type": "boolean"
+                      },
+                      "score": {
+                        "type": "integer"
+                      },
+                      "reasons": {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        },
+                        "maxItems": 20
+                      }
+                    },
+                    "required": [
+                      "start",
+                      "end",
+                      "local_start",
+                      "local_end",
+                      "label",
+                      "in_window",
+                      "score",
+                      "reasons"
+                    ],
+                    "additionalProperties": false
+                  },
+                  "maxItems": 10
+                },
+                "considered": {
+                  "type": "integer"
+                },
+                "available": {
+                  "type": "integer"
+                },
+                "rejected": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "start": {
+                        "type": "string"
+                      },
+                      "label": {
+                        "type": "string"
+                      },
+                      "reasons": {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        },
+                        "maxItems": 520
+                      }
+                    },
+                    "required": [
+                      "start",
+                      "label",
+                      "reasons"
+                    ],
+                    "additionalProperties": false
+                  },
+                  "maxItems": 20
+                },
+                "blocking_reasons": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "reason": {
+                        "type": "string"
+                      },
+                      "count": {
+                        "type": "integer"
+                      }
+                    },
+                    "required": [
+                      "reason",
+                      "count"
+                    ],
+                    "additionalProperties": false
+                  },
+                  "maxItems": 5
+                },
+                "policy": {
+                  "type": "object",
+                  "properties": {
+                    "windows": {
+                      "type": "string"
+                    },
+                    "daily_limit": {
+                      "type": "integer"
+                    },
+                    "buffer_minutes": {
+                      "type": "integer"
+                    },
+                    "min_notice_hours": {
+                      "type": "integer"
+                    },
+                    "deadline_margin_hours": {
+                      "type": "integer"
+                    },
+                    "hours": {
+                      "type": "string"
+                    },
+                    "max_per_day": {
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "windows",
+                    "daily_limit",
+                    "buffer_minutes",
+                    "min_notice_hours",
+                    "deadline_margin_hours",
+                    "hours",
+                    "max_per_day"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "timezone",
+                "kind",
+                "duration_minutes",
+                "suggestions",
+                "considered",
+                "available",
+                "rejected",
+                "blocking_reasons",
+                "policy"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "error": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "code": {
+                  "type": "string"
+                },
+                "message": {
+                  "type": "string"
+                },
+                "retryable": {
+                  "type": "boolean"
+                },
+                "recovery": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "code",
+                "message",
+                "retryable",
+                "recovery"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "next": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "tool": {
+                "type": "string"
+              },
+              "arguments": {
+                "type": "object"
+              },
+              "reason": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "tool",
+              "arguments",
+              "reason"
+            ],
+            "additionalProperties": false
+          },
+          "maxItems": 5
+        }
+      },
+      "required": [
+        "schema_version",
+        "ok",
+        "data",
+        "error",
+        "next"
+      ],
+      "additionalProperties": false
+    }
+  },
   "get_approved_answer": {
     "description": "Retrieve sourced answer sections; preserve their attribution and limits.",
     "inputSchema": {

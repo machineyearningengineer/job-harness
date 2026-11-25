@@ -1466,3 +1466,38 @@ fn reviewed_tracking_move_refuses_manual_edit_and_keeps_canonical_state() {
     );
     assert_eq!(fs::read(&path).unwrap(), committed);
 }
+
+#[test]
+fn suggest_meeting_times_uses_workspace_timezone_and_scheduling() {
+    let dir = fixture();
+    fs::write(
+        dir.path().join("config/career-ledger.json"),
+        json!({"schema_version":1,"timezone":"Europe/London","primary_cv":"output/cv.pdf",
+            "scheduling":{"max_per_day":2,"kinds":{"interview":{"windows":[{"days":["mon"],"start":"09:45","end":"10:15"}]}}}})
+        .to_string(),
+    )
+    .unwrap();
+    let h = Engine::open(dir.path()).unwrap();
+    let data = call(
+        &h,
+        "suggest_meeting_times",
+        json!({"kind":"interview","duration_minutes":30,"now":"2026-11-25T13:00:00Z",
+            "candidates":[{"start":"2026-11-30T09:45:00Z"},{"start":"2026-12-01T10:30:00+00:00"}],
+            "busy":[{"start":"2026-12-01T10:30:00Z","end":"2026-12-01T11:00:00Z","kind":"interview","label":"Sunsave"}]}),
+    );
+    assert_eq!(data["timezone"], "Europe/London");
+    assert_eq!(
+        data["suggestions"][0]["label"],
+        "Mon 30 Nov 2026, 09:45-10:15 GMT"
+    );
+    assert_eq!(data["suggestions"][0]["in_window"], true);
+    assert_eq!(
+        data["rejected"][0]["reasons"][0],
+        "Clashes with Sunsave (15-minute buffer)"
+    );
+    let bad = h.call(
+        "suggest_meeting_times",
+        &json!({"kind":"screen","duration_minutes":30,"candidates":[{"start":"2026-11-30 09:45"}]}),
+    );
+    assert_eq!(bad["error"]["code"], "invalid_arguments");
+}
