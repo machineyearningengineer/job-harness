@@ -332,7 +332,14 @@ impl Engine {
             }
             if tool == "prepare_packet" {
                 self.validate_answer_sources(&prior["result"]["packet"], "artifact_changed")?;
-                for (field, path) in [("cv", "cv_path"), ("answers", "answers_path")] {
+                for (field, path) in [
+                    ("cv", "cv_path"),
+                    ("answers", "answers_path"),
+                    ("vacancy", "vacancy_text_path"),
+                ] {
+                    if field == "vacancy" && args.get(path).is_none() {
+                        continue;
+                    }
                     let bytes = fs::read(
                         self.artifact_path(s(args, path)?, &["pdf", "md", "txt", "json"])?,
                     )?;

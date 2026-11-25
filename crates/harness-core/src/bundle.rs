@@ -847,7 +847,7 @@ mod tests {
         );
         let prepared = call(
             "prepare_application",
-            json!({"run_id":run["run_id"],"record":"applications/example-engineer-123.md","company":"Example","vacancy_url":"https://example.invalid/job/123","source":"employer","posting_id":"123","cv_path":"output/cv.pdf","answers_path":"applications/answers.json","idempotency_key":"prepare"}),
+            json!({"run_id":run["run_id"],"record":"applications/example-engineer-123.md","company":"Example","vacancy_url":"https://example.invalid/job/123","source":"employer","posting_id":"123","cv_path":"output/cv.pdf","answers_path":"applications/answers.json","vacancy_text_unavailable":"Synthetic bundle fixture without a written ad","idempotency_key":"prepare"}),
         );
         call(
             "begin_submission",
