@@ -1,6 +1,12 @@
 //! Bounded data-only composition; submit boundaries remain separate.
 use super::*;
 
+struct DuplicateSnapshot {
+    _lock: storage::WorkspaceLock,
+    state: Value,
+    records: Vec<query::DuplicateRecord>,
+}
+
 impl Engine {
     pub(super) fn batch(&self, args: &Value, readonly: bool) -> Result<(Value, Vec<Value>)> {
         let steps = args["steps"].as_array().unwrap();
@@ -44,6 +50,11 @@ impl Engine {
         }
         let mut results = vec![];
         let mut values = BTreeMap::new();
+        // Discovery sends duplicate checks together. Keep this snapshot local
+        // to a homogeneous read batch so mixed batches never nest locks.
+        let duplicate_batch =
+            readonly && steps.iter().all(|step| step["tool"] == "check_duplicate");
+        let mut duplicates = None;
         for (index, step) in steps.iter().enumerate() {
             let id = s(step, "id")?;
             let tool = s(step, "tool")?;
@@ -53,6 +64,9 @@ impl Engine {
                         "batch_boundary",
                         "begin_archive requires a separate one-shot call",
                     )),
+                Ok(args) if duplicate_batch => self.call_enveloped(tool, || {
+                    self.check_duplicate_in_batch(&args, &mut duplicates)
+                }),
                 Ok(args) => self.call(tool, &args),
                 Err(error) => self.error_envelope(error),
             };
@@ -68,6 +82,42 @@ impl Engine {
         }
         Ok((
             json!({"results":results,"completed":results.len(),"failed_step":null,"skipped":[]}),
+            vec![],
+        ))
+    }
+
+    fn check_duplicate_in_batch(
+        &self,
+        args: &Value,
+        snapshot: &mut Option<DuplicateSnapshot>,
+    ) -> Result<(Value, Vec<Value>)> {
+        contracts::validate(&contracts::specs()["check_duplicate"]["inputSchema"], args)?;
+        if snapshot.is_none() {
+            let lock = storage::WorkspaceLock::acquire(&self.root, false)?;
+            let state = crate::state::load_for_read(&self.root)?;
+            if state.get("pending").is_some() {
+                return Err(Error::new(
+                    "pending_recovery",
+                    "Pending transaction: call rebuild_pipeline to recover the local update",
+                ));
+            }
+            *snapshot = Some(DuplicateSnapshot {
+                _lock: lock,
+                state,
+                records: self.duplicate_records()?,
+            });
+        }
+        let snapshot = snapshot.as_ref().unwrap();
+        let raw = Self::match_duplicates(
+            &snapshot.records,
+            &snapshot.state,
+            s(args, "company")?,
+            &domain::normal_url(s(args, "vacancy_url")?)?,
+            args.get("posting_id").and_then(Value::as_str),
+            None,
+        )?;
+        Ok((
+            self.compact("check_duplicate", raw, args, &snapshot.state)?,
             vec![],
         ))
     }

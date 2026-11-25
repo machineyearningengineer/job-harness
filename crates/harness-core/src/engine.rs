@@ -70,15 +70,20 @@ impl Engine {
         &self.root
     }
     pub fn call(&self, tool: &str, arguments: &Value) -> Value {
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            self.call_result(tool, arguments)
-        }))
-        .unwrap_or_else(|_| {
-            Err(Error::new(
-                "internal_contract_error",
-                "Unexpected local tool failure; preserve state and report the defect.",
-            ))
-        });
+        self.call_enveloped(tool, || self.call_result(tool, arguments))
+    }
+    fn call_enveloped(
+        &self,
+        tool: &str,
+        action: impl FnOnce() -> Result<(Value, Vec<Value>)>,
+    ) -> Value {
+        let result =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(action)).unwrap_or_else(|_| {
+                Err(Error::new(
+                    "internal_contract_error",
+                    "Unexpected local tool failure; preserve state and report the defect.",
+                ))
+            });
         let out = match result {
             Ok((data, next)) => {
                 let failed = data.get("failed_step").is_some_and(|x| !x.is_null());
