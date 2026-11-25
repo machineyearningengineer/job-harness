@@ -251,6 +251,35 @@ impl Engine {
                 "Packet needs a PDF and an exact answer/message file",
             ));
         }
+        // The job ad is frozen with the packet so it can be read after the
+        // posting closes. Skipping it must be an explicit, recorded choice.
+        let vacancy = match (
+            args.get("vacancy_text_path").and_then(Value::as_str),
+            args.get("vacancy_text_unavailable").and_then(Value::as_str),
+        ) {
+            (Some(path), None) => {
+                if !["md", "txt"].contains(
+                    &Path::new(path)
+                        .extension()
+                        .and_then(|x| x.to_str())
+                        .unwrap_or_default(),
+                ) || fs::read(self.artifact_path(path, &["md", "txt"])?)?.len() < 200
+                {
+                    return Err(Error::new(
+                        "invalid_arguments",
+                        "Save the full job ad as a .md or .txt file of at least 200 bytes",
+                    ));
+                }
+                Some(path)
+            }
+            (None, Some(_)) => None,
+            _ => {
+                return Err(Error::new(
+                    "invalid_arguments",
+                    "Save the full job ad and pass vacancy_text_path, or pass vacancy_text_unavailable with the reason it cannot be captured",
+                ));
+            }
+        };
         let mut source_hashes = serde_json::Map::new();
         for source in self.settings()?["answer_sources"].as_array().unwrap() {
             let source = source.as_str().unwrap();
@@ -262,6 +291,10 @@ impl Engine {
         let mut packet = json!({"record":record,"company":company,"vacancy_url":domain::normal_url(vacancy_url)?,"source":args["source"],"posting_id":args.get("posting_id").cloned().unwrap_or(Value::Null),"cv":self.copy_artifact(s(args,"cv_path")?,"packets")?,"answers":self.copy_artifact(s(args,"answers_path")?,"packets")?,"source_record":self.copy_artifact(record,"packets")?,"answer_source_sha256":source_hashes,"ledger_revision":self.revision(),"ledger_dirty":self.dirty()});
         if let Some(ch) = args.get("channel").and_then(Value::as_str) {
             packet["channel"] = json!(ch);
+        }
+        match vacancy {
+            Some(path) => packet["vacancy"] = self.copy_artifact(path, "packets")?,
+            None => packet["vacancy_unavailable"] = args["vacancy_text_unavailable"].clone(),
         }
         let id = domain::digest(&domain::encoded(&packet)?);
         storage::atomic_write(
@@ -320,7 +353,10 @@ impl Engine {
                 "Packet was changed after preparation",
             ));
         }
-        for field in ["cv", "answers", "source_record"] {
+        for field in ["cv", "answers", "source_record", "vacancy"] {
+            if field == "vacancy" && packet.get(field).is_none() {
+                continue; // packets from before job ads were frozen, or an explicit reason
+            }
             let item = &packet[field];
             let path = self.safe_path(
                 s(item, "path")?,

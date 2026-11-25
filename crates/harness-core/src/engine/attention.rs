@@ -593,7 +593,10 @@ impl Engine {
             let parsed: Value = serde_json::from_slice(&bytes)?;
             let actual = domain::digest(&domain::encoded(&parsed)?);
             checks.push(json!({"kind":"packet_metadata","path":relative,"expected_sha256":id,"actual_sha256":actual,"changed":actual!=id}));
-            for field in ["cv", "answers", "source_record"] {
+            for field in ["cv", "answers", "source_record", "vacancy"] {
+                if field == "vacancy" && parsed.get(field).is_none() {
+                    continue;
+                }
                 let artifact = parsed.get(field).ok_or_else(|| {
                     Error::new(
                         "invalid_state",

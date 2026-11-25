@@ -26,6 +26,7 @@ fn fixture() -> tempfile::TempDir {
         r#"{"experience":6}"#,
     )
     .unwrap();
+    fs::write(dir.path().join("applications/vacancy.md"), "# Example — Engineer\n\nSynthetic job ad fixture. Build and operate backend services, own features end to end, write tests, review changes and work with product on requirements. Requirements: production experience, testing discipline, clear communication.\n").unwrap();
     dir
 }
 fn call(h: &Engine, tool: &str, args: Value) -> Value {
@@ -41,7 +42,7 @@ fn prepare(h: &Engine, run: &str, key: &str) -> Value {
     call(
         h,
         "prepare_application",
-        json!({"run_id":run,"record":"applications/acme-engineer-123.md","company":"Acme","vacancy_url":"https://jobs.example.com/acme/123","source":"employer","posting_id":"123","cv_path":"output/cv.pdf","answers_path":"applications/answers.json","idempotency_key":key}),
+        json!({"run_id":run,"record":"applications/acme-engineer-123.md","company":"Acme","vacancy_url":"https://jobs.example.com/acme/123","source":"employer","posting_id":"123","cv_path":"output/cv.pdf","answers_path":"applications/answers.json","vacancy_text_path":"applications/vacancy.md","idempotency_key":key}),
     )
 }
 fn set_daily_budget(h: &Engine, limit: Value) {
@@ -62,7 +63,7 @@ fn prepare_second_run(h: &Engine) -> Value {
     call(
         h,
         "prepare_application",
-        json!({"run_id":run["run_id"],"record":"applications/example-engineer-456.md","company":"Example","vacancy_url":"https://jobs.example.com/example/456","source":"employer","posting_id":"456","cv_path":"output/cv.pdf","answers_path":"applications/answers.json","idempotency_key":"prepare2"}),
+        json!({"run_id":run["run_id"],"record":"applications/example-engineer-456.md","company":"Example","vacancy_url":"https://jobs.example.com/example/456","source":"employer","posting_id":"456","cv_path":"output/cv.pdf","answers_path":"applications/answers.json","vacancy_text_path":"applications/vacancy.md","idempotency_key":"prepare2"}),
     )
 }
 
@@ -368,7 +369,7 @@ fn changed_answers_do_not_start_reserved_submission() {
         h.load_state().unwrap()["attempts"][p["attempt_id"].as_str().unwrap()]["status"],
         "reserved"
     );
-    assert_eq!(h.call("prepare_application",&json!({"run_id":run,"record":"applications/acme-engineer-123.md","company":"Acme","vacancy_url":"https://jobs.example.com/acme/123","source":"employer","posting_id":"123","cv_path":"output/cv.pdf","answers_path":"applications/answers.json","idempotency_key":"prepare"}))["error"]["code"],"artifact_changed");
+    assert_eq!(h.call("prepare_application",&json!({"run_id":run,"record":"applications/acme-engineer-123.md","company":"Acme","vacancy_url":"https://jobs.example.com/acme/123","source":"employer","posting_id":"123","cv_path":"output/cv.pdf","answers_path":"applications/answers.json","vacancy_text_path":"applications/vacancy.md","idempotency_key":"prepare"}))["error"]["code"],"artifact_changed");
 }
 #[test]
 fn cancelled_attempts_still_count_toward_total_budget() {
@@ -383,7 +384,7 @@ fn cancelled_attempts_still_count_toward_total_budget() {
             json!({"attempt_id":p["attempt_id"],"summary":"Changed form","idempotency_key":format!("cancel{i}")}),
         );
     }
-    let args = json!({"run_id":run,"record":"applications/acme-engineer-123.md","company":"Acme","vacancy_url":"https://jobs.example.com/acme/123","source":"employer","posting_id":"123","cv_path":"output/cv.pdf","answers_path":"applications/answers.json","idempotency_key":"prepare4"});
+    let args = json!({"run_id":run,"record":"applications/acme-engineer-123.md","company":"Acme","vacancy_url":"https://jobs.example.com/acme/123","source":"employer","posting_id":"123","cv_path":"output/cv.pdf","answers_path":"applications/answers.json","vacancy_text_path":"applications/vacancy.md","idempotency_key":"prepare4"});
     assert_eq!(
         h.call("prepare_application", &args)["error"]["code"],
         "cap_reached"
@@ -538,7 +539,7 @@ fn concurrent_reservations_have_one_canonical_winner() {
     let h = Engine::open(dir.path()).unwrap();
     let r1 = start(&h, 1);
     let r2=call(&h,"start_run",json!({"operation":"apply","scope":{"sources":["employer"],"max_submissions":1,"dry_run":false},"user_request":"Second synthetic worker","idempotency_key":"run2"}))["run_id"].as_str().unwrap().to_owned();
-    let packet_args = |run: &str, key: &str| json!({"run_id":run,"record":"applications/acme-engineer-123.md","company":"Acme","vacancy_url":"https://jobs.example.com/acme/123","source":"employer","posting_id":"123","cv_path":"output/cv.pdf","answers_path":"applications/answers.json","idempotency_key":key});
+    let packet_args = |run: &str, key: &str| json!({"run_id":run,"record":"applications/acme-engineer-123.md","company":"Acme","vacancy_url":"https://jobs.example.com/acme/123","source":"employer","posting_id":"123","cv_path":"output/cv.pdf","answers_path":"applications/answers.json","vacancy_text_path":"applications/vacancy.md","idempotency_key":key});
     let p1 = call(&h, "prepare_packet", packet_args(&r1, "packet1"));
     let p2 = call(&h, "prepare_packet", packet_args(&r2, "packet2"));
     let barrier = Arc::new(Barrier::new(2));
@@ -1536,4 +1537,72 @@ fn suggest_meeting_times_uses_workspace_timezone_and_scheduling() {
         &json!({"kind":"screen","duration_minutes":30,"candidates":[{"start":"2026-11-30 09:45"}]}),
     );
     assert_eq!(bad["error"]["code"], "invalid_arguments");
+}
+
+#[test]
+fn preparation_requires_a_frozen_job_ad_or_an_explicit_reason() {
+    let dir = fixture();
+    let h = Engine::open(dir.path()).unwrap();
+    let run = start(&h, 1);
+    let base = json!({"run_id":run,"record":"applications/acme-engineer-123.md","company":"Acme","vacancy_url":"https://jobs.example.com/acme/123","source":"employer","posting_id":"123","cv_path":"output/cv.pdf","answers_path":"applications/answers.json"});
+    let with = |extra: Value, key: &str| {
+        let mut args = base.clone();
+        for (k, v) in extra.as_object().unwrap() {
+            args[k] = v.clone();
+        }
+        args["idempotency_key"] = json!(key);
+        args
+    };
+    let missing = h.call("prepare_application", &with(json!({}), "none"));
+    assert_eq!(missing["error"]["code"], "invalid_arguments");
+    assert!(
+        missing["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("vacancy_text_path")
+    );
+    fs::write(dir.path().join("applications/short.md"), "Apply now").unwrap();
+    let short = h.call(
+        "prepare_application",
+        &with(
+            json!({"vacancy_text_path":"applications/short.md"}),
+            "short",
+        ),
+    );
+    assert_eq!(short["error"]["code"], "invalid_arguments");
+
+    let prepared = call(
+        &h,
+        "prepare_application",
+        with(json!({"vacancy_text_path":"applications/vacancy.md"}), "ad"),
+    );
+    let ad = &prepared["packet"]["vacancy"];
+    assert_eq!(ad["original_path"], "applications/vacancy.md");
+    let frozen = fs::read(dir.path().join(ad["path"].as_str().unwrap())).unwrap();
+    assert_eq!(
+        frozen,
+        fs::read(dir.path().join("applications/vacancy.md")).unwrap()
+    );
+    assert_eq!(json!(domain::digest(&frozen)), ad["sha256"]);
+    // Editing the frozen copy after preparation is caught before submit.
+    fs::write(dir.path().join(ad["path"].as_str().unwrap()), "changed").unwrap();
+    let packet = prepared["packet_id"].as_str().unwrap();
+    assert_eq!(
+        h.call("get_packet", &json!({"packet_id":packet}))["error"]["code"],
+        "artifact_changed"
+    );
+
+    let dir = fixture();
+    let h = Engine::open(dir.path()).unwrap();
+    let run = start(&h, 1);
+    let mut args = with(
+        json!({"vacancy_text_unavailable":"Recruiter email with no written spec"}),
+        "reason",
+    );
+    args["run_id"] = json!(run);
+    let prepared = call(&h, "prepare_application", args);
+    assert_eq!(
+        prepared["packet"]["vacancy_unavailable"],
+        "Recruiter email with no written spec"
+    );
 }

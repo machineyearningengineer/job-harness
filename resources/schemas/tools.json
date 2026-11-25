@@ -3527,6 +3527,18 @@
           "minLength": 1,
           "maxLength": 20000
         },
+        "vacancy_text_path": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 20000,
+          "description": "Saved full text of the job ad (.md or .txt), frozen into the packet so it survives the posting closing."
+        },
+        "vacancy_text_unavailable": {
+          "type": "string",
+          "minLength": 10,
+          "maxLength": 2000,
+          "description": "Why the job ad cannot be saved (for example a recruiter email with no written spec). Use instead of vacancy_text_path."
+        },
         "posting_id": {
           "type": "string",
           "minLength": 1,
@@ -3671,6 +3683,29 @@
                         "original_path"
                       ],
                       "additionalProperties": false
+                    },
+                    "vacancy": {
+                      "type": "object",
+                      "properties": {
+                        "path": {
+                          "type": "string"
+                        },
+                        "sha256": {
+                          "type": "string"
+                        },
+                        "original_path": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "path",
+                        "sha256",
+                        "original_path"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "vacancy_unavailable": {
+                      "type": "string"
                     },
                     "ledger_revision": {
                       "type": "string"
@@ -4079,6 +4114,29 @@
                         "original_path"
                       ],
                       "additionalProperties": false
+                    },
+                    "vacancy": {
+                      "type": "object",
+                      "properties": {
+                        "path": {
+                          "type": "string"
+                        },
+                        "sha256": {
+                          "type": "string"
+                        },
+                        "original_path": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "path",
+                        "sha256",
+                        "original_path"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "vacancy_unavailable": {
+                      "type": "string"
                     },
                     "ledger_revision": {
                       "type": "string"
@@ -5640,6 +5698,29 @@
                       ],
                       "additionalProperties": false
                     },
+                    "vacancy": {
+                      "type": "object",
+                      "properties": {
+                        "path": {
+                          "type": "string"
+                        },
+                        "sha256": {
+                          "type": "string"
+                        },
+                        "original_path": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "path",
+                        "sha256",
+                        "original_path"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "vacancy_unavailable": {
+                      "type": "string"
+                    },
                     "ledger_revision": {
                       "type": "string"
                     },
@@ -5956,6 +6037,18 @@
           "minLength": 1,
           "maxLength": 20000
         },
+        "vacancy_text_path": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 20000,
+          "description": "Saved full text of the job ad (.md or .txt), frozen into the packet so it survives the posting closing."
+        },
+        "vacancy_text_unavailable": {
+          "type": "string",
+          "minLength": 10,
+          "maxLength": 2000,
+          "description": "Why the job ad cannot be saved (for example a recruiter email with no written spec). Use instead of vacancy_text_path."
+        },
         "posting_id": {
           "type": "string",
           "minLength": 1,
@@ -6100,6 +6193,29 @@
                         "original_path"
                       ],
                       "additionalProperties": false
+                    },
+                    "vacancy": {
+                      "type": "object",
+                      "properties": {
+                        "path": {
+                          "type": "string"
+                        },
+                        "sha256": {
+                          "type": "string"
+                        },
+                        "original_path": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "path",
+                        "sha256",
+                        "original_path"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "vacancy_unavailable": {
+                      "type": "string"
                     },
                     "ledger_revision": {
                       "type": "string"
@@ -8075,6 +8191,29 @@
                             "original_path"
                           ],
                           "additionalProperties": false
+                        },
+                        "vacancy": {
+                          "type": "object",
+                          "properties": {
+                            "path": {
+                              "type": "string"
+                            },
+                            "sha256": {
+                              "type": "string"
+                            },
+                            "original_path": {
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "path",
+                            "sha256",
+                            "original_path"
+                          ],
+                          "additionalProperties": false
+                        },
+                        "vacancy_unavailable": {
+                          "type": "string"
                         },
                         "ledger_revision": {
                           "type": "string"
