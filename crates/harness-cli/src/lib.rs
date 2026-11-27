@@ -94,10 +94,10 @@ enum Command {
     Configure {
         #[arg(long, required_unless_present = "remote", conflicts_with = "remote")]
         workspace: Option<PathBuf>,
-        /// URL of a `jh serve`, for example http://127.0.0.1:7420.
-        #[arg(long, requires = "token_file")]
+        /// A `jh serve` to send calls to: unix:PATH (its socket) or http://127.0.0.1:PORT.
+        #[arg(long)]
         remote: Option<String>,
-        /// File holding that server's bearer token.
+        /// File holding an http:// server's bearer token (a unix: socket needs none).
         #[arg(long)]
         token_file: Option<PathBuf>,
     },
@@ -141,6 +141,7 @@ enum Command {
     },
     /// Serve typed workspace JSON-RPC and live change events for remote GPUI clients (SSH/Tailscale).
     Serve {
+        /// unix:PATH (file permissions decide who may call) or IP:PORT (bearer token required).
         #[arg(long, default_value = "127.0.0.1:7420")]
         bind: String,
     },
@@ -500,10 +501,10 @@ async fn execute(cli: Cli) -> anyhow::Result<Option<Value>> {
             remote,
             token_file,
         } => {
-            return Ok(Some(success(match (workspace, remote, token_file) {
-                (Some(workspace), ..) => host::configure(&workspace)?,
-                (None, Some(url), Some(file)) => host::configure_remote(&url, &file).await?,
-                _ => unreachable!("clap requires a workspace or a remote with its token file"),
+            return Ok(Some(success(match (workspace, remote) {
+                (Some(workspace), _) => host::configure(&workspace)?,
+                (None, Some(url)) => host::configure_remote(&url, token_file.as_deref()).await?,
+                _ => unreachable!("clap requires a workspace or a remote"),
             })));
         }
         Command::Service { action } => {
