@@ -1,6 +1,6 @@
 //! Explicit host settings hold paths only, never candidate facts or credentials.
 use job_harness_core::{Engine, HarnessError};
-use job_harness_protocol::remote::{Client, read_token};
+use job_harness_protocol::remote::Client;
 use serde_json::{Value, json};
 use std::{
     fs,
@@ -83,18 +83,16 @@ fn read_selection(path: &Path, fallback: Option<&Path>) -> anyhow::Result<PathBu
     Ok(PathBuf::from(data["workspace"].as_str().unwrap()))
 }
 
-/// Remote mode for `jh call` and `jh mcp`: a `jh serve` URL, from `JOB_HARNESS_REMOTE_URL`
-/// or host settings. A `unix:PATH` server needs no token; an `http://` one needs the file
-/// holding its token (`JOB_HARNESS_SERVE_TOKEN_FILE` or settings). Source builds read
-/// only their development settings.
+/// Remote mode for `jh call` and `jh mcp`: a `jh serve` socket (`unix:PATH`), from
+/// `JOB_HARNESS_REMOTE_URL` or host settings. Source builds read only their development
+/// settings.
 pub fn remote() -> anyhow::Result<Option<Client>> {
-    let env = super::development::current()
+    let url = match super::development::current()
         .is_none()
         .then(|| std::env::var("JOB_HARNESS_REMOTE_URL").ok())
         .flatten()
-        .map(|url| (url, std::env::var_os("JOB_HARNESS_SERVE_TOKEN_FILE")));
-    let (url, token_file) = match env {
-        Some((url, file)) => (url, file.map(PathBuf::from)),
+    {
+        Some(url) => url,
         None => {
             let path = settings_path()?;
             let Ok(bytes) = fs::read(&path) else {
@@ -104,37 +102,14 @@ pub fn remote() -> anyhow::Result<Option<Client>> {
             let Some(url) = data["remote"]["url"].as_str() else {
                 return Ok(None);
             };
-            let file = data["remote"]["token_file"].as_str().map(PathBuf::from);
-            (url.to_owned(), file)
+            url.to_owned()
         }
     };
-    Ok(Some(Client::new(
-        &url,
-        token(&url, token_file.as_deref())?,
-    )?))
+    Ok(Some(Client::new(&url)?))
 }
 
-/// The token for `url`: none for a `unix:` socket, else read from its required file.
-fn token(url: &str, token_file: Option<&Path>) -> anyhow::Result<Option<String>> {
-    if url.starts_with("unix:") {
-        return Ok(None);
-    }
-    let token_file = token_file.ok_or_else(|| {
-        HarnessError::new(
-            "invalid_arguments",
-            "An http:// server needs its token file: set JOB_HARNESS_SERVE_TOKEN_FILE or run jh configure --remote URL --token-file PATH. A unix:PATH server needs none.",
-        )
-    })?;
-    Ok(Some(read_token(token_file)?))
-}
-
-pub async fn configure_remote(url: &str, token_file: Option<&Path>) -> anyhow::Result<Value> {
-    // read_token names the file when it is missing.
-    let client = Client::new(url, token(url, token_file)?)?;
-    let token_file = match token_file.filter(|_| !url.starts_with("unix:")) {
-        Some(file) => Some(file.canonicalize()?),
-        None => None,
-    };
+pub async fn configure_remote(url: &str) -> anyhow::Result<Value> {
+    let client = Client::new(url)?;
     let ready = client.call("bootstrap", &json!({})).await;
     if ready["ok"] != true {
         return Err(HarnessError::new(
@@ -146,8 +121,8 @@ pub async fn configure_remote(url: &str, token_file: Option<&Path>) -> anyhow::R
         )
         .into());
     }
-    save(json!({"schema_version":1,"remote":{"url":url,"token_file":token_file}}))?;
-    Ok(json!({"remote":url,"token_file":token_file,"settings":settings_path()?}))
+    save(json!({"schema_version":1,"remote":{"url":url}}))?;
+    Ok(json!({"remote":url,"settings":settings_path()?}))
 }
 
 pub fn configure(root: &Path) -> anyhow::Result<Value> {
@@ -227,21 +202,5 @@ mod tests {
         .unwrap();
         assert!(development_selection(&development).is_err());
         assert!(read_selection(&root.path().join("missing.json"), None).is_err());
-    }
-
-    #[test]
-    fn a_unix_socket_needs_no_token_and_http_needs_its_file() {
-        assert_eq!(token("unix:/run/jh/serve.sock", None).unwrap(), None);
-        let missing = token("http://127.0.0.1:7420", None).unwrap_err();
-        assert!(missing.to_string().contains("token file"), "{missing}");
-        let dir = tempfile::tempdir().unwrap();
-        let file = dir.path().join("token");
-        fs::write(&file, "0123456789abcdef\n").unwrap();
-        assert_eq!(
-            token("http://127.0.0.1:7420", Some(&file))
-                .unwrap()
-                .as_deref(),
-            Some("0123456789abcdef")
-        );
     }
 }

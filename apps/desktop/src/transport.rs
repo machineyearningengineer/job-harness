@@ -18,7 +18,10 @@ use uuid::Uuid;
 #[derive(Clone, Debug)]
 pub enum WorkspaceTarget {
     Local(PathBuf),
-    Remote { url: String, token: Option<String> },
+    /// A `jh serve` socket, `unix:PATH`.
+    Remote {
+        url: String,
+    },
 }
 
 impl WorkspaceTarget {
@@ -30,14 +33,10 @@ impl WorkspaceTarget {
                 .filter(|s| !s.trim().is_empty())
                 .unwrap_or("workspace")
                 .to_owned(),
-            Self::Remote { url, .. } => format!(
+            Self::Remote { url } => format!(
                 "Remote ({})",
-                crate::ssh::tunnel().map_or_else(
-                    || url
-                        .trim_start_matches("http://")
-                        .trim_start_matches("https://"),
-                    |tunnel| tunnel.target()
-                )
+                crate::ssh::tunnel()
+                    .map_or_else(|| url.trim_start_matches("unix:"), |t| t.target())
             ),
         }
     }
@@ -314,16 +313,14 @@ impl WorkspaceClient {
                 let engine = Engine::open(root)?;
                 Ok(engine.call(tool, &arguments))
             }
-            WorkspaceTarget::Remote { token, .. } => {
+            WorkspaceTarget::Remote { .. } => {
                 ensure_online()?;
-                let mut req = self
+                let resp = self
                     .http
                     .post(format!("{}/v1/call", self.base))
-                    .json(&json!({"tool": tool, "arguments": arguments}));
-                if let Some(tok) = token {
-                    req = req.bearer_auth(tok);
-                }
-                let resp = req.send().context("Remote workspace request failed")?;
+                    .json(&json!({"tool": tool, "arguments": arguments}))
+                    .send()
+                    .context("Remote workspace request failed")?;
                 let parsed: Value = resp.json().context("Invalid remote JSON envelope")?;
                 Ok(parsed)
             }
@@ -844,14 +841,11 @@ impl WorkspaceClient {
     }
 
     fn remote_health(&self) -> Option<Value> {
-        let WorkspaceTarget::Remote { token, .. } = &self.target else {
+        let WorkspaceTarget::Remote { .. } = &self.target else {
             return None;
         };
-        let mut req = self.http.get(format!("{}/v1/health", self.base));
-        if let Some(tok) = token {
-            req = req.bearer_auth(tok);
-        }
-        req.send().ok()?.json().ok()
+        let health = self.http.get(format!("{}/v1/health", self.base));
+        health.send().ok()?.json().ok()
     }
 
     fn discover_profile_docs(&self) -> Vec<ProfileDoc> {
@@ -1301,7 +1295,7 @@ pub fn spawn_change_listener(
             }
             Some(watcher)
         }
-        WorkspaceTarget::Remote { url, token } => {
+        WorkspaceTarget::Remote { url } => {
             std::thread::spawn(move || {
                 let (client, base) = http_client(&url, None);
                 loop {
@@ -1309,11 +1303,7 @@ pub fn spawn_change_listener(
                     while ensure_online().is_err() {
                         std::thread::sleep(Duration::from_millis(500));
                     }
-                    let mut req = client.get(format!("{base}/v1/events"));
-                    if let Some(tok) = &token {
-                        req = req.bearer_auth(tok);
-                    }
-                    if let Ok(resp) = req.send() {
+                    if let Ok(resp) = client.get(format!("{base}/v1/events")).send() {
                         // The first event after a reconnect refreshes the board.
                         let reader = BufReader::new(resp);
                         for line in reader.lines().map_while(Result::ok) {
@@ -1749,10 +1739,9 @@ mod tests {
     #[test]
     fn remote_label_names_the_server_not_the_tunnel() {
         let target = WorkspaceTarget::Remote {
-            url: "http://127.0.0.1:7420".into(),
-            token: None,
+            url: "unix:/run/jh/serve.sock".into(),
         };
-        assert_eq!(target.label(), "Remote (127.0.0.1:7420)");
+        assert_eq!(target.label(), "Remote (/run/jh/serve.sock)");
         assert_eq!(
             remote_label(&json!({"ok":true,"name":"ledger","host":"alice@server"})).as_deref(),
             Some("ledger · alice@server")

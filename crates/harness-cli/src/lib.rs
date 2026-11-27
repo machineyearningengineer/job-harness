@@ -94,12 +94,9 @@ enum Command {
     Configure {
         #[arg(long, required_unless_present = "remote", conflicts_with = "remote")]
         workspace: Option<PathBuf>,
-        /// A `jh serve` to send calls to: unix:PATH (its socket) or http://127.0.0.1:PORT.
+        /// A `jh serve` to send calls to: unix:PATH, its socket.
         #[arg(long)]
         remote: Option<String>,
-        /// File holding an http:// server's bearer token (a unix: socket needs none).
-        #[arg(long)]
-        token_file: Option<PathBuf>,
     },
     /// Invoke one typed tool. JSON from stdin or --input; compact JSON to stdout.
     Call {
@@ -141,8 +138,8 @@ enum Command {
     },
     /// Serve typed workspace JSON-RPC and live change events for remote GPUI clients (SSH/Tailscale).
     Serve {
-        /// unix:PATH (file permissions decide who may call) or IP:PORT (bearer token required).
-        #[arg(long, default_value = "127.0.0.1:7420")]
+        /// unix:PATH; the socket's file permissions decide who may call.
+        #[arg(long)]
         bind: String,
     },
     /// Run a bounded local-tool loop with a local or remote compatible model.
@@ -504,14 +501,10 @@ async fn execute(cli: Cli) -> anyhow::Result<Option<Value>> {
                 contracts::workflow_schema().clone()
             }));
         }
-        Command::Configure {
-            workspace,
-            remote,
-            token_file,
-        } => {
+        Command::Configure { workspace, remote } => {
             return Ok(Some(success(match (workspace, remote) {
                 (Some(workspace), _) => host::configure(&workspace)?,
-                (None, Some(url)) => host::configure_remote(&url, token_file.as_deref()).await?,
+                (None, Some(url)) => host::configure_remote(&url).await?,
                 _ => unreachable!("clap requires a workspace or a remote"),
             })));
         }

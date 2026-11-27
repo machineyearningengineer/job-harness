@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.0 — A server over SSH, chat that survives disconnects
+
+- **Unix socket only:** `jh serve --bind unix:PATH` is the only way to serve a ledger; its file permissions decide who may call. The TCP listener, the bearer token (`JOB_HARNESS_SERVE_TOKEN`, `JOB_HARNESS_SERVE_TOKEN_FILE`), `jh configure --token-file` and the desktop's `--token-file` are gone. `jh service install` serves `$XDG_RUNTIME_DIR/job-harness/serve.sock`. **Breaking:** re-run `jh service install`, and `jh configure --remote unix:PATH` for agents in remote mode.
+- **The desktop app keeps its own SSH connection:** `jh open --ssh user@server` only starts the app, which runs one supervised OpenSSH ControlMaster (keepalives, `-O check`, backoff from 1 to 60 s) and forwards the server's sockets to private local ones. When the link drops, a "Reconnecting…" banner appears after about 5 s and the board stays as last seen, read-only; after 30 s it says Offline and offers Retry. Changes and chat sends are disabled meanwhile, and nothing is queued. `--port` and the local TCP tunnel are gone.
+- **Chat through `jh agent-host`:** chat on a server talks to any [ACP](https://agentclientprotocol.com) agent (`hermes acp`, `gemini --experimental-acp`, the Claude Code and Codex ACP adapters) kept running by `jh agent-host` as the agent's user (`jh service install-agents --agent NAME=COMMAND`). A turn goes on while the app is offline and is replayed from where the app left off, without loss or repeats. Session list, images, fast mode, model choice and permission prompts follow what each agent supports. `jh open --hermes-profile` and `--hermes-path` are gone; with no agent host on the server the board works and the chat panel says how to start one.
+
 ## 0.4.6 — `jh serve` no longer hangs
 
 - **SQLite 3.53.2:** `jh serve` opens the ledger per call, and the bundled SQLite 3.51.1 could deadlock threads opening and closing it at once; every call then hung while `/health` still answered. rusqlite 0.40 bundles 3.53.2, which has the fix (SQLite 3.51.2).
