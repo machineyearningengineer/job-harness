@@ -17,11 +17,9 @@ const UNITS: [&str; 3] = [
 
 #[derive(Subcommand)]
 pub enum ServiceCommand {
-    /// Write and enable systemd user units: `jh serve` on 127.0.0.1:PORT and a 15-minute `jh sync`.
-    Install {
-        #[arg(long, default_value_t = 7420)]
-        port: u16,
-    },
+    /// Write and enable systemd user units: `jh serve` on a Unix socket only you can reach
+    /// and a 15-minute `jh sync`.
+    Install,
     /// Stop, disable and remove the units written by `install`; the ledger is not touched.
     Uninstall,
 }
@@ -113,13 +111,18 @@ fn unit_word(path: &Path) -> String {
     format!("\"{escaped}\"")
 }
 
-pub fn units(binary: &Path, root: &Path, port: u16, token: &Path) -> [(&'static str, String); 3] {
-    let (bin, root, token) = (unit_word(binary), unit_word(root), unit_word(token));
+/// Where the user unit's socket is: `RuntimeDirectory=job-harness` under `%t`.
+const SOCKET: &str = "job-harness/serve.sock";
+
+pub fn units(binary: &Path, root: &Path) -> [(&'static str, String); 3] {
+    let (bin, root) = (unit_word(binary), unit_word(root));
     [
         (
             UNITS[0],
+            // The runtime directory is the user's own (/run/user/UID is 0700), so only
+            // this user, and sshd forwarding for this user, can reach the 0660 socket.
             format!(
-                "[Unit]\nDescription=Job Harness ledger server on 127.0.0.1:{port}\n\n[Service]\nEnvironment=JOB_HARNESS_SERVE_TOKEN_FILE={token}\nExecStart={bin} --root {root} serve --bind 127.0.0.1:{port}\nRestart=on-failure\nRestartSec=10\n\n[Install]\nWantedBy=default.target\n"
+                "[Unit]\nDescription=Job Harness ledger server on a Unix socket\n\n[Service]\nRuntimeDirectory=job-harness\nRuntimeDirectoryMode=0700\nExecStart={bin} --root {root} serve --bind unix:%t/{SOCKET}\nRestart=on-failure\nRestartSec=10\n\n[Install]\nWantedBy=default.target\n"
             ),
         ),
         (
@@ -140,25 +143,6 @@ fn config_dir() -> anyhow::Result<PathBuf> {
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
         .ok_or_else(|| fail("service_failed", "HOME is not set"))
-}
-/// Keep an existing token so clients stay configured; otherwise write a new owner-only one.
-fn ensure_token(path: &Path) -> anyhow::Result<()> {
-    if path.is_file() {
-        return Ok(());
-    }
-    use std::io::{Read, Write};
-    let mut bytes = [0u8; 24];
-    std::fs::File::open("/dev/urandom")?.read_exact(&mut bytes)?;
-    let token: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
-    std::fs::create_dir_all(path.parent().unwrap_or(Path::new(".")))?;
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
-    options
-        .open(path)?
-        .write_all(format!("{token}\n").as_bytes())?;
-    Ok(())
 }
 
 fn systemctl(args: &[&str]) -> anyhow::Result<String> {
@@ -181,27 +165,28 @@ pub fn service(
     }
     let dir = config_dir()?.join("systemd/user");
     match action {
-        ServiceCommand::Install { port } => {
+        ServiceCommand::Install => {
             let root = root()?.canonicalize()?;
             // Refuse a ledger this binary cannot serve before anything is written.
             state::load_for_read(Engine::open(&root)?.root())?;
             let binary = std::env::current_exe()?.canonicalize()?;
-            let token = config_dir()?.join("job-harness/serve-token");
-            ensure_token(&token)?;
             std::fs::create_dir_all(&dir)?;
-            for (name, text) in units(&binary, &root, port, &token) {
+            for (name, text) in units(&binary, &root) {
                 std::fs::write(dir.join(name), text)?;
             }
             systemctl(&["daemon-reload"])?;
             systemctl(&["enable", UNITS[0], UNITS[2]])?;
-            // Restart so a re-run picks up a new binary, port or ledger.
+            // Restart so a re-run picks up a new binary or ledger.
             systemctl(&["restart", UNITS[0], UNITS[2]])?;
             let user = std::env::var("USER").unwrap_or_else(|_| "$USER".into());
+            let runtime =
+                std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/run/user/$(id -u)".into());
+            let socket = format!("{runtime}/{SOCKET}");
             Ok(json!({
-                "units": dir, "workspace": root, "url": format!("http://127.0.0.1:{port}"), "token_file": token,
+                "units": dir, "workspace": root, "url": format!("unix:{socket}"),
                 "next": [
-                    format!("Check: curl -fsS -H \"Authorization: Bearer $(cat {})\" http://127.0.0.1:{port}/v1/health", token.display()),
-                    format!("Point agents on this server at it, without file access: jh configure --remote http://127.0.0.1:{port} --token-file {}", token.display()),
+                    format!("Check: curl -fsS --unix-socket {socket} http://localhost/v1/health"),
+                    format!("Point agents running as {user} at it, without file access: jh configure --remote unix:{socket}"),
                     format!("Keep services running after logout (needs root): sudo loginctl enable-linger {user}"),
                     format!("Optional, make ledger config read-only (needs root; undo with -i): sudo chattr -R +i {}", root.join("config").display()),
                 ]
@@ -327,20 +312,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn units_quote_paths_and_bind_loopback() {
+    fn units_quote_paths_and_serve_a_private_socket() {
         let [serve, sync, timer] = units(
             Path::new("/opt/jh bin/job-harness"),
             Path::new("/data/100% $ledger"),
-            7555,
-            Path::new("/home/u/.config/job-harness/serve-token"),
+        );
+        assert_eq!(serve.0, "job-harness.service");
+        assert!(
+            serve
+                .1
+                .contains("RuntimeDirectory=job-harness\nRuntimeDirectoryMode=0700\n")
         );
         assert!(serve.1.contains(
-            "Environment=JOB_HARNESS_SERVE_TOKEN_FILE=\"/home/u/.config/job-harness/serve-token\"\n"
+            "ExecStart=\"/opt/jh bin/job-harness\" --root \"/data/100%% $$ledger\" serve --bind unix:%t/job-harness/serve.sock\n"
         ));
-        assert_eq!(serve.0, "job-harness.service");
-        assert!(serve.1.contains(
-            "ExecStart=\"/opt/jh bin/job-harness\" --root \"/data/100%% $$ledger\" serve --bind 127.0.0.1:7555\n"
-        ));
+        assert!(!serve.1.contains("TOKEN"));
         assert!(serve.1.contains("WantedBy=default.target"));
         assert!(sync.1.contains("Type=oneshot\nExecStart=\"/opt/jh bin/job-harness\" --root \"/data/100%% $$ledger\" sync\n"));
         assert_eq!(timer.0, "job-harness-sync.timer");

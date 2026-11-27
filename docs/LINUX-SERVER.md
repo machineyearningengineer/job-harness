@@ -1,8 +1,8 @@
 # Run Job Harness on a Linux server
 
-Keep the ledger on an always-on Linux machine, serve it on loopback, back it up to
-git every 15 minutes, and open it from the desktop app over SSH. Nothing listens
-on a public port.
+Keep the ledger on an always-on Linux machine, serve it on a Unix socket, back it
+up to git every 15 minutes, and open it from the desktop app over SSH. Nothing
+listens on a network port.
 
 ## Set up (on the server)
 
@@ -11,7 +11,7 @@ The ledger is a git repository (any remote you can push to). Then:
 ```sh
 curl -fsSL https://raw.githubusercontent.com/machineyearningengineer/job-harness/main/scripts/get.sh | sh
 git clone <ledger-git-url> "$HOME/ledger"
-~/.local/bin/jh --root "$HOME/ledger" service install --port 7420
+~/.local/bin/jh --root "$HOME/ledger" service install
 ```
 
 For a brand-new ledger with no history yet, create it and push once by hand so
@@ -30,19 +30,18 @@ and enables them:
 
 | Unit | Runs |
 |---|---|
-| `job-harness.service` | `jh --root <ledger> serve --bind 127.0.0.1:<port>` |
+| `job-harness.service` | `jh --root <ledger> serve --bind unix:$XDG_RUNTIME_DIR/job-harness/serve.sock` |
 | `job-harness-sync.service` | `jh --root <ledger> sync` |
 | `job-harness-sync.timer` | the sync every 15 minutes |
 
 It refuses a ledger this binary cannot read, uses the absolute path of the binary,
-and is safe to re-run (to change the port or ledger, run it again).
+and is safe to re-run (to change the ledger, run it again).
 
-`jh serve` always requires a bearer token, even on loopback, so another user on the
-server cannot call your port. `install` writes a random one to
-`~/.config/job-harness/serve-token` (mode 0600) the first time, keeps it on re-runs,
-and points the unit at it with `JOB_HARNESS_SERVE_TOKEN_FILE`. A hand-written unit sets
-`JOB_HARNESS_SERVE_TOKEN_FILE` (or `JOB_HARNESS_SERVE_TOKEN`) itself; without one,
-`jh serve` refuses to start.
+On a Unix socket, file permissions are the access control; there is no token.
+`jh serve` makes the socket mode 0660 and replaces a stale socket, never another
+file. systemd creates the socket's directory (`RuntimeDirectory=job-harness`, mode
+0700) inside your runtime directory, which only you can enter, so only you, and SSH
+sessions logged in as you, can call it.
 
 It prints, but does not run, two root-only follow-ups:
 
@@ -50,24 +49,65 @@ It prints, but does not run, two root-only follow-ups:
 - `sudo chattr -R +i <ledger>/config` makes the ledger's config read-only, even to
   agents running as you (undo with `chattr -R -i`).
 
-Check it: `curl -fsS -H "Authorization: Bearer $(cat ~/.config/job-harness/serve-token)" http://127.0.0.1:7420/v1/health`
+Check it: `curl -fsS --unix-socket "$XDG_RUNTIME_DIR/job-harness/serve.sock" http://localhost/v1/health`
 and `systemctl --user status job-harness`.
+
+`jh serve --bind 127.0.0.1:PORT` still serves TCP for older clients, and only with a
+bearer token from `JOB_HARNESS_SERVE_TOKEN_FILE` (or `JOB_HARNESS_SERVE_TOKEN`).
 
 ## Agents without file access (remote mode)
 
 An agent that can read or write the ledger's files can edit `harness.sqlite` or
 `config/` directly and skip every rule Job Harness enforces. To stop that, run the
 ledger and `jh serve` as one user and the agent as another that cannot read the ledger,
-and point the agent's `jh` at the server:
+and point the agent's `jh` at the server's socket:
 
 ```sh
-jh configure --remote http://127.0.0.1:7420 --token-file /path/to/serve-token
+jh configure --remote unix:/run/job-harness/ledger/serve.sock
 ```
 
-The agent user must be able to read that token file. From then on `jh call` and `jh mcp`
-send every tool call to the server's `/v1/call` instead of opening files. Use the
-environment instead of host settings with `JOB_HARNESS_REMOTE_URL` and
-`JOB_HARNESS_SERVE_TOKEN_FILE`. An explicit `--root` still opens a local ledger. Paths in
+From then on `jh call` and `jh mcp` send every tool call to the server's `/v1/call`
+instead of opening files. The agent needs to reach the socket, not the files: put the
+server in a system unit with its own group, and add the agent's user (and the user you
+SSH in as) to that group. For a ledger user `ledger`, a group `jh-ledger` and a ledger
+at `/srv/ledger`:
+
+```ini
+# /etc/systemd/system/jh-serve.service
+[Unit]
+Description=Job Harness server for one ledger
+RequiresMountsFor=/srv/ledger
+[Service]
+User=ledger
+Group=jh-ledger
+UMask=0077
+RuntimeDirectory=job-harness/ledger
+RuntimeDirectoryMode=0750
+ExecStart=/usr/local/bin/job-harness --root /srv/ledger serve --bind unix:/run/job-harness/ledger/serve.sock
+Restart=on-failure
+RestartSec=10
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/srv/ledger
+[Install]
+WantedBy=multi-user.target
+```
+
+```sh
+sudo groupadd --system jh-ledger
+sudo usermod -aG jh-ledger agent
+sudo systemctl enable --now jh-serve.service
+```
+
+The directory is `ledger:jh-ledger` mode 0750 and the socket 0660, so members of
+`jh-ledger` can call the server and nobody else can. `UMask=0077` keeps the files the
+server writes readable by the ledger user alone; keep the ledger's own directory
+private (mode 0700) too, so the group reaches the socket and nothing else. Anyone in
+the group has the server's full tool access.
+
+Use the
+environment instead of host settings with `JOB_HARNESS_REMOTE_URL`. An explicit `--root` still opens a local ledger. Paths in
 tool arguments, such as `cv_path` or `vacancy_text_path`, are paths in the server's
 ledger. An agent that can't write there saves a job ad, answers file or screenshot with
 `save_artifact` (base64, at most 5 MB) and passes the returned path on. It reads a frozen

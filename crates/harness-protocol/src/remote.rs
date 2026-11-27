@@ -1,8 +1,10 @@
 //! Headless workspace server (`jh serve`) for remote VPS GPUI clients over SSH/Tailscale.
 //! Exposes typed `Engine::call` (`POST /v1/call`), health (`GET /v1/health`), and a live
 //! `notify`-driven SSE change stream (`GET /v1/events`). Never stores credentials or UI HTML.
-//! Every request needs the bearer token, so another local user cannot reach the ledger
-//! through its loopback port. [`Client`] is the matching remote mode for `jh call` and `jh mcp`.
+//! On a Unix socket (`--bind unix:PATH`) the socket's file permissions decide who may call;
+//! on TCP every request needs the bearer token, so another local user cannot reach the
+//! ledger through its loopback port. [`Client`] is the matching remote mode for `jh call`
+//! and `jh mcp`.
 use axum::{
     Json, Router,
     extract::{DefaultBodyLimit, State},
@@ -33,7 +35,8 @@ struct AppState {
     engine: Arc<Engine>,
     revision: Arc<AtomicU64>,
     tx: broadcast::Sender<u64>,
-    token: String,
+    /// `None` on a Unix socket, where file permissions are the access control.
+    token: Option<String>,
     /// `user@hostname` of the serving process, so clients can say where they are connected.
     host: String,
 }
@@ -59,7 +62,10 @@ struct CallRequest {
     arguments: Value,
 }
 
-fn authorized(headers: &HeaderMap, expected: &str) -> bool {
+fn authorized(headers: &HeaderMap, expected: &Option<String>) -> bool {
+    let Some(expected) = expected else {
+        return true;
+    };
     let Some(raw) = headers
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
@@ -196,7 +202,10 @@ fn spawn_watcher(
 
 const MAX_BODY: usize = 8 * 1024 * 1024;
 
-pub fn router(root: &Path, token: String) -> anyhow::Result<(Router, Option<RecommendedWatcher>)> {
+pub fn router(
+    root: &Path,
+    token: Option<String>,
+) -> anyhow::Result<(Router, Option<RecommendedWatcher>)> {
     let engine = Arc::new(Engine::open(root)?);
     // Refuse to serve a ledger whose coordinator this binary cannot read.
     harness_core::state::load_for_read(engine.root())?;
@@ -221,20 +230,48 @@ pub fn router(root: &Path, token: String) -> anyhow::Result<(Router, Option<Reco
 }
 
 pub async fn serve(root: &Path, bind: &str) -> anyhow::Result<()> {
+    #[cfg(unix)]
+    if let Some(path) = bind.strip_prefix("unix:") {
+        return serve_unix(root, Path::new(path)).await;
+    }
     let addr: SocketAddr = bind.parse().map_err(|_| {
-        anyhow::anyhow!("Invalid bind address '{bind}' (expected IP:PORT, e.g. 127.0.0.1:7420)")
+        anyhow::anyhow!(
+            "Invalid bind address '{bind}' (expected unix:PATH or IP:PORT, e.g. 127.0.0.1:7420)"
+        )
     })?;
     let token = serve_token(
         std::env::var("JOB_HARNESS_SERVE_TOKEN").ok(),
         std::env::var_os("JOB_HARNESS_SERVE_TOKEN_FILE").map(PathBuf::from),
     )?;
-    let (app, _watcher) = router(root, token)?;
+    let (app, _watcher) = router(root, Some(token))?;
     let listener = tokio::net::TcpListener::bind(addr).await?;
     let actual = listener.local_addr()?;
     eprintln!(
         "job-harness {} remote server listening on http://{}",
         env!("CARGO_PKG_VERSION"),
         actual
+    );
+    axum::serve(listener, app).await?;
+    Ok(())
+}
+
+/// Serve on a Unix socket: mode 0660, so its owner and group may call and nobody
+/// else may. The directory (made by the service manager) decides who can reach it.
+#[cfg(unix)]
+async fn serve_unix(root: &Path, path: &Path) -> anyhow::Result<()> {
+    use std::os::unix::fs::{FileTypeExt, PermissionsExt};
+    let (app, _watcher) = router(root, None)?;
+    // A socket left by a stopped server would make bind fail; never remove anything else.
+    if std::fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_socket()) {
+        std::fs::remove_file(path)?;
+    }
+    let listener = tokio::net::UnixListener::bind(path)
+        .map_err(|err| anyhow::anyhow!("Cannot listen on {}: {err}", path.display()))?;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o660))?;
+    eprintln!(
+        "job-harness {} remote server listening on unix:{}",
+        env!("CARGO_PKG_VERSION"),
+        path.display()
     );
     axum::serve(listener, app).await?;
     Ok(())
@@ -251,7 +288,7 @@ pub fn serve_token(value: Option<String>, file: Option<PathBuf>) -> anyhow::Resu
     if token.len() < 16 {
         return Err(harness_core::HarnessError::new(
             "token_required",
-            "jh serve needs a bearer token of at least 16 characters: set JOB_HARNESS_SERVE_TOKEN_FILE to a file only you can read (jh service install creates one).",
+            "jh serve needs a bearer token of at least 16 characters: set JOB_HARNESS_SERVE_TOKEN_FILE to a file only you can read.",
         )
         .into());
     }
@@ -273,17 +310,23 @@ pub fn read_token(file: &Path) -> anyhow::Result<String> {
 pub struct Client {
     http: reqwest::Client,
     endpoint: String,
-    token: String,
+    token: Option<String>,
 }
 
 impl Client {
-    pub fn new(url: &str, token: String) -> anyhow::Result<Self> {
-        let http = reqwest::Client::builder()
-            .connect_timeout(Duration::from_secs(10))
-            .build()?;
+    /// `url` is `unix:PATH` (no token: the socket's permissions decide) or `http://HOST:PORT`.
+    pub fn new(url: &str, token: Option<String>) -> anyhow::Result<Self> {
+        let builder = reqwest::Client::builder().connect_timeout(Duration::from_secs(10));
+        let (builder, base) = match url.strip_prefix("unix:") {
+            #[cfg(unix)]
+            Some(path) => (builder.unix_socket(path), "http://localhost"),
+            #[cfg(not(unix))]
+            Some(_) => anyhow::bail!("unix: remotes need a Unix host"),
+            None => (builder, url.trim_end_matches('/')),
+        };
         Ok(Self {
-            http,
-            endpoint: format!("{}/v1/call", url.trim_end_matches('/')),
+            http: builder.build()?,
+            endpoint: format!("{base}/v1/call"),
             token,
         })
     }
@@ -291,10 +334,11 @@ impl Client {
     /// The server's envelope. Without one, a 4xx is the request's fault and is not
     /// retried; anything else is `remote_unavailable`.
     pub async fn call(&self, tool: &str, arguments: &Value) -> Value {
-        let response = self
-            .http
-            .post(&self.endpoint)
-            .bearer_auth(&self.token)
+        let mut request = self.http.post(&self.endpoint);
+        if let Some(token) = &self.token {
+            request = request.bearer_auth(token);
+        }
+        let response = request
             .json(&json!({"tool": tool, "arguments": arguments}))
             .send()
             .await;
@@ -340,7 +384,7 @@ mod tests {
     async fn health_and_call_enforce_bearer_token_when_set() {
         let dir = tempfile::tempdir().unwrap();
         harness_core::workspace::initialize(dir.path()).unwrap();
-        let (app, _w) = router(dir.path(), "secret-token".into()).unwrap();
+        let (app, _w) = router(dir.path(), Some("secret-token".into())).unwrap();
 
         let unauth = app
             .clone()
@@ -410,19 +454,19 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         harness_core::workspace::initialize(dir.path()).unwrap();
         let token = "0123456789abcdef0123".to_owned();
-        let (app, _w) = router(dir.path(), token.clone()).unwrap();
+        let (app, _w) = router(dir.path(), Some(token.clone())).unwrap();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
         tokio::spawn(async move { axum::serve(listener, app).await });
 
-        let client = Client::new(&url, token).unwrap();
+        let client = Client::new(&url, Some(token)).unwrap();
         let ok = client.call("bootstrap", &json!({})).await;
         assert_eq!(ok["ok"], true, "{ok}");
         let refused = client.call("read_record", &json!({"path":"../x.md"})).await;
         assert_eq!(refused["ok"], false);
         assert_ne!(refused["error"]["code"], "remote_unavailable");
 
-        let wrong = Client::new(&url, "not-the-token-at-all".into()).unwrap();
+        let wrong = Client::new(&url, Some("not-the-token-at-all".into())).unwrap();
         assert_eq!(
             wrong.call("bootstrap", &json!({})).await["error"]["code"],
             "unauthorized"
@@ -445,10 +489,44 @@ mod tests {
         let closed = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let gone = format!("http://{}", closed.local_addr().unwrap());
         drop(closed);
-        let down = Client::new(&gone, "0123456789abcdef0123".into()).unwrap();
+        let down = Client::new(&gone, Some("0123456789abcdef0123".into())).unwrap();
         assert_eq!(
             down.call("bootstrap", &json!({})).await["error"]["code"],
             "remote_unavailable"
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn unix_socket_serves_without_a_token_and_replaces_only_a_stale_socket() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let ledger = dir.path().join("ledger");
+        harness_core::workspace::initialize(&ledger).unwrap();
+        let socket = dir.path().join("serve.sock");
+        // A stale socket from a stopped server is replaced.
+        drop(std::os::unix::net::UnixListener::bind(&socket).unwrap());
+        tokio::spawn({
+            let (ledger, socket) = (ledger.clone(), socket.clone());
+            async move { serve_unix(&ledger, &socket).await }
+        });
+        let client = Client::new(&format!("unix:{}", socket.display()), None).unwrap();
+        let mut ok = json!(null);
+        for _ in 0..50 {
+            ok = client.call("bootstrap", &json!({})).await;
+            if ok["ok"] == true {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert_eq!(ok["ok"], true, "{ok}");
+        let mode = std::fs::metadata(&socket).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o660);
+
+        // Anything else at the path is left alone and the server refuses to start.
+        let file = dir.path().join("not-a-socket");
+        std::fs::write(&file, "keep").unwrap();
+        assert!(serve_unix(&ledger, &file).await.is_err());
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "keep");
     }
 }
