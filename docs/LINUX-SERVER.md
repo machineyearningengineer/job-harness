@@ -115,7 +115,7 @@ Re-run the installer on the server. It replaces the binary in place and, when
 curl -fsSL https://raw.githubusercontent.com/machineyearningengineer/job-harness/main/scripts/get.sh | sh
 ```
 
-Pin a version with `JOB_HARNESS_VERSION=v0.4.3` before `sh`. If a ledger and the
+Pin a version with `JOB_HARNESS_VERSION=v0.4.4` before `sh`. If a ledger and the
 binary disagree on format, every command says which version the ledger needs and
 how to install it; there is no automatic conversion. Ledgers that still keep
 `applications/operations/state.json` need job-harness 0.2.x.
