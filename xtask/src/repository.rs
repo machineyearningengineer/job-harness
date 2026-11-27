@@ -21,6 +21,7 @@ const ALLOWED: &[&str] = &[
     "CONTRIBUTING.md",
     "SECURITY.md",
     "CHANGELOG.md",
+    "llms.txt",
     "Makefile",
     "Cargo.toml",
     "Cargo.lock",
@@ -126,7 +127,10 @@ fn audit_file(root: &Path, path: &Path, links: &mut usize) -> Result<()> {
         .unwrap_or("")
         .to_ascii_lowercase();
     ensure!(
-        ALLOWED.contains(&first) && !FORBIDDEN_EXTENSIONS.contains(&extension.as_str()),
+        ALLOWED.contains(&first)
+            && (!FORBIDDEN_EXTENSIONS.contains(&extension.as_str())
+                // The synthetic desktop demo seeder behind `make desktop-demo`.
+                || relative == Path::new("scripts/seed_demo.py")),
         "Private/runtime file in source: {}",
         relative.display()
     );

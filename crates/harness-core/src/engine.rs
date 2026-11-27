@@ -43,6 +43,9 @@ impl Engine {
     pub fn open(root: impl AsRef<Path>) -> Result<Self> {
         contracts::validate_catalog()?;
         let root = fs::canonicalize(root)?;
+        for pin in workspace_pin_files() {
+            check_workspace_pin(&root, &pin)?;
+        }
         if !root.join("config/career-ledger.json").is_file() {
             return Err(Error::new(
                 "missing_resource",
@@ -626,6 +629,63 @@ if let Some(v)=e["result"].get("record"){event["record_path"]=v.clone();}event})
         }
     }
 }
+/// Machine-owner pin files listing the only workspaces this host may open, one
+/// absolute path per line. A copied ledger with edited limits is refused. The
+/// environment can add a pin but never remove the system one.
+fn workspace_pin_files() -> Vec<PathBuf> {
+    let mut files = vec![];
+    #[cfg(unix)]
+    files.push(PathBuf::from("/etc/job-harness/allowed-workspaces"));
+    #[cfg(windows)]
+    files.push(PathBuf::from(
+        r"C:\ProgramData\job-harness\allowed-workspaces",
+    ));
+    if let Some(extra) = std::env::var_os("JOB_HARNESS_WORKSPACE_PIN") {
+        files.push(PathBuf::from(extra));
+    }
+    files
+}
+fn check_workspace_pin(root: &Path, pin: &Path) -> Result<()> {
+    let text = match fs::read_to_string(pin) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(_) => {
+            return Err(Error::new(
+                "workspace_not_pinned",
+                "The host workspace pin cannot be read; refusing to open any workspace",
+            ));
+        }
+    };
+    let allowed = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .any(|line| fs::canonicalize(line).is_ok_and(|path| path == root));
+    if !allowed {
+        return Err(Error::new(
+            "workspace_not_pinned",
+            format!(
+                "This host only opens the workspaces listed in {}; refusing {}",
+                pin.display(),
+                root.display()
+            ),
+        ));
+    }
+    Ok(())
+}
+/// Each external step needs the candidate's own config flag. No tool can write
+/// config/, so an agent cannot grant itself one.
+fn require_permission(settings: &Value, flag: &str, action: &str) -> Result<()> {
+    if settings["permissions"][flag] != true {
+        return Err(Error::new(
+            "permission_denied",
+            format!(
+                "{action} is not permitted: config permissions.{flag} is not true. Leave the prepared work for the candidate."
+            ),
+        ));
+    }
+    Ok(())
+}
 fn s<'a>(value: &'a Value, key: &str) -> Result<&'a str> {
     value
         .get(key)
@@ -746,6 +806,15 @@ fn recovery(code: &str) -> &'static str {
             "Inspect external outcome and resolve the existing attempt; do not submit again."
         }
         "cap_reached" => "Finish this bounded run; do not silently increase its cap.",
+        "permission_denied" => {
+            "Do not perform this external action. Hand the prepared work to the candidate; only they can change config permissions."
+        }
+        "excluded_by_filters" => {
+            "Do not apply. The candidate's discovery filters exclude this vacancy; report it as excluded."
+        }
+        "workspace_not_pinned" => {
+            "Use the workspace this host pins. Do not copy a ledger to work around its limits."
+        }
         "daily_submission_cap_reached" => {
             "Do not submit. The attempt remains reserved. If authorized and the configured limit permits it, recheck the form before trying again on a later workspace-local day."
         }

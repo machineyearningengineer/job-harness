@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- **Safety rules enforced in code:** `begin_submission` and `begin_archive` now refuse (`permission_denied`) unless the matching config permission is `true`, as the fail-closed defaults always promised. Preparation, reservation and begin refuse excluded ATS hosts and avoided employers (`excluded_by_filters`) and a second application to the same employer and role through another URL (`duplicate_blocked`). An optional host pin (`/etc/job-harness/allowed-workspaces`) refuses every other workspace (`workspace_not_pinned`).
+
 ## 0.3.0 — SQLite WAL, derived attention & 1-line installs
 
 - **SQLite WAL coordinator (`harness.sqlite`):** Replaced `state.json` with normalized SQLite WAL tables, indexes, and delta writes. Read-only queries use `idx_events_tool` instead of loading full event history.

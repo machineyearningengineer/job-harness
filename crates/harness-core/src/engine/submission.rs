@@ -79,7 +79,58 @@ fn check_daily_submission_budget(
     Ok(())
 }
 
+/// Candidate filters decidable from the vacancy identity alone. Salary and
+/// office cadence need the ad itself and stay with the agent's review.
+fn check_filters(settings: &Value, packet: &Value) -> Result<()> {
+    let discovery = &settings["discovery"];
+    let texts = |key: &str| -> Vec<String> {
+        discovery[key]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .map(str::to_owned)
+            .collect()
+    };
+    let url = s(packet, "vacancy_url")?;
+    let host = url::Url::parse(url)
+        .ok()
+        .and_then(|u| u.host_str().map(str::to_ascii_lowercase))
+        .unwrap_or_default();
+    for ats in texts("exclude_ats") {
+        let key = domain::company_key(&ats);
+        if !key.is_empty() && host.split('.').any(|label| label.contains(&key)) {
+            return Err(Error::new(
+                "excluded_by_filters",
+                format!("Vacancy host {host} is on an excluded applicant tracking system ({ats})"),
+            ));
+        }
+    }
+    let company = domain::company_key(s(packet, "company")?);
+    if texts("avoid_list")
+        .iter()
+        .any(|avoid| domain::company_key(avoid) == company)
+    {
+        return Err(Error::new(
+            "excluded_by_filters",
+            "This employer is on the candidate's avoid list",
+        ));
+    }
+    Ok(())
+}
+
 impl Engine {
+    fn block_role_duplicate(&self, record: &str) -> Result<()> {
+        if let Some(other) = self.role_duplicate(record)? {
+            return Err(Error::new(
+                "duplicate_blocked",
+                format!(
+                    "Same employer and role already progressed in applications/{other}; reconcile it first"
+                ),
+            ));
+        }
+        Ok(())
+    }
     pub(super) fn daily_budget_snapshot(&self, state: &Value) -> Result<Value> {
         let settings = self.settings()?;
         let tz_name = s(&settings, "timezone")?;
@@ -235,6 +286,8 @@ impl Engine {
                 "Duplicate or uncertain prior submission; reconcile it first",
             ));
         }
+        self.block_role_duplicate(record)?;
+        check_filters(&self.settings()?, args)?;
         if Path::new(s(args, "cv_path")?)
             .extension()
             .and_then(|x| x.to_str())
@@ -462,6 +515,8 @@ impl Engine {
                 "Submission already reserved, submitted or uncertain",
             ));
         }
+        self.block_role_duplicate(s(&packet, "record")?)?;
+        check_filters(&self.settings()?, &packet)?;
         let attempt_id = uuid::Uuid::new_v4().to_string();
         let mut attempt = packet;
         attempt["id"] = json!(attempt_id);
@@ -504,12 +559,22 @@ impl Engine {
                 "A later ledger update now blocks submission",
             ));
         }
+        self.block_role_duplicate(s(&packet, "record")?)?;
+        check_filters(&settings, &packet)?;
         // Engine::call holds the exclusive workspace lock through the check and commit.
         let began = chrono::Utc::now();
         let channel = packet
             .get("channel")
             .and_then(Value::as_str)
             .unwrap_or("portal");
+        match channel {
+            "portal" => require_permission(&settings, "auto_apply_portal", "A portal submission")?,
+            _ => require_permission(
+                &settings,
+                "auto_send_first_contact_email",
+                "Sending a first-contact application email",
+            )?,
+        }
         let total_limit = settings["max_daily_submissions"].as_u64();
         let channel_limit = settings
             .get("daily_channel_limits")

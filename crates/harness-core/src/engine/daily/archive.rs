@@ -11,6 +11,9 @@ impl Engine {
             ));
         }
         let operation = s(args, "action")?;
+        if operation == "begin_archive" {
+            require_permission(&self.settings()?, "auto_archive_mail", "Archiving mail")?;
+        }
         if operation == "record_review" {
             let path = s(args, "mail_observations_path")?;
             let (snapshot, hash, bytes) =

@@ -831,6 +831,10 @@ mod tests {
         )
         .unwrap();
         fs::write(root.join("output/cv.pdf"), b"%PDF-1.7\nSynthetic fixture\n").unwrap();
+        let config = root.join("config/career-ledger.json");
+        let mut settings: Value = serde_json::from_slice(&fs::read(&config).unwrap()).unwrap();
+        settings["permissions"]["auto_apply_portal"] = json!(true);
+        fs::write(&config, settings.to_string()).unwrap();
         let engine = crate::Engine::open(root).unwrap();
         let call = |name: &str, args: Value| {
             let result = engine.call(name, &args);
@@ -921,6 +925,10 @@ mod tests {
     #[test]
     fn mail_selection_survives_transfer_but_requires_confirmation_in_the_restored_workspace() {
         let original = workspace();
+        let config = original.path().join("config/career-ledger.json");
+        let mut settings: Value = serde_json::from_slice(&fs::read(&config).unwrap()).unwrap();
+        settings["permissions"]["auto_archive_mail"] = json!(true);
+        fs::write(&config, settings.to_string()).unwrap();
         let mut snapshot: Value = serde_json::from_str(include_str!(
             "../../../examples/daily-review/observations.json"
         ))
