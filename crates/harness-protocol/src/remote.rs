@@ -5,7 +5,7 @@
 //! through its loopback port. [`Client`] is the matching remote mode for `jh call` and `jh mcp`.
 use axum::{
     Json, Router,
-    extract::State,
+    extract::{DefaultBodyLimit, State},
     http::{HeaderMap, StatusCode},
     response::sse::{Event, KeepAlive, Sse},
     routing::{get, post},
@@ -194,6 +194,8 @@ fn spawn_watcher(
     Some(watcher)
 }
 
+const MAX_BODY: usize = 8 * 1024 * 1024;
+
 pub fn router(root: &Path, token: String) -> anyhow::Result<(Router, Option<RecommendedWatcher>)> {
     let engine = Arc::new(Engine::open(root)?);
     // Refuse to serve a ledger whose coordinator this binary cannot read.
@@ -212,6 +214,8 @@ pub fn router(root: &Path, token: String) -> anyhow::Result<(Router, Option<Reco
         .route("/v1/health", get(health))
         .route("/v1/call", post(call_tool))
         .route("/v1/events", get(events))
+        // Room for save_artifact's 5 MB as base64 JSON; the CLI takes the same 8 MiB.
+        .layer(DefaultBodyLimit::max(MAX_BODY))
         .with_state(state);
     Ok((app, watcher))
 }
@@ -284,7 +288,8 @@ impl Client {
         })
     }
 
-    /// The server's envelope, or `remote_unavailable` when none arrived.
+    /// The server's envelope. Without one, a 4xx is the request's fault and is not
+    /// retried; anything else is `remote_unavailable`.
     pub async fn call(&self, tool: &str, arguments: &Value) -> Value {
         let response = self
             .http
@@ -294,12 +299,29 @@ impl Client {
             .send()
             .await;
         match response {
-            Ok(response) => response.json::<Value>().await.unwrap_or_else(|_| {
-                unavailable(&format!("{} returned no envelope", self.endpoint))
-            }),
+            Ok(response) => {
+                let status = response.status();
+                match response.json::<Value>().await {
+                    Ok(envelope) if envelope.get("ok").is_some() => envelope,
+                    _ if status.is_client_error() => rejected(status),
+                    _ => unavailable(&format!(
+                        "{} returned no envelope (HTTP {status})",
+                        self.endpoint
+                    )),
+                }
+            }
             Err(err) => unavailable(&format!("Cannot reach {}: {err}", self.endpoint)),
         }
     }
+}
+
+fn rejected(status: reqwest::StatusCode) -> Value {
+    let message = if status == reqwest::StatusCode::PAYLOAD_TOO_LARGE {
+        "The request is larger than jh serve accepts (8 MiB).".to_owned()
+    } else {
+        format!("jh serve refused the request (HTTP {status}).")
+    };
+    json!({"schema_version":2,"ok":false,"data":null,"error":{"code":"invalid_arguments","message":message,"retryable":false,"recovery":"Correct the request; repeating it unchanged fails the same way."},"next":[]})
 }
 
 fn unavailable(message: &str) -> Value {
@@ -405,6 +427,21 @@ mod tests {
             wrong.call("bootstrap", &json!({})).await["error"]["code"],
             "unauthorized"
         );
+        // A 5 MB artifact fits the body limit; a larger request is the caller's fault, not an outage.
+        let five_mb = "A".repeat(6_666_664);
+        let saved = client
+            .call(
+                "save_artifact",
+                &json!({"name":"cv.pdf","content_base64":five_mb,"idempotency_key":"big"}),
+            )
+            .await;
+        assert_eq!(saved["ok"], true, "{}", saved["error"]);
+        let too_big = client
+            .call("bootstrap", &json!({"padding":"x".repeat(MAX_BODY)}))
+            .await;
+        assert_eq!(too_big["error"]["code"], "invalid_arguments", "{too_big}");
+        assert_eq!(too_big["error"]["retryable"], false);
+
         let closed = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let gone = format!("http://{}", closed.local_addr().unwrap());
         drop(closed);
