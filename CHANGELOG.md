@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.4.3 — Fixes from an outside audit
+
+- **`jh sync` never commits a stale database:** it takes the exclusive coordinator lock for the checkpoint, `git add` and commit, fails with `checkpoint_incomplete` when a reader keeps the WAL from folding in completely, and releases the lock before `git push`. Workspace export uses the same exclusive checkpoint. A missing `user.name` or `user.email` is filled in on its own, keeping whichever the owner set.
+- **The version check no longer touches newer ledgers:** `schema_version` is read on a read-only connection first, so a ledger from a newer job-harness is refused before any pragma or table change.
+- **`channel` is required** by `prepare_application` and `prepare_packet`; `begin_submission` refuses a packet without one instead of assuming portal, so an email never takes the portal permit or cap. Prepare reservations made without a channel again.
+- **Filters match what people write:** `exclude_ats` entries with dots (`myworkdayjobs.com`, `jobs.lever.co`) match that host and its subdomains; `avoid_list` ignores legal suffixes (`Acme Ltd`, `Acme, Inc.`); a `job.salary` needs `min` or `max` (or `"unknown"`); empty `allowed_locations` or `allowed_work_arrangements` mean unset; duplicate roles are found across `Acme—Engineer`, `Acme: Engineer` and `Acme | Engineer`.
+- **The workspace pin covers every command:** CLI root selection checks it as well as `Engine::open`, so `jh sync`, pipeline, workspace, cv, source, document and status honour it. A `JOB_HARNESS_WORKSPACE_PIN` that names a missing file now refuses instead of allowing everything.
+- **Config validation follows the schema only**, so `disabled_cv_tracks` (written by the desktop app) no longer breaks export. The config docs state that `auto_reply_threads` and `auto_book_calendar` gate no tool.
+- **Installers and release:** `get.sh` and `get.ps1` find the latest stable release from the `/releases/latest` redirect instead of the rate-limited API, which could also pick a prerelease. The release's Homebrew step fails on a missing tap file or an unchanged checksum and skips prereleases.
+- **Smaller fixes:** `jh demo` no longer suggests the removed `gui` command; `jh configure --remote` names a missing token file; docs fixes.
+
 ## 0.4.2 — The desktop board over a server
 
 - **Desktop shows roles in remote mode:** connected to a `jh serve`, the board was always empty because it listed roles with a blank `find_application` query, which the server refuses. It now reads the server's `applications/pipeline.json`, as the local view does.
