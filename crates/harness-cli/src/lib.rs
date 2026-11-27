@@ -177,18 +177,16 @@ enum Command {
         #[command(subcommand)]
         action: server::ServiceCommand,
     },
-    /// Open the desktop app on a server's `jh serve` through an SSH tunnel.
+    /// Open the desktop app on a server: it keeps its own SSH connection there.
     Open {
         /// SSH destination, for example user@server.
         #[arg(long)]
         ssh: String,
-        #[arg(long, default_value_t = 7420)]
-        port: u16,
         #[arg(long)]
         identity: Option<PathBuf>,
-        /// Local copy of the server's token file (`jh service install` prints its path there).
+        /// The server's `jh serve` socket (default: the one `jh service install` makes).
         #[arg(long)]
-        token_file: Option<PathBuf>,
+        socket: Option<String>,
         /// Hermes profile on the server for the app's chat (default: its active profile).
         #[arg(long)]
         hermes_profile: Option<String>,
@@ -515,17 +513,15 @@ async fn execute(cli: Cli) -> anyhow::Result<Option<Value>> {
         }
         Command::Open {
             ssh,
-            port,
             identity,
-            token_file,
+            socket,
             hermes_profile,
             hermes_path,
         } => {
             return Ok(Some(success(server::open(
                 &ssh,
-                port,
                 identity.as_deref(),
-                token_file.as_deref(),
+                socket.as_deref(),
                 server::Hermes {
                     profile: hermes_profile.as_deref(),
                     path: hermes_path.as_deref(),

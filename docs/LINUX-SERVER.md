@@ -134,18 +134,31 @@ see `journalctl --user -u job-harness-sync`. The commit uses your git
 With `jh` and the desktop app installed locally (macOS or Linux):
 
 ```sh
-jh open --ssh user@server --port 7420 --token-file ~/.config/job-harness/server-token
+jh open --ssh user@server
 ```
 
-Copy the server's `serve-token` to that local file first (mode 0600). Add
-`--identity ~/.ssh/key` if needed. The app reads the token from the file; it never
-appears in a command line.
+Add `--identity ~/.ssh/key` if needed, and `--socket PATH` when the server is not
+the `jh service install` one (for example `/run/job-harness/ledger/serve.sock`).
+`jh open` only starts the desktop app (`job-harness-desktop` next to `jh`, then
+`/Applications/Job Harness.app`, then `PATH`) with these arguments.
 
-This starts `ssh -N -L 127.0.0.1:7420:127.0.0.1:7420 user@server` in the background
-unless something already listens on that local port, then launches the desktop app
-with `--remote http://127.0.0.1:7420 --token-file PATH` (`job-harness-desktop` next to
-`jh`, then `/Applications/Job Harness.app`, then `PATH`). The app inherits this shell's
-environment, so `JOB_HARNESS_SERVE_TOKEN` works in place of `--token-file`.
+The app keeps its own SSH connection, as T3 Code and Hermes do: one OpenSSH
+ControlMaster per window (`ServerAliveInterval=15`, `ServerAliveCountMax=3`,
+`BatchMode=yes`, `ExitOnForwardFailure=yes`) with its control socket in a private
+0700 folder, and forwards a local Unix socket in that folder to the server's socket
+with `ssh -O forward`. Nothing listens on a local TCP port, so other users of your
+computer cannot reach it. Your `~/.ssh/config`, agent, ProxyJump and known_hosts apply.
+
+The app checks the connection with `ssh -O check` and restarts the master when it
+dies, with backoff from 1 to 60 seconds:
+
+- **Connected:** the board is live.
+- **Reconnecting:** after about 5 seconds a "Reconnecting…" banner appears. The board
+  shows what it last loaded, read-only.
+- **Offline:** after 30 seconds the banner says so and offers **Retry**. Changes and
+  chat sends are disabled, and nothing is queued for later. The app keeps retrying.
+
+When the connection is back, the board reloads. Quitting the app stops its master.
 
 The app's chat runs Hermes **on the server**, where the agent and its profile live:
 `ssh -T user@server -- hermes chat ...`, with the prompt on stdin. Pass

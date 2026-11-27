@@ -6,6 +6,7 @@ mod icons;
 mod macos_notify;
 mod markdown;
 mod sankey;
+mod ssh;
 mod theme;
 mod transport;
 mod ui_state;
@@ -103,6 +104,27 @@ fn resolve_target(
     )))
 }
 
+/// With `--ssh` (and no `--remote`), the app opens its own supervised SSH connection
+/// and reaches the server's `jh serve` socket through it.
+fn ssh_target(args: &[String]) -> Option<std::io::Result<WorkspaceTarget>> {
+    if flag(args, "--remote").is_some() {
+        return None;
+    }
+    let owned = |name: &str| set(flag(args, name).map(str::to_owned));
+    let target = owned("--ssh")?;
+    Some(
+        ssh::open(
+            target,
+            owned("--identity").map(PathBuf::from),
+            owned("--socket"),
+        )
+        .map(|tunnel| WorkspaceTarget::Remote {
+            url: tunnel.ledger_url(),
+            token: None,
+        }),
+    )
+}
+
 /// `jh open --ssh` passes the server so chat runs its Hermes, not a local one.
 fn remote_hermes(args: &[String]) -> Option<(chat_bridge::SshHost, Option<String>)> {
     let owned = |name: &str| set(flag(args, name).map(str::to_owned));
@@ -147,14 +169,19 @@ fn main() {
         }
         Some("--help" | "-h") => {
             println!(
-                "Job Harness desktop\n\nUsage: job-harness-desktop [--root PATH | --remote URL [--token-file PATH] [--ssh USER@HOST [--identity KEY] [--hermes-profile NAME] [--hermes-path PATH]]]\n\nWith --remote, the server's token comes from --token-file, JOB_HARNESS_SERVE_TOKEN or JOB_HARNESS_SERVE_TOKEN_FILE. With --ssh, chat runs Hermes on that server (jh open passes it). Without arguments it opens what `jh configure` saved."
+                "Job Harness desktop\n\nUsage: job-harness-desktop [--root PATH | --ssh USER@HOST [--identity KEY] [--socket PATH] [--hermes-profile NAME] [--hermes-path PATH] | --remote URL [--token-file PATH]]\n\nWith --ssh, the app keeps its own SSH connection to that server, reaches its jh serve socket (--socket, default the one jh service install makes) and runs chat on its Hermes; jh open passes these. With --remote http://..., the server's token comes from --token-file, JOB_HARNESS_SERVE_TOKEN or JOB_HARNESS_SERVE_TOKEN_FILE. Without arguments it opens what `jh configure` saved."
             );
             return;
         }
         _ => {}
     }
     let args: Vec<String> = std::env::args().collect();
-    let target = match resolve_target(&args, &|key| std::env::var(key).ok()) {
+    let target = match ssh_target(&args) {
+        Some(Ok(target)) => Ok(target),
+        Some(Err(err)) => Err(err.to_string()),
+        None => resolve_target(&args, &|key| std::env::var(key).ok()),
+    };
+    let target = match target {
         Ok(target) => target,
         Err(message) => {
             eprintln!("job-harness-desktop: {message}");
@@ -177,6 +204,13 @@ fn main() {
         }
     });
     app.run(move |cx: &mut App| {
+        // Stop the SSH master this process started.
+        cx.on_app_quit(|_| async {
+            if let Some(tunnel) = ssh::tunnel() {
+                tunnel.shutdown();
+            }
+        })
+        .detach();
         open_main_window(target, cx);
     });
 }

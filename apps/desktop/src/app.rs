@@ -8,6 +8,7 @@ use crate::{
     },
     markdown::{self, LinkTarget},
     sankey::{self, SankeyBucket},
+    ssh::Link,
     theme,
     transport::{
         RoleCard, RoleOverviewDetails, WorkspaceClient, WorkspaceSnapshot, WorkspaceTarget,
@@ -36,6 +37,9 @@ use std::{
     },
     time::{Duration, Instant},
 };
+
+/// A dropped tunnel shows its banner only after this, so a quick reconnect is silent.
+const LINK_BANNER_AFTER: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Debug)]
 struct DragCard {
@@ -339,6 +343,8 @@ pub struct JobHarnessApp {
     streaming: bool,
     stream_status: String,
     stream_cancel: Option<Arc<AtomicBool>>,
+    /// The tunnel's link as last drawn, and whether its banner was due.
+    link_seen: Option<(Link, bool)>,
     stream_turn_id: u64,
     chat_follow: bool,
     chat_ruler_hover: Option<usize>,
@@ -558,6 +564,7 @@ impl JobHarnessApp {
             streaming: false,
             stream_status: String::new(),
             stream_cancel: None,
+            link_seen: None,
             stream_turn_id: 0,
             chat_follow: true,
             chat_ruler_hover: None,
@@ -708,6 +715,14 @@ impl JobHarnessApp {
                         ) {
                             app.sync_state = SyncIndicator::Idle;
                             dirty = true;
+                        }
+                        if let Some(tunnel) = crate::ssh::tunnel() {
+                            let (link, how_long) = tunnel.link();
+                            let seen = Some((link, how_long > LINK_BANNER_AFTER));
+                            if app.link_seen != seen {
+                                app.link_seen = seen;
+                                dirty = true;
+                            }
                         }
                         if dirty {
                             cx.notify();
@@ -1222,7 +1237,9 @@ impl JobHarnessApp {
     /// Loads workspace snapshot strictly on the background executor (zero UI-thread stalls).
     /// Background/watcher reloads stay silent (`show_pill = false`); explicit user actions show the pill.
     fn refresh_snapshot_async(&mut self, show_pill: bool, cx: &mut Context<Self>) {
-        if self.refresh_in_flight {
+        // Offline, keep the last snapshot; the server's first event after reconnecting
+        // refreshes it.
+        if self.refresh_in_flight || crate::transport::ensure_online().is_err() {
             return;
         }
         self.refresh_in_flight = true;
@@ -2903,7 +2920,21 @@ impl JobHarnessApp {
         }
     }
 
+    /// Offline, chat sends nothing and queues nothing; the text stays in the box.
+    fn refuse_offline(&mut self, cx: &mut Context<Self>) -> bool {
+        match crate::transport::ensure_online() {
+            Ok(()) => false,
+            Err(err) => {
+                self.set_toast(err.to_string(), cx);
+                true
+            }
+        }
+    }
+
     fn submit_chat_input(&mut self, steer: bool, cx: &mut Context<Self>) {
+        if self.refuse_offline(cx) {
+            return;
+        }
         let raw = std::mem::take(&mut self.chat_input);
         self.input_all_selected = false;
         let snippets = std::mem::take(&mut self.pasted_snippets);
@@ -2952,7 +2983,7 @@ impl JobHarnessApp {
         cx: &mut Context<Self>,
     ) {
         let trimmed = prompt.trim().to_owned();
-        if trimmed.is_empty() && attachments.is_empty() {
+        if trimmed.is_empty() && attachments.is_empty() || self.refuse_offline(cx) {
             return;
         }
         if self.streaming {
@@ -3765,6 +3796,65 @@ impl JobHarnessApp {
         } else {
             theme::emerald()
         }
+    }
+
+    /// "Reconnecting…" once the tunnel has been down a few seconds, then "Offline" with
+    /// Retry. The board below stays as last seen.
+    fn render_link_banner(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let tunnel = crate::ssh::tunnel()?;
+        let (link, how_long) = tunnel.link();
+        let target = tunnel.target();
+        let text = match link {
+            Link::Reconnecting if how_long > LINK_BANNER_AFTER => {
+                format!("Reconnecting to {target}… The board is read-only until it is back.")
+            }
+            Link::Offline => format!(
+                "Offline: cannot reach {target}{}. The board is read-only; chat and changes are paused.",
+                tunnel
+                    .last_error()
+                    .map(|err| format!(" ({})", truncate_end(&err, 90)))
+                    .unwrap_or_default()
+            ),
+            _ => return None,
+        };
+        Some(
+            div()
+                .id("link-banner")
+                .w_full()
+                .flex_shrink_0()
+                .px_4()
+                .py_1p5()
+                .flex()
+                .items_center()
+                .gap_3()
+                .bg(theme::amber_wash())
+                .border_b_1()
+                .border_color(theme::hairline())
+                .text_xs()
+                .text_color(theme::amber_text())
+                .child(div().flex_1().min_w_0().child(text))
+                .when(link == Link::Offline, |d| {
+                    d.child(
+                        div()
+                            .id("link-retry")
+                            .px_2()
+                            .py_0p5()
+                            .rounded(theme::r_sm())
+                            .border_1()
+                            .border_color(theme::amber_accent())
+                            .cursor_pointer()
+                            .hover(|s| s.bg(theme::row_hover()))
+                            .child("Retry")
+                            .on_click(cx.listener(|_, _, _, cx| {
+                                if let Some(tunnel) = crate::ssh::tunnel() {
+                                    tunnel.retry();
+                                }
+                                cx.notify();
+                            })),
+                    )
+                })
+                .into_any_element(),
+        )
     }
 
     fn render_topbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -14595,6 +14685,7 @@ impl Render for JobHarnessApp {
             .relative()
             .overflow_hidden()
             .child(self.render_topbar(cx))
+            .children(self.render_link_banner(cx))
             .child(
                 div()
                     .flex_1()

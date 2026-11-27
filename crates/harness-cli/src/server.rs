@@ -3,10 +3,8 @@ use clap::Subcommand;
 use job_harness_core::{Engine, HarnessError, state, storage::WorkspaceLock};
 use serde_json::{Value, json};
 use std::{
-    net::{SocketAddr, TcpStream},
     path::{Path, PathBuf},
     process::{Command, Stdio},
-    time::{Duration, Instant},
 };
 
 const UNITS: [&str; 3] = [
@@ -208,81 +206,45 @@ pub fn service(
     }
 }
 
-fn listening(addr: SocketAddr) -> bool {
-    TcpStream::connect_timeout(&addr, Duration::from_millis(300)).is_ok()
-}
-
-/// Tunnel 127.0.0.1:PORT to the same port on an SSH host (unless already open) and start the desktop app.
-/// The token reaches the app as a file path, never as an argument or a logged value.
 /// Which Hermes on the server the desktop app's chat runs.
 pub struct Hermes<'a> {
     pub profile: Option<&'a str>,
     pub path: Option<&'a str>,
 }
 
-/// Desktop arguments after `--remote URL`: the token file and, so chat runs on
-/// the server, the SSH target, identity and Hermes.
+/// Desktop arguments: the SSH target, and optionally its key, the server's socket
+/// and the Hermes chat runs.
 fn app_args(
     ssh: &str,
     identity: Option<&Path>,
-    token_file: Option<&Path>,
+    socket: Option<&str>,
     hermes: &Hermes,
 ) -> anyhow::Result<Vec<std::ffi::OsString>> {
-    let mut args: Vec<std::ffi::OsString> = vec![];
-    if let Some(file) = token_file {
-        args.extend(["--token-file".into(), file.canonicalize()?.into()]);
-    }
-    args.extend(["--ssh".into(), ssh.into()]);
+    let mut args: Vec<std::ffi::OsString> = vec!["--ssh".into(), ssh.into()];
     if let Some(identity) = identity {
         args.extend(["--identity".into(), std::path::absolute(identity)?.into()]);
     }
-    if let Some(profile) = hermes.profile {
-        args.extend(["--hermes-profile".into(), profile.into()]);
-    }
-    if let Some(path) = hermes.path {
-        args.extend(["--hermes-path".into(), path.into()]);
+    for (flag, value) in [
+        ("--socket", socket),
+        ("--hermes-profile", hermes.profile),
+        ("--hermes-path", hermes.path),
+    ] {
+        if let Some(value) = value {
+            args.extend([flag.into(), value.into()]);
+        }
     }
     Ok(args)
 }
 
+/// Start the desktop app on a server. The app opens and supervises its own SSH
+/// connection, so this only launches it.
 pub fn open(
     ssh: &str,
-    port: u16,
     identity: Option<&Path>,
-    token_file: Option<&Path>,
+    socket: Option<&str>,
     hermes: Hermes,
 ) -> anyhow::Result<Value> {
-    let addr = SocketAddr::from(([127, 0, 0, 1], port));
-    let tunnel = !listening(addr);
-    if tunnel {
-        let mut command = Command::new("ssh");
-        command.args(["-f", "-N", "-o", "ExitOnForwardFailure=yes", "-L"]);
-        command.arg(format!("127.0.0.1:{port}:127.0.0.1:{port}"));
-        if let Some(identity) = identity {
-            command
-                .args(["-o", "IdentitiesOnly=yes", "-i"])
-                .arg(identity);
-        }
-        let status = command
-            .arg(ssh)
-            .status()
-            .map_err(|err| fail("open_failed", format!("Could not run ssh: {err}")))?;
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while status.success() && !listening(addr) && Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(200));
-        }
-        if !status.success() || !listening(addr) {
-            return Err(fail(
-                "open_failed",
-                format!(
-                    "Could not open an SSH tunnel to {ssh} on port {port}. Check `ssh {ssh}` works and `jh serve` is running there."
-                ),
-            ));
-        }
-    }
-    let url = format!("http://127.0.0.1:{port}");
-    // Run the desktop binary itself, so it inherits this environment (such as
-    // JOB_HARNESS_SERVE_TOKEN) and two servers can be open at once. Prefer one
+    // Run the desktop binary itself, so two servers can be open at once. Prefer one
     // next to this binary, then the macOS app bundle, then PATH.
     let sibling = std::env::current_exe()?.with_file_name("job-harness-desktop");
     let bundle = PathBuf::from("/Applications/Job Harness.app/Contents/MacOS/job-harness-desktop");
@@ -291,20 +253,17 @@ pub fn open(
         .find(|path| path.is_file())
         .unwrap_or_else(|| PathBuf::from("job-harness-desktop"));
     let mut app = Command::new(binary);
-    app.args(["--remote", &url]);
-    app.args(app_args(ssh, identity, token_file, &hermes)?);
+    app.args(app_args(ssh, identity, socket, &hermes)?);
     app.stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-    if app.spawn().is_err() {
-        return Err(fail(
+    app.spawn().map_err(|err| {
+        fail(
             "open_failed",
-            format!(
-                "Tunnel is up at {url}, but the desktop app did not start. Install the Job Harness desktop app, or run it with --remote {url}."
-            ),
-        ));
-    }
-    Ok(json!({"url": url, "tunnel_started": tunnel}))
+            format!("The desktop app did not start ({err}). Install the Job Harness desktop app."),
+        )
+    })?;
+    Ok(json!({"ssh": ssh}))
 }
 
 #[cfg(test)]
@@ -456,7 +415,7 @@ mod tests {
             move || sync(&ledger).map(|_| ()).map_err(|err| err.to_string())
         });
         while !pushing.exists() {
-            std::thread::sleep(Duration::from_millis(50));
+            std::thread::sleep(std::time::Duration::from_millis(50));
         }
         let (sender, receiver) = std::sync::mpsc::channel();
         std::thread::spawn({
@@ -466,7 +425,7 @@ mod tests {
                 let _ = sender.send(lock.is_ok());
             }
         });
-        let locked = receiver.recv_timeout(Duration::from_secs(10));
+        let locked = receiver.recv_timeout(std::time::Duration::from_secs(10));
         std::fs::write(&release, b"").unwrap();
         assert_eq!(
             locked,
@@ -491,7 +450,7 @@ mod tests {
             path: Some("~/.local/bin/hermes"),
         };
         let id = std::path::absolute("/keys/id").unwrap();
-        let args = app_args("bot@server", Some(&id), None, &named).unwrap();
+        let args = app_args("bot@server", Some(&id), Some("/run/jh/serve.sock"), &named).unwrap();
         assert_eq!(
             args,
             [
@@ -499,6 +458,8 @@ mod tests {
                 "bot@server",
                 "--identity",
                 id.to_str().unwrap(),
+                "--socket",
+                "/run/jh/serve.sock",
                 "--hermes-profile",
                 "bot",
                 "--hermes-path",
