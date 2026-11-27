@@ -150,7 +150,7 @@ pub fn demo(root: &Path) -> Result<Value> {
     job_harness_core::index::refresh(root)?;
     let search = job_harness_core::index::search(root, "database", 5)?;
     Ok(
-        json!({"workspace":root.canonicalize()?,"fictional":true,"external_actions":false,"search":search,"note":note["data"],"next":["jh --root PATH status","jh --root PATH workspace search database","jh --root PATH gui"]}),
+        json!({"workspace":root.canonicalize()?,"fictional":true,"external_actions":false,"search":search,"note":note["data"],"next":["jh --root PATH status","jh --root PATH workspace search database","jh --root PATH workspace overview"]}),
     )
 }
 
@@ -214,6 +214,14 @@ mod tests {
         assert_eq!(result["fictional"], true);
         assert_eq!(result["external_actions"], false);
         assert!(result["search"].to_string().contains("dashboard.md"));
+        // Every suggested next command is one this binary accepts.
+        for hint in result["next"].as_array().unwrap() {
+            let words = hint.as_str().unwrap().split_whitespace();
+            assert!(
+                <crate::Cli as clap::Parser>::try_parse_from(words).is_ok(),
+                "{hint}"
+            );
+        }
         assert!(demo(&root).is_err());
     }
 }

@@ -293,32 +293,7 @@ pub fn validate_settings(value: &Value) -> Result<()> {
     let object = value
         .as_object()
         .ok_or_else(|| HarnessError::validation("Workspace configuration must be an object"))?;
-    if object.keys().any(|k| {
-        ![
-            "schema_version",
-            "timezone",
-            "max_daily_submissions",
-            "daily_channel_limits",
-            "permissions",
-            "discovery",
-            "communication",
-            "contact_categories",
-            "target_roles",
-            "cv_tracks",
-            "time_and_reminders",
-            "scheduling",
-            "browser_policy",
-            "primary_cv",
-            "preferred_browser",
-            "answer_sources",
-        ]
-        .contains(&k.as_str())
-    }) || value["schema_version"].as_u64() != Some(1)
-    {
-        return Err(HarnessError::validation(
-            "Unsupported workspace configuration",
-        ));
-    }
+    // The published schema is the one allowlist of keys (additionalProperties: false).
     crate::contracts::validate(crate::contracts::ledger_schema(), value)?;
     if let Some(zone) = object.get("timezone") {
         let s = zone
@@ -714,6 +689,16 @@ mod tests {
         assert!(safe_path(t.path(), "/etc/passwd").is_err());
         assert!(validate_settings(&json!({"schema_version":1,"primary_cv":"../cv.pdf"})).is_err());
         assert!(validate_settings(&json!({"schema_version":1,"answer_sources":[17]})).is_err());
+    }
+    #[test]
+    fn every_schema_key_is_accepted_and_only_those() {
+        // The desktop app writes disabled_cv_tracks; export must still validate it.
+        validate_settings(
+            &json!({"schema_version":1,"cv_tracks":["ai"],"disabled_cv_tracks":["ai"]}),
+        )
+        .unwrap();
+        assert!(validate_settings(&json!({"schema_version":1,"unknown_key":true})).is_err());
+        assert!(validate_settings(&json!({"schema_version":2})).is_err());
     }
     #[test]
     fn retained_cv_namespace_does_not_open_other_sources_or_path_aliases() {

@@ -83,7 +83,7 @@ fn imported_pdf_can_be_explicitly_selected_and_frozen_without_weakening_submit_g
     );
     assert_eq!(created["ok"], true, "{created}");
     std::fs::write(root.join("applications/answers.json"), "{\"fixture\":true}").unwrap();
-    let arguments = json!({"run_id":run_id,"record":"applications/example-engineer-123.md","company":"Example","vacancy_url":"https://jobs.example.invalid/example/123","source":"employer","posting_id":"123","cv_path":retained,"answers_path":"applications/answers.json","vacancy_text_unavailable":"Synthetic CLI fixture without a written ad","job":{"salary":"unknown","location":"London, UK","work_arrangement":"remote","office_days_per_week":0},"idempotency_key":"import-packet"});
+    let arguments = json!({"run_id":run_id,"record":"applications/example-engineer-123.md","company":"Example","vacancy_url":"https://jobs.example.invalid/example/123","source":"employer","posting_id":"123","cv_path":retained,"answers_path":"applications/answers.json","vacancy_text_unavailable":"Synthetic CLI fixture without a written ad","job":{"salary":"unknown","location":"London, UK","work_arrangement":"remote","office_days_per_week":0},"channel":"portal","idempotency_key":"import-packet"});
     let packet = call(&root, "prepare_packet", arguments.clone());
     assert_eq!(packet["ok"], true, "{packet}");
     let cv = &packet["data"]["packet"]["cv"];
@@ -432,7 +432,7 @@ fn source_default_ignores_live_environment_and_saved_settings() {
     assert_eq!(job_harness_core::state::load(&personal).unwrap(), before);
     assert_eq!(
         job_harness::host::resolve(Some(personal.clone())).unwrap(),
-        personal
+        personal.canonicalize().unwrap()
     );
 }
 
@@ -574,22 +574,131 @@ fn a_workspace_pin_refuses_a_copied_ledger() {
     std::fs::write(&pin, format!("{}\n", pinned.display())).unwrap();
     let input = temp.path().join("tool-input.json");
     std::fs::write(&input, "{}").unwrap();
-    let pinned_call = |root: &Path| {
+    let pinned_run = |root: &Path, pin: &Path, args: &[&str]| {
         output(
             Command::new(env!("CARGO_BIN_EXE_job-harness"))
                 .arg("--root")
                 .arg(root)
-                .args(["call", "bootstrap", "--input", input.to_str().unwrap()])
+                .args(args)
                 .env("XDG_CONFIG_HOME", temp.path().join("host-settings"))
-                .env("JOB_HARNESS_WORKSPACE_PIN", &pin)
+                .env("JOB_HARNESS_WORKSPACE_PIN", pin)
                 .output()
                 .unwrap(),
         )
     };
-    assert_eq!(pinned_call(&pinned)["ok"], true);
-    let refused = pinned_call(&copy);
+    let bootstrap = ["call", "bootstrap", "--input", input.to_str().unwrap()];
+    assert_eq!(pinned_run(&pinned, &pin, &bootstrap)["ok"], true);
+    // Every command that opens a workspace honours the pin, not only tool calls.
+    let bundle = temp.path().join("copy.jhb");
+    for args in [
+        &bootstrap[..],
+        &["workspace", "search", "anything"],
+        &["workspace", "overview"],
+        &["workspace", "export", "--output", bundle.to_str().unwrap()],
+        &["pipeline", "--check"],
+        &["status", "--json"],
+        &["sync"],
+    ] {
+        let refused = pinned_run(&copy, &pin, args);
+        assert_eq!(
+            refused["error"]["code"], "workspace_not_pinned",
+            "{args:?}: {refused}"
+        );
+    }
+    assert!(!bundle.exists());
+    // A pin named in the environment must exist; a typo does not open everything.
+    let missing = pinned_run(&pinned, &temp.path().join("no-such-pin"), &bootstrap);
     assert_eq!(
-        refused["error"]["code"], "workspace_not_pinned",
+        missing["error"]["code"], "workspace_not_pinned",
+        "{missing}"
+    );
+}
+
+#[test]
+fn sync_keeps_a_configured_name_and_fills_in_only_the_missing_email() {
+    let temp = tempfile::tempdir().unwrap();
+    let (remote, root) = (
+        temp.path().join("remote.git"),
+        temp.path().join("workspace"),
+    );
+    let empty = temp.path().join("empty-gitconfig");
+    std::fs::write(&empty, "").unwrap();
+    let git = |dir: &Path, args: &[&str]| {
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .env("GIT_CONFIG_GLOBAL", &empty)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?}: {out:?}");
+        String::from_utf8_lossy(&out.stdout).trim().to_owned()
+    };
+    git(
+        temp.path(),
+        &["init", "-q", "--bare", remote.to_str().unwrap()],
+    );
+    assert_eq!(output(run(&root, &["init"]))["ok"], true);
+    git(&root, &["init", "-q"]);
+    git(&root, &["config", "user.name", "Ledger Owner"]);
+    git(
+        &root,
+        &["remote", "add", "origin", remote.to_str().unwrap()],
+    );
+    git(
+        &root,
+        &[
+            "-c",
+            "user.email=t@example.invalid",
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "start",
+        ],
+    );
+    git(&root, &["push", "-q", "-u", "origin", "HEAD"]);
+    let synced = Command::new(env!("CARGO_BIN_EXE_job-harness"))
+        .arg("--root")
+        .arg(&root)
+        .arg("sync")
+        .env("XDG_CONFIG_HOME", temp.path().join("host-settings"))
+        .env("GIT_CONFIG_GLOBAL", &empty)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .output()
+        .unwrap();
+    let synced = output(synced);
+    assert_eq!(synced["data"]["committed"], true, "{synced}");
+    assert_eq!(
+        git(&root, &["log", "-1", "--format=%an <%ae>"]),
+        "Ledger Owner <job-harness@localhost>"
+    );
+}
+
+#[test]
+fn configure_remote_names_a_missing_token_file() {
+    let temp = tempfile::tempdir().unwrap();
+    let missing = temp.path().join("no-such-token");
+    let refused = output(
+        Command::new(env!("CARGO_BIN_EXE_job-harness"))
+            .args([
+                "configure",
+                "--remote",
+                "http://127.0.0.1:9",
+                "--token-file",
+            ])
+            .arg(&missing)
+            .env("XDG_CONFIG_HOME", temp.path().join("host-settings"))
+            .output()
+            .unwrap(),
+    );
+    assert_eq!(refused["error"]["code"], "token_required", "{refused}");
+    assert!(
+        refused["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("no-such-token"),
         "{refused}"
     );
 }

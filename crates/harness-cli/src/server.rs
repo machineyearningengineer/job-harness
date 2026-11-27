@@ -48,7 +48,9 @@ fn run(code: &str, command: &mut Command) -> anyhow::Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
 }
 
-/// Checkpoint the SQLite WAL, commit any change and push, holding the coordinator read lock.
+/// Checkpoint the SQLite WAL and commit any change under the exclusive coordinator
+/// lock, so no writer can change the ledger between fold and commit; push after
+/// releasing it.
 pub fn sync(root: &Path) -> anyhow::Result<Value> {
     let root = root.canonicalize()?;
     let git = |args: &[&str]| {
@@ -69,29 +71,32 @@ pub fn sync(root: &Path) -> anyhow::Result<Value> {
             ),
         )
     })?;
-    let _lock = WorkspaceLock::acquire(&root, false)?;
-    state::checkpoint(&root)?;
-    run("sync_failed", &mut git(&["add", "-A"]))?;
-    let changed = !git(&["diff", "--cached", "--quiet"])
-        .status()
-        .map_err(|err| fail("sync_failed", err.to_string()))?
-        .success();
-    if changed {
-        let mut commit = git(&[]);
-        // Keep the owner's identity; fall back only where none is configured.
-        if run("sync_failed", &mut git(&["config", "user.email"])).is_err() {
-            commit.args([
-                "-c",
-                "user.name=Job Harness",
-                "-c",
-                "user.email=job-harness@localhost",
-            ]);
+    let changed = {
+        let _lock = WorkspaceLock::acquire(&root, true)?;
+        state::checkpoint(&root)?;
+        run("sync_failed", &mut git(&["add", "-A"]))?;
+        let changed = !git(&["diff", "--cached", "--quiet"])
+            .status()
+            .map_err(|err| fail("sync_failed", err.to_string()))?
+            .success();
+        if changed {
+            let mut commit = git(&[]);
+            // Keep the owner's identity; fill in only the part that is not configured.
+            for (key, fallback) in [
+                ("user.name", "Job Harness"),
+                ("user.email", "job-harness@localhost"),
+            ] {
+                if run("sync_failed", &mut git(&["config", key])).is_err() {
+                    commit.args(["-c", &format!("{key}={fallback}")]);
+                }
+            }
+            run(
+                "sync_failed",
+                commit.args(["commit", "-q", "-m", "Sync ledger"]),
+            )?;
         }
-        run(
-            "sync_failed",
-            commit.args(["commit", "-q", "-m", "Sync ledger"]),
-        )?;
-    }
+        changed
+    };
     run("sync_failed", &mut git(&["push", "-q"]))?;
     let head = run("sync_failed", &mut git(&["rev-parse", "HEAD"]))?;
     Ok(json!({"workspace": root, "committed": changed, "pushed": true, "head": head}))
@@ -390,6 +395,77 @@ mod tests {
         let second = sync(&ledger).unwrap();
         assert_eq!(second["committed"], false);
         assert_eq!(second["head"], first["head"]);
+    }
+
+    /// A pre-push hook waits until the test takes the exclusive lock, which only
+    /// succeeds if sync released it before pushing.
+    #[cfg(unix)]
+    #[test]
+    fn sync_releases_the_lock_before_pushing() {
+        use std::os::unix::fs::PermissionsExt;
+        let t = tempfile::tempdir().unwrap();
+        let (remote, ledger) = (t.path().join("remote.git"), t.path().join("ledger"));
+        git(
+            t.path(),
+            &["init", "-q", "--bare", remote.to_str().unwrap()],
+        );
+        crate::onboarding::demo(&ledger).unwrap();
+        git(&ledger, &["init", "-q"]);
+        git(
+            &ledger,
+            &["remote", "add", "origin", remote.to_str().unwrap()],
+        );
+        git(
+            &ledger,
+            &[
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@example.invalid",
+                "commit",
+                "-q",
+                "--allow-empty",
+                "-m",
+                "start",
+            ],
+        );
+        git(&ledger, &["push", "-q", "-u", "origin", "HEAD"]);
+        let (pushing, release) = (t.path().join("pushing"), t.path().join("release"));
+        let hook = ledger.join(".git/hooks/pre-push");
+        std::fs::write(
+            &hook,
+            format!(
+                "#!/bin/sh\ntouch '{}'\nwhile [ ! -f '{}' ]; do sleep 0.1; done\n",
+                pushing.display(),
+                release.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let syncing = std::thread::spawn({
+            let ledger = ledger.clone();
+            move || sync(&ledger).map(|_| ()).map_err(|err| err.to_string())
+        });
+        while !pushing.exists() {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn({
+            let ledger = ledger.clone();
+            move || {
+                let lock = WorkspaceLock::acquire(&ledger, true);
+                let _ = sender.send(lock.is_ok());
+            }
+        });
+        let locked = receiver.recv_timeout(Duration::from_secs(10));
+        std::fs::write(&release, b"").unwrap();
+        assert_eq!(
+            locked,
+            Ok(true),
+            "sync held the ledger lock during git push"
+        );
+        syncing.join().unwrap().unwrap();
     }
 
     #[test]

@@ -259,7 +259,9 @@ jobs:
           gh release create "$RELEASE_TAG" ./*.tar.gz ./*.zip SHA256SUMS --verify-tag $PRE_FLAG --title "Job Harness $RELEASE_TAG" --notes-file "../docs/releases/$RELEASE_TAG.md"
   homebrew:
     # Keep machineyearningengineer/homebrew-tap on the release just published.
+    # A prerelease never moves the tap off the latest stable release.
     needs: publish
+    if: ${{ !inputs.prerelease }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
@@ -280,14 +282,17 @@ jobs:
             awk -v f="$1" '$2 == f || $2 == ("*" f) { print $1 }' "$RUNNER_TEMP/SHA256SUMS" | grep -E '^[0-9a-f]{64}$'
           }
           # Rewrite the version, and the hash on each line that ends with "# <target>".
+          # Fail if the file is missing or any substitution did not land.
           bump() {
             file=$1 asset=$2
             shift 2
-            [ -f "$file" ] || return 0
+            [ -f "$file" ] || { echo "::error::$file is missing from the tap"; exit 1; }
             sed -i -E "s/^  version \"[^\"]*\"/  version \"${RELEASE_TAG#v}\"/" "$file"
+            grep -qx "  version \"${RELEASE_TAG#v}\"" "$file" || { echo "::error::No version line rewritten in $file"; exit 1; }
             for target in "$@"; do
-              hash=$(sum "${asset/TARGET/$target}")
+              hash=$(sum "${asset/TARGET/$target}") || { echo "::error::No checksum for ${asset/TARGET/$target}"; exit 1; }
               sed -i -E "s/\"[0-9a-f]{64}\"(.*# $target)\$/\"$hash\"\1/" "$file"
+              grep -qE "\"$hash\".*# $target\$" "$file" || { echo "::error::No $target checksum line in $file"; exit 1; }
             done
           }
           bump Formula/job-harness.rb "job-harness-$RELEASE_TAG-TARGET.tar.gz" \

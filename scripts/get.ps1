@@ -8,8 +8,13 @@ $BinDir = Join-Path $Prefix "bin"
 $Version = $env:JOB_HARNESS_VERSION
 
 if (-not $Version) {
-    $Releases = Invoke-RestMethod -Uri "https://api.github.com/repos/$Repo/releases" -Headers @{ "User-Agent" = "job-harness-installer" }
-    $Version = $Releases[0].tag_name
+    # The latest stable release, from its redirect: no API rate limit, never a prerelease.
+    $Request = [System.Net.WebRequest]::Create("https://github.com/$Repo/releases/latest")
+    $Request.AllowAutoRedirect = $false
+    $Response = $Request.GetResponse()
+    $Location = $Response.Headers["Location"]
+    $Response.Close()
+    if ($Location -match '/releases/tag/([^/?]+)$') { $Version = $Matches[1] }
 }
 if (-not $Version) {
     throw "Could not determine latest release tag. Install with: cargo install --git https://github.com/$Repo job-harness"

@@ -109,7 +109,9 @@ impl Engine {
     /// Another record for the same employer and role title that already moved
     /// past preparation blocks a second application through a different URL.
     pub(super) fn role_duplicate(&self, record: &str) -> Result<Option<String>> {
-        let separator = Regex::new(r"\s+[—–-]\s+").unwrap();
+        // "Acme — Engineer", "Acme—Engineer", "Acme: Engineer", "Acme | Engineer";
+        // an unspaced hyphen stays part of a name ("Co-op").
+        let separator = Regex::new(r"\s*[—–:|]\s*|\s+-\s+").unwrap();
         let identity = |row: &Value| -> Option<(String, String)> {
             let mut parts = separator.splitn(row["title"].as_str()?, 2);
             let (title_employer, role) = (parts.next()?, parts.next()?);

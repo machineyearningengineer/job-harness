@@ -98,18 +98,25 @@ fn check_filters(settings: &Value, packet: &Value) -> Result<()> {
         .and_then(|u| u.host_str().map(str::to_ascii_lowercase))
         .unwrap_or_default();
     for ats in texts("exclude_ats") {
-        let key = domain::company_key(&ats);
-        if !key.is_empty() && host.split('.').any(|label| label.contains(&key)) {
+        // "myworkdayjobs.com" matches that host and its subdomains; a bare name
+        // such as "workday" or "greenhouse" matches within any host label.
+        let entry = ats.trim().trim_matches('.').to_ascii_lowercase();
+        let excluded = if entry.contains('.') {
+            host == entry || host.ends_with(&format!(".{entry}"))
+        } else {
+            !entry.is_empty() && host.split('.').any(|label| label.contains(&entry))
+        };
+        if excluded {
             return Err(Error::new(
                 "excluded_by_filters",
                 format!("Vacancy host {host} is on an excluded applicant tracking system ({ats})"),
             ));
         }
     }
-    let company = domain::company_key(s(packet, "company")?);
+    let company = employer_key(s(packet, "company")?);
     if texts("avoid_list")
         .iter()
-        .any(|avoid| domain::company_key(avoid) == company)
+        .any(|avoid| employer_key(avoid) == company)
     {
         return Err(Error::new(
             "excluded_by_filters",
@@ -117,6 +124,25 @@ fn check_filters(settings: &Value, packet: &Value) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+/// Company key without a trailing legal form, so "Acme Ltd" and "Acme, Inc."
+/// match an avoid-list entry of "Acme".
+fn employer_key(name: &str) -> String {
+    const LEGAL: &str = "inc incorporated ltd limited llc llp plc corp corporation co company gmbh ag sa sas bv nv pty srl oy";
+    let folded = domain::casefold(name);
+    let mut words: Vec<&str> = folded
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .collect();
+    while words.len() > 1
+        && words
+            .last()
+            .is_some_and(|word| LEGAL.split(' ').any(|l| l == *word))
+    {
+        words.pop();
+    }
+    words.concat()
 }
 
 const JOB_FIELDS: [&str; 4] = [
@@ -183,7 +209,9 @@ fn check_job_terms(settings: &Value, job: Option<&Value>) -> Result<Value> {
         format!(" {} ", words.join(" "))
     };
     if let (Some(allowed), Some(location)) = (
-        discovery["allowed_locations"].as_array(),
+        discovery["allowed_locations"]
+            .as_array()
+            .filter(|a| !a.is_empty()),
         job["location"].as_str().filter(|l| *l != "unknown"),
     ) && !allowed
         .iter()
@@ -193,7 +221,9 @@ fn check_job_terms(settings: &Value, job: Option<&Value>) -> Result<Value> {
         return refuse(format!("Location {location} is not in allowed_locations"));
     }
     if let (Some(allowed), Some(arrangement)) = (
-        discovery["allowed_work_arrangements"].as_array(),
+        discovery["allowed_work_arrangements"]
+            .as_array()
+            .filter(|a| !a.is_empty()),
         job["work_arrangement"].as_str().filter(|a| *a != "unknown"),
     ) && !allowed.iter().any(|a| a == arrangement)
     {
@@ -709,10 +739,13 @@ impl Engine {
         check_job_terms(&settings, packet.get("job"))?;
         // Engine::call holds the exclusive workspace lock through the check and commit.
         let began = chrono::Utc::now();
-        let channel = packet
-            .get("channel")
-            .and_then(Value::as_str)
-            .unwrap_or("portal");
+        // Never assume portal: an email must not take a portal permit or cap.
+        let channel = packet.get("channel").and_then(Value::as_str).ok_or_else(|| {
+            Error::new(
+                "invalid_state",
+                "This packet records no channel; cancel the reservation and prepare a new packet with channel",
+            )
+        })?;
         match channel {
             "portal" => require_permission(&settings, "auto_apply_portal", "A portal submission")?,
             _ => require_permission(
