@@ -125,7 +125,9 @@ jh --root "$HOME/Career/workspace" connect mcp
 
 ### 3. Open the Desktop App *(no terminal required)*
 
-Download **Job Harness.app** from [GitHub Releases](https://github.com/machineyearningengineer/job-harness/releases) *(Apple Silicon macOS verified; Intel macOS, Linux & Windows previews)*, drag to **Applications**, right-click → **Open** *(unsigned open-source build — or run `xattr -cr "/Applications/Job Harness.app"` once)*, and click **Try with sample data** to explore a live workspace immediately.
+Download **Job Harness.app** from [GitHub Releases](https://github.com/machineyearningengineer/job-harness/releases) *(Apple Silicon macOS verified; Intel macOS, Linux & Windows previews)*, drag to **Applications**, and click **Try with sample data** to explore a live workspace immediately.
+
+The app is unsigned: the first time, right-click it and choose **Open**, or run `xattr -d com.apple.quarantine "/Applications/Job Harness.app"`.
 
 Or run from a local checkout in one command:
 
