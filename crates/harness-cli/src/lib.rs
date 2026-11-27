@@ -776,6 +776,8 @@ fn handle_secret_cmd(action: SecretCmd) -> anyhow::Result<Value> {
 
 fn read_secret_line(hidden: bool) -> anyhow::Result<String> {
     let mut line = String::new();
+    #[cfg(not(unix))]
+    let _ = hidden;
     #[cfg(unix)]
     let toggled = if hidden && std::io::stdin().is_terminal() {
         std::process::Command::new("stty")
