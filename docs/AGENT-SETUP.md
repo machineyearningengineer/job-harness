@@ -47,7 +47,7 @@ This creates:
 
 ## Step 3 — Connect Job Harness to your agent runtime
 
-Print the exact stdio MCP config (defaults to `--tool-profile focused`, which advertises 12 core tools and saves ~78% schema tokens; specialized tools load on demand via `inspect_tools`):
+Print the exact stdio MCP config (defaults to `--tool-profile focused`, which advertises the core tools and saves ~78% schema tokens; specialized tools load on demand via `inspect_tools`):
 
 ```sh
 jh --root "$HOME/Career/workspace" connect mcp
@@ -82,6 +82,8 @@ Confirm all 5 `permissions` flags in `config/career-ledger.json` remain `false` 
 - `auto_reply_threads`
 - `auto_book_calendar`
 - `auto_archive_mail`
+
+Job Harness enforces three of them in code: `begin_submission` needs `auto_apply_portal` for a portal and `auto_send_first_contact_email` for an email, and `begin_mail_archive` needs `auto_archive_mail`. `auto_reply_threads` and `auto_book_calendar` gate nothing in the toolkit: replies and bookings happen in the host's mail and calendar tools, so the agent must read and honour those two itself.
 
 ---
 

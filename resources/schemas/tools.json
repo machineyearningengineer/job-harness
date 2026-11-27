@@ -3578,12 +3578,47 @@
                     }
                   },
                   "required": [
+                    "min",
+                    "currency",
+                    "period"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "min": {
+                      "type": "number",
+                      "minimum": 0
+                    },
+                    "max": {
+                      "type": "number",
+                      "minimum": 0
+                    },
+                    "currency": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 16
+                    },
+                    "period": {
+                      "type": "string",
+                      "enum": [
+                        "year",
+                        "month",
+                        "day",
+                        "hour"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "max",
                     "currency",
                     "period"
                   ],
                   "additionalProperties": false
                 }
-              ]
+              ],
+              "description": "At least one of min or max with currency and period, or \"unknown\" when the ad states no figure."
             },
             "location": {
               "type": "string",
@@ -3630,7 +3665,8 @@
             "portal",
             "direct_email",
             "recruiter_outreach"
-          ]
+          ],
+          "description": "How this application is sent: portal for an employer or ATS form, direct_email or recruiter_outreach for an email. It selects the permission flag and daily cap begin_submission enforces."
         },
         "idempotency_key": {
           "type": "string",
@@ -3646,7 +3682,8 @@
         "source",
         "cv_path",
         "answers_path",
-        "idempotency_key"
+        "idempotency_key",
+        "channel"
       ],
       "additionalProperties": false
     },
@@ -6225,12 +6262,47 @@
                     }
                   },
                   "required": [
+                    "min",
+                    "currency",
+                    "period"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "min": {
+                      "type": "number",
+                      "minimum": 0
+                    },
+                    "max": {
+                      "type": "number",
+                      "minimum": 0
+                    },
+                    "currency": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 16
+                    },
+                    "period": {
+                      "type": "string",
+                      "enum": [
+                        "year",
+                        "month",
+                        "day",
+                        "hour"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "max",
                     "currency",
                     "period"
                   ],
                   "additionalProperties": false
                 }
-              ]
+              ],
+              "description": "At least one of min or max with currency and period, or \"unknown\" when the ad states no figure."
             },
             "location": {
               "type": "string",
@@ -6277,7 +6349,8 @@
             "portal",
             "direct_email",
             "recruiter_outreach"
-          ]
+          ],
+          "description": "How this application is sent: portal for an employer or ATS form, direct_email or recruiter_outreach for an email. It selects the permission flag and daily cap begin_submission enforces."
         },
         "idempotency_key": {
           "type": "string",
@@ -6293,7 +6366,8 @@
         "source",
         "cv_path",
         "answers_path",
-        "idempotency_key"
+        "idempotency_key",
+        "channel"
       ],
       "additionalProperties": false
     },

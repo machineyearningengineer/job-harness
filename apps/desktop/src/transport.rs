@@ -1166,7 +1166,9 @@ impl WorkspaceClient {
 
     pub fn update_ledger_config(&self, mutate: impl FnOnce(&mut Value)) -> Result<()> {
         let Some(root) = self.target.local_root() else {
-            bail!("Editing permissions/caps directly requires a local workspace; ask Chat on VPS.");
+            bail!(
+                "Permissions and caps live in the server's config/career-ledger.json; the owner edits that file on the server. Agents cannot change config."
+            );
         };
         let _guard = storage::WorkspaceLock::acquire(root, true)?;
         let path = root.join("config/career-ledger.json");

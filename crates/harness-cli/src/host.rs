@@ -31,17 +31,18 @@ pub fn settings_path() -> anyhow::Result<PathBuf> {
     Ok(base.join("job-harness/settings.json"))
 }
 
+/// The selected workspace, refused unless the host's workspace pins list it.
 pub fn resolve(explicit: Option<PathBuf>) -> anyhow::Result<PathBuf> {
-    if let Some(path) = explicit {
-        return Ok(path);
-    }
-    if let Some(development) = super::development::current() {
-        return development_selection(&development);
-    }
-    if let Some(path) = std::env::var_os("JOB_HARNESS_WORKSPACE") {
-        return Ok(PathBuf::from(path));
-    }
-    read_selection(&settings_path()?, None)
+    let selected = if let Some(path) = explicit {
+        path
+    } else if let Some(development) = super::development::current() {
+        development_selection(&development)?
+    } else if let Some(path) = std::env::var_os("JOB_HARNESS_WORKSPACE") {
+        PathBuf::from(path)
+    } else {
+        read_selection(&settings_path()?, None)?
+    };
+    Ok(job_harness_core::engine::pinned_root(&selected)?)
 }
 
 /// Source CLI and desktop selection share this boundary before any live env fallback.
@@ -117,8 +118,10 @@ pub fn remote() -> anyhow::Result<Option<Client>> {
 }
 
 pub async fn configure_remote(url: &str, token_file: &Path) -> anyhow::Result<Value> {
+    // read_token names the file when it is missing.
+    let token = read_token(token_file)?;
     let token_file = token_file.canonicalize()?;
-    let client = Client::new(url, read_token(&token_file)?)?;
+    let client = Client::new(url, token)?;
     let ready = client.call("bootstrap", &json!({})).await;
     if ready["ok"] != true {
         return Err(HarnessError::new(

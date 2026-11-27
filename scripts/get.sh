@@ -32,9 +32,9 @@ case "$OS/$ARCH" in
 esac
 
 if [ -z "$VERSION" ]; then
-  VERSION=$(curl -fsSL "https://api.github.com/repos/$REPO/releases" \
-    | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
-    | head -n 1)
+  # The latest stable release, from its redirect: no API rate limit, never a prerelease.
+  VERSION=$(curl -fsS -o /dev/null -w '%{redirect_url}' "https://github.com/$REPO/releases/latest" \
+    | sed -n 's#.*/releases/tag/\([^/?]*\)$#\1#p')
 fi
 if [ -z "$VERSION" ]; then
   printf 'Could not determine latest release tag from GitHub. Install with:\n  cargo install --git https://github.com/%s job-harness\n' "$REPO" >&2

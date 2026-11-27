@@ -42,10 +42,7 @@ pub struct Engine {
 impl Engine {
     pub fn open(root: impl AsRef<Path>) -> Result<Self> {
         contracts::validate_catalog()?;
-        let root = fs::canonicalize(root)?;
-        for pin in workspace_pin_files() {
-            check_workspace_pin(&root, &pin)?;
-        }
+        let root = pinned_root(&fs::canonicalize(root)?)?;
         if !root.join("config/career-ledger.json").is_file() {
             return Err(Error::new(
                 "missing_resource",
@@ -631,30 +628,45 @@ if let Some(v)=e["result"].get("record"){event["record_path"]=v.clone();}event})
         }
     }
 }
+/// Resolve a workspace root and refuse it unless every host pin lists it. Every
+/// path that opens a workspace (Engine::open and the CLI's root selection) goes
+/// through here. A root that does not exist yet is checked as an absolute path.
+pub fn pinned_root(root: &Path) -> Result<PathBuf> {
+    let root = fs::canonicalize(root).or_else(|_| std::path::absolute(root))?;
+    for (pin, required) in workspace_pin_files() {
+        check_workspace_pin(&root, &pin, required)?;
+    }
+    Ok(root)
+}
 /// Machine-owner pin files listing the only workspaces this host may open, one
 /// absolute path per line. A copied ledger with edited limits is refused. The
-/// environment can add a pin but never remove the system one.
-fn workspace_pin_files() -> Vec<PathBuf> {
+/// environment can add a pin but never remove the system one; an absent system
+/// pin means no restriction, but a pin named in the environment must exist.
+fn workspace_pin_files() -> Vec<(PathBuf, bool)> {
     let mut files = vec![];
     #[cfg(unix)]
-    files.push(PathBuf::from("/etc/job-harness/allowed-workspaces"));
+    files.push((PathBuf::from("/etc/job-harness/allowed-workspaces"), false));
     #[cfg(windows)]
-    files.push(PathBuf::from(
-        r"C:\ProgramData\job-harness\allowed-workspaces",
+    files.push((
+        PathBuf::from(r"C:\ProgramData\job-harness\allowed-workspaces"),
+        false,
     ));
     if let Some(extra) = std::env::var_os("JOB_HARNESS_WORKSPACE_PIN") {
-        files.push(PathBuf::from(extra));
+        files.push((PathBuf::from(extra), true));
     }
     files
 }
-fn check_workspace_pin(root: &Path, pin: &Path) -> Result<()> {
+fn check_workspace_pin(root: &Path, pin: &Path, required: bool) -> Result<()> {
     let text = match fs::read_to_string(pin) {
         Ok(text) => text,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound && !required => return Ok(()),
         Err(_) => {
             return Err(Error::new(
                 "workspace_not_pinned",
-                "The host workspace pin cannot be read; refusing to open any workspace",
+                format!(
+                    "The host workspace pin {} cannot be read; refusing to open any workspace",
+                    pin.display()
+                ),
             ));
         }
     };

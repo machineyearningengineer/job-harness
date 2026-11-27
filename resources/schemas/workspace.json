@@ -48,10 +48,12 @@
           "type": "boolean"
         },
         "auto_reply_threads": {
-          "type": "boolean"
+          "type": "boolean",
+          "description": "Records the candidate's choice for agents and hosts to read. Job Harness has no reply permit, so nothing in the toolkit enforces it."
         },
         "auto_book_calendar": {
-          "type": "boolean"
+          "type": "boolean",
+          "description": "Records the candidate's choice for agents and hosts to read. Job Harness has no calendar permit, so nothing in the toolkit enforces it."
         },
         "auto_archive_mail": {
           "type": "boolean"

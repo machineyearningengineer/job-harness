@@ -14,6 +14,17 @@ git clone <ledger-git-url> "$HOME/ledger"
 ~/.local/bin/jh --root "$HOME/ledger" service install --port 7420
 ```
 
+For a brand-new ledger with no history yet, create it and push once by hand so
+`jh sync` has an upstream branch to push to:
+
+```sh
+~/.local/bin/jh --root "$HOME/ledger" init
+git -C "$HOME/ledger" init -b main
+git -C "$HOME/ledger" remote add origin <ledger-git-url>
+git -C "$HOME/ledger" add -A && git -C "$HOME/ledger" commit -m "New ledger"
+git -C "$HOME/ledger" push -u origin main
+```
+
 `jh service install` writes three systemd **user** units to `~/.config/systemd/user/`
 and enables them:
 
@@ -68,11 +79,15 @@ write with the same `idempotency_key` to read its recorded result.
 
 `jh sync` checkpoints the SQLite coordinator (`applications/operations/harness.sqlite`)
 through Job Harness itself, so no `sqlite3` CLI is needed, then runs `git add -A`,
-commits only if something changed, and pushes. It holds the coordinator's read lock
-while it does, so a write never lands half-committed. It exits non-zero with the
-failing git step if anything goes wrong; see `journalctl --user -u job-harness-sync`.
-The commit uses your git identity, or `Job Harness <job-harness@localhost>` if none
-is set.
+commits only if something changed, and pushes. It holds the coordinator's exclusive
+lock from the checkpoint through the commit, so no write lands between them, and
+releases it before the push. If another process (the desktop app, an agent) is
+still reading the database so the checkpoint cannot fold everything in, it fails
+with `checkpoint_incomplete` instead of committing a stale `harness.sqlite`; the
+next run retries. It exits non-zero with the failing step if anything goes wrong;
+see `journalctl --user -u job-harness-sync`. The commit uses your git
+`user.name` and `user.email`, falling back to `Job Harness` and
+`job-harness@localhost` for whichever is not set.
 
 ## Open it from your computer
 
@@ -100,7 +115,7 @@ Re-run the installer on the server. It replaces the binary in place and, when
 curl -fsSL https://raw.githubusercontent.com/machineyearningengineer/job-harness/main/scripts/get.sh | sh
 ```
 
-Pin a version with `JOB_HARNESS_VERSION=v0.4.2` before `sh`. If a ledger and the
+Pin a version with `JOB_HARNESS_VERSION=v0.4.3` before `sh`. If a ledger and the
 binary disagree on format, every command says which version the ledger needs and
 how to install it; there is no automatic conversion. Ledgers that still keep
 `applications/operations/state.json` need job-harness 0.2.x.

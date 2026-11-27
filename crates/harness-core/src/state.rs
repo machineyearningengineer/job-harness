@@ -1,7 +1,7 @@
 //! Native SQLite WAL coordinator store shared by the engine and workspace transfers.
 use crate::{Error, Result, storage};
 use job_harness_domain::{SubmissionLifecycle, SubmissionStatus};
-use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
 use serde_json::{Map, Value, json};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -43,7 +43,47 @@ fn db_path(root: &Path) -> Result<PathBuf> {
     Ok(path)
 }
 
+/// Read schema_version without writing, so a newer ledger is refused before any
+/// pragma or DDL touches it.
+fn refuse_newer(path: &Path) -> Result<()> {
+    let conn =
+        Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(sqlite_err)?;
+    let has_meta = conn
+        .query_row(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'meta'",
+            [],
+            |_| Ok(()),
+        )
+        .optional()
+        .map_err(sqlite_err)?
+        .is_some();
+    let found = if has_meta {
+        conn.query_row(
+            "SELECT value FROM meta WHERE key = 'schema_version'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(sqlite_err)?
+    } else {
+        None
+    };
+    match found.and_then(|v| v.parse::<u64>().ok()) {
+        Some(found) if found > SCHEMA_VERSION => Err(Error::new(
+            "unsupported_layout",
+            format!(
+                "This ledger uses coordinator schema {found}, written by a newer job-harness; job-harness {} reads schema {SCHEMA_VERSION}. Update job-harness ({INSTALL} | sh) and retry; the ledger was not changed.",
+                env!("CARGO_PKG_VERSION")
+            ),
+        )),
+        _ => Ok(()),
+    }
+}
+
 fn open_connection(path: &Path) -> Result<Connection> {
+    if path.is_file() {
+        refuse_newer(path)?;
+    }
     if let Some(parent) = path.parent() {
         storage::reject_symlink_ancestors(parent)?;
         fs::create_dir_all(parent)?;
@@ -117,8 +157,22 @@ pub fn checkpoint(root: &Path) -> Result<()> {
         return Ok(());
     }
     let conn = open_connection(&path)?;
-    conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE); PRAGMA optimize;")
+    // (busy, WAL frames, frames checkpointed): anything short of a full fold
+    // leaves harness.sqlite stale while its -wal file is not committed.
+    let (busy, log, done): (i64, i64, i64) = conn
+        .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })
         .map_err(sqlite_err)?;
+    if busy != 0 || log != done {
+        return Err(Error::new(
+            "checkpoint_incomplete",
+            format!(
+                "Another reader kept the coordinator WAL open ({done} of {log} frames folded); harness.sqlite is not current. Retry when other job-harness processes are idle."
+            ),
+        ));
+    }
+    conn.execute_batch("PRAGMA optimize;").map_err(sqlite_err)?;
     Ok(())
 }
 
@@ -284,18 +338,9 @@ fn load_inner(root: &Path, include_all_events: bool) -> Result<Value> {
         let parsed: Value = serde_json::from_str(&v).map_err(|_| invalid())?;
         obj.insert(k, parsed);
     }
-    match obj.get("schema_version").and_then(Value::as_u64) {
-        None => return Err(invalid()),
-        Some(found) if found > SCHEMA_VERSION => {
-            return Err(Error::new(
-                "unsupported_layout",
-                format!(
-                    "This ledger uses coordinator schema {found}, written by a newer job-harness; job-harness {} reads schema {SCHEMA_VERSION}. Update job-harness ({INSTALL} | sh) and retry; the ledger was not changed.",
-                    env!("CARGO_PKG_VERSION")
-                ),
-            ));
-        }
-        Some(_) => {}
+    // open_connection already refused a newer schema.
+    if obj.get("schema_version").and_then(Value::as_u64).is_none() {
+        return Err(invalid());
     }
 
     let mut runs = Map::new();
@@ -627,17 +672,50 @@ mod tests {
     fn newer_schema_asks_for_an_update_without_writing() {
         let root = tempfile::tempdir().unwrap();
         init(root.path()).unwrap();
-        let conn = Connection::open(root.path().join(DB_REL_PATH)).unwrap();
-        conn.execute(
-            "UPDATE meta SET value = '2' WHERE key = 'schema_version'",
-            [],
+        let path = root.path().join(DB_REL_PATH);
+        // A newer layout: another journal mode, a changed column, no events table.
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "PRAGMA journal_mode = DELETE;
+             UPDATE meta SET value = '2' WHERE key = 'schema_version';
+             DROP TABLE attempts; DROP TABLE events;
+             CREATE TABLE attempts (id TEXT PRIMARY KEY, lane TEXT NOT NULL);",
         )
         .unwrap();
         drop(conn);
-        let err = load(root.path()).unwrap_err();
-        assert_eq!(err.code, "unsupported_layout");
-        assert!(err.message.contains("schema 2"), "{}", err.message);
-        assert!(err.message.contains("get.sh | sh"), "{}", err.message);
+        let before = fs::read(&path).unwrap();
+        let empty = json!({"schema_version":1,"runs":{},"attempts":{},"events":[]});
+        for err in [
+            load(root.path()).unwrap_err(),
+            load_for_read(root.path()).unwrap_err(),
+            save(root.path(), &empty).unwrap_err(),
+            checkpoint(root.path()).unwrap_err(),
+        ] {
+            assert_eq!(err.code, "unsupported_layout");
+            assert!(err.message.contains("schema 2"), "{}", err.message);
+            assert!(err.message.contains("get.sh | sh"), "{}", err.message);
+        }
+        assert_eq!(fs::read(&path).unwrap(), before);
+        assert!(!root.path().join(format!("{DB_REL_PATH}-wal")).exists());
+    }
+    #[test]
+    fn checkpoint_fails_while_a_reader_holds_the_wal() {
+        let root = tempfile::tempdir().unwrap();
+        init(root.path()).unwrap();
+        // A long-lived reader (jh serve, the desktop app) pins an older snapshot,
+        // so the frames written after it cannot all be folded into harness.sqlite.
+        let reader = Connection::open(root.path().join(DB_REL_PATH)).unwrap();
+        reader
+            .execute_batch("BEGIN; SELECT count(*) FROM runs;")
+            .unwrap();
+        let mut s = load(root.path()).unwrap();
+        s["runs"]["r1"] = json!({"id":"r1","operation":"apply","status":"running","started_at":"2026-11-23T10:00:00Z","scope":{}});
+        save(root.path(), &s).unwrap();
+        let err = checkpoint(root.path()).unwrap_err();
+        assert_eq!(err.code, "checkpoint_incomplete", "{}", err.message);
+        reader.execute_batch("COMMIT").unwrap();
+        checkpoint(root.path()).unwrap();
+        drop(reader);
     }
     #[test]
     fn sqlite_wal_roundtrip_and_delta_append() {
