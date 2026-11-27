@@ -1,6 +1,7 @@
 //! Unified local + remote VPS workspace transport over Job Harness.
 //! Local mode calls `job-harness-core::Engine` directly in-process (zero HTTP overhead).
-//! Remote mode connects over SSH tunnel / Tailscale to `jh serve` with live SSE events.
+//! Remote mode reaches `jh serve` through the app's own SSH tunnel ([`crate::ssh`]), or a
+//! given URL, with live SSE events.
 use anyhow::{Context, Result, bail};
 use job_harness_core::{Engine, storage};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
@@ -31,8 +32,12 @@ impl WorkspaceTarget {
                 .to_owned(),
             Self::Remote { url, .. } => format!(
                 "Remote ({})",
-                url.trim_start_matches("http://")
-                    .trim_start_matches("https://")
+                crate::ssh::tunnel().map_or_else(
+                    || url
+                        .trim_start_matches("http://")
+                        .trim_start_matches("https://"),
+                    |tunnel| tunnel.target()
+                )
             ),
         }
     }
@@ -248,6 +253,35 @@ pub fn column_to_stage(column: &str) -> &'static str {
 pub struct WorkspaceClient {
     pub target: WorkspaceTarget,
     http: reqwest::blocking::Client,
+    base: String,
+}
+
+/// An HTTP client for `url` (`unix:PATH` or `http://...`) and the base its paths go under.
+fn http_client(url: &str, timeout: Option<Duration>) -> (reqwest::blocking::Client, String) {
+    let mut builder = reqwest::blocking::Client::builder().timeout(timeout);
+    let base = match url.strip_prefix("unix:") {
+        #[cfg(unix)]
+        Some(path) => {
+            builder = builder.unix_socket(path);
+            "http://localhost".to_owned()
+        }
+        _ => url.trim_end_matches('/').to_owned(),
+    };
+    (builder.build().expect("http client"), base)
+}
+
+/// Fail fast while the tunnel is down: the board stays as last seen, read-only, and
+/// nothing is queued.
+pub fn ensure_online() -> Result<()> {
+    if let Some(tunnel) = crate::ssh::tunnel()
+        && tunnel.link().0 != crate::ssh::Link::Connected
+    {
+        bail!(
+            "Offline: {} is not reachable, so changes are disabled until it reconnects.",
+            tunnel.target()
+        );
+    }
+    Ok(())
 }
 
 #[derive(Clone, Debug, Default)]
@@ -268,11 +302,12 @@ pub struct RoleOverviewDetails {
 
 impl WorkspaceClient {
     pub fn new(target: WorkspaceTarget) -> Self {
-        let http = reqwest::blocking::Client::builder()
-            .timeout(Duration::from_secs(10))
-            .build()
-            .expect("http client");
-        Self { target, http }
+        let url = match &target {
+            WorkspaceTarget::Remote { url, .. } => url.as_str(),
+            WorkspaceTarget::Local(_) => "",
+        };
+        let (http, base) = http_client(url, Some(Duration::from_secs(10)));
+        Self { target, http, base }
     }
 
     pub fn call(&self, tool: &str, arguments: Value) -> Result<Value> {
@@ -281,11 +316,11 @@ impl WorkspaceClient {
                 let engine = Engine::open(root)?;
                 Ok(engine.call(tool, &arguments))
             }
-            WorkspaceTarget::Remote { url, token } => {
-                let endpoint = format!("{}/v1/call", url.trim_end_matches('/'));
+            WorkspaceTarget::Remote { token, .. } => {
+                ensure_online()?;
                 let mut req = self
                     .http
-                    .post(endpoint)
+                    .post(format!("{}/v1/call", self.base))
                     .json(&json!({"tool": tool, "arguments": arguments}));
                 if let Some(tok) = token {
                     req = req.bearer_auth(tok);
@@ -811,12 +846,10 @@ impl WorkspaceClient {
     }
 
     fn remote_health(&self) -> Option<Value> {
-        let WorkspaceTarget::Remote { url, token } = &self.target else {
+        let WorkspaceTarget::Remote { token, .. } = &self.target else {
             return None;
         };
-        let mut req = self
-            .http
-            .get(format!("{}/v1/health", url.trim_end_matches('/')));
+        let mut req = self.http.get(format!("{}/v1/health", self.base));
         if let Some(tok) = token {
             req = req.bearer_auth(tok);
         }
@@ -1272,23 +1305,30 @@ pub fn spawn_change_listener(
         }
         WorkspaceTarget::Remote { url, token } => {
             std::thread::spawn(move || {
-                let client = reqwest::blocking::Client::builder().build().ok();
-                let Some(client) = client else { return };
+                let (client, base) = http_client(&url, None);
                 loop {
-                    let endpoint = format!("{}/v1/events", url.trim_end_matches('/'));
-                    let mut req = client.get(&endpoint);
+                    // Through a tunnel, wait for it instead of retrying blind.
+                    while ensure_online().is_err() {
+                        std::thread::sleep(Duration::from_millis(500));
+                    }
+                    let mut req = client.get(format!("{base}/v1/events"));
                     if let Some(tok) = &token {
                         req = req.bearer_auth(tok);
                     }
                     if let Ok(resp) = req.send() {
+                        // The first event after a reconnect refreshes the board.
                         let reader = BufReader::new(resp);
                         for line in reader.lines().map_while(Result::ok) {
-                            if line.starts_with("event: changed") {
+                            if line.starts_with("event: ") {
                                 let _ = tx.send(());
                             }
                         }
                     }
-                    std::thread::sleep(Duration::from_secs(3));
+                    if crate::ssh::tunnel().is_none() {
+                        std::thread::sleep(Duration::from_secs(3));
+                    } else {
+                        std::thread::sleep(Duration::from_millis(500));
+                    }
                 }
             });
             None
