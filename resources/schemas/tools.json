@@ -15370,7 +15370,8 @@
                   "type": "string"
                 },
                 "content_base64": {
-                  "type": "string"
+                  "type": "string",
+                  "maxLength": 13333336
                 }
               },
               "required": [
