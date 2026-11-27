@@ -1956,3 +1956,57 @@ fn begin_rechecks_job_terms_and_refuses_packets_without_them() {
     );
     assert_eq!(refused["error"]["code"], "job_fields_missing", "{refused}");
 }
+
+#[test]
+fn an_agent_without_file_access_can_save_and_read_artifacts() {
+    use base64::Engine as _;
+    let b64 = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
+    let dir = fixture();
+    let h = Engine::open(dir.path()).unwrap();
+    let run = start(&h, 1);
+    let ad = fs::read(dir.path().join("applications/vacancy.md")).unwrap();
+    let saved = call(
+        &h,
+        "save_artifact",
+        json!({"name":"ad.md","content_base64":b64(&ad),"idempotency_key":"ad"}),
+    );
+    let ad_path = saved["path"].as_str().unwrap().to_owned();
+    assert!(ad_path.starts_with("applications/operations/uploads/"));
+    let answers = call(
+        &h,
+        "save_artifact",
+        json!({"name":"answers.json","content_base64":b64(br#"{"experience":6}"#),"idempotency_key":"answers"}),
+    );
+    let prepared = call(
+        &h,
+        "prepare_application",
+        json!({"run_id":run,"record":"applications/acme-engineer-123.md","company":"Acme","vacancy_url":"https://jobs.example.com/acme/123","source":"employer","posting_id":"123","cv_path":"output/cv.pdf","answers_path":answers["path"],"vacancy_text_path":ad_path,"job":{"salary":"unknown","location":"London, UK","work_arrangement":"remote","office_days_per_week":0},"idempotency_key":"prepare"}),
+    );
+    let cv = &prepared["packet"]["cv"];
+    let read = call(&h, "read_artifact", json!({"path":cv["path"]}));
+    assert_eq!(read["sha256"], cv["sha256"]);
+    assert_eq!(
+        base64::engine::general_purpose::STANDARD
+            .decode(read["content_base64"].as_str().unwrap())
+            .unwrap(),
+        fs::read(dir.path().join("output/cv.pdf")).unwrap()
+    );
+    for (tool, args) in [
+        (
+            "save_artifact",
+            json!({"name":"run.sh","content_base64":b64(b"x"),"idempotency_key":"sh"}),
+        ),
+        (
+            "save_artifact",
+            json!({"name":"x.md","content_base64":"not base64!","idempotency_key":"bad"}),
+        ),
+        ("read_artifact", json!({"path":"config/career-ledger.json"})),
+        (
+            "read_artifact",
+            json!({"path":"applications/operations/harness.sqlite"}),
+        ),
+        ("read_artifact", json!({"path":"../outside.md"})),
+    ] {
+        assert_eq!(h.call(tool, &args)["ok"], false, "{tool} {args}");
+    }
+}

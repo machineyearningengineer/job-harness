@@ -58,7 +58,10 @@ send every tool call to the server's `/v1/call` instead of opening files. Use th
 environment instead of host settings with `JOB_HARNESS_REMOTE_URL` and
 `JOB_HARNESS_SERVE_TOKEN_FILE`. An explicit `--root` still opens a local ledger. Paths in
 tool arguments, such as `cv_path` or `vacancy_text_path`, are paths in the server's
-ledger. If the server cannot be reached, the call returns `remote_unavailable`; repeat a
+ledger. An agent that can't write there saves a job ad, answers file or screenshot with
+`save_artifact` (base64, at most 5 MB) and passes the returned path on. It reads a frozen
+CV to upload with `read_artifact`. Neither tool can overwrite a file, or reach `config/`
+or the coordinator. If the server cannot be reached, the call returns `remote_unavailable`; repeat a
 write with the same `idempotency_key` to read its recorded result.
 
 ## Sync

@@ -1151,6 +1151,7 @@ dependencies = [
 name = "job-harness-core"
 version = "0.4.0"
 dependencies = [
+ "base64",
  "chrono",
  "chrono-tz",
  "fs2",
