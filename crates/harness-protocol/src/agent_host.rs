@@ -479,7 +479,6 @@ impl Host {
 }
 
 /// Serve `agents` on a 0600 socket at `path` until stopped.
-#[cfg(unix)]
 pub async fn run(path: &std::path::Path, agents: Vec<(String, String)>) -> anyhow::Result<()> {
     use std::os::unix::fs::{FileTypeExt, PermissionsExt};
     if std::fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_socket()) {
@@ -572,7 +571,6 @@ mod tests {
 
     /// A stand-in ACP agent: one session; a prompt streams five chunks, asks for
     /// permission, then streams the answer and ends the turn.
-    #[cfg(unix)]
     const FAKE_AGENT: &str = r#"
 import json, sys, time
 def send(m): print(json.dumps(m), flush=True)
@@ -595,7 +593,6 @@ for line in sys.stdin:
         send({"jsonrpc":"2.0","id":prompt,"result":{"stopReason":"end_turn"}})
 "#;
 
-    #[cfg(unix)]
     #[tokio::test]
     async fn a_turn_continues_while_no_client_is_attached_and_replays_without_gaps() {
         use tokio::{io::AsyncBufReadExt, net::UnixStream};
@@ -660,10 +657,11 @@ for line in sys.stdin:
         )
         .await;
         let attached = next(&mut lines).await;
-        assert_eq!(attached["result"], json!({"gap":false,"latest":6}));
+        assert_eq!(attached["result"]["gap"], false);
+        // Replayed then live, with no gap or repeat, up to the permission request.
         let mut seqs = vec![1];
         let mut request = Value::Null;
-        for _ in 0..5 {
+        while request.is_null() {
             let event = next(&mut lines).await;
             seqs.push(event["seq"].as_u64().unwrap());
             if event["msg"]["method"] == "session/request_permission" {

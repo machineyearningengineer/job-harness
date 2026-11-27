@@ -214,6 +214,7 @@ pub fn service(
             }))
         }
         ServiceCommand::InstallAgents { agents } => {
+            #[cfg(unix)]
             job_harness_protocol::agent_host::parse_agents(&agents)?;
             let binary = std::env::current_exe()?.canonicalize()?;
             std::fs::create_dir_all(&dir)?;
