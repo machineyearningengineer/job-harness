@@ -113,7 +113,7 @@ Read https://raw.githubusercontent.com/machineyearningengineer/job-harness/main/
 # macOS / Linux
 curl -fsSL https://raw.githubusercontent.com/machineyearningengineer/job-harness/main/scripts/get.sh | sh
 
-# or with Homebrew (macOS / Linux); desktop app: brew install --cask machineyearningengineer/tap/job-harness
+# or with Homebrew (macOS / Linux); desktop app: brew install --cask machineyearningengineer/tap/job-harness-desktop
 brew install machineyearningengineer/tap/job-harness
 
 # Initialize a private workspace & print MCP config

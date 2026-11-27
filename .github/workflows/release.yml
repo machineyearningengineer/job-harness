@@ -292,7 +292,7 @@ jobs:
           }
           bump Formula/job-harness.rb "job-harness-$RELEASE_TAG-TARGET.tar.gz" \
             aarch64-apple-darwin x86_64-apple-darwin aarch64-unknown-linux-gnu x86_64-unknown-linux-gnu
-          bump Casks/job-harness.rb "Job-Harness-$RELEASE_TAG-TARGET.app.zip" aarch64-apple-darwin x86_64-apple-darwin
+          bump Casks/job-harness-desktop.rb "Job-Harness-$RELEASE_TAG-TARGET.app.zip" aarch64-apple-darwin x86_64-apple-darwin
           git diff --stat
       - name: Push the tap update
         run: |
