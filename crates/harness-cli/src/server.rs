@@ -269,7 +269,6 @@ pub fn open(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::Duration;
 
     #[test]
     fn units_quote_paths_and_serve_a_private_socket() {
@@ -416,7 +415,7 @@ mod tests {
             move || sync(&ledger).map(|_| ()).map_err(|err| err.to_string())
         });
         while !pushing.exists() {
-            std::thread::sleep(Duration::from_millis(50));
+            std::thread::sleep(std::time::Duration::from_millis(50));
         }
         let (sender, receiver) = std::sync::mpsc::channel();
         std::thread::spawn({
@@ -426,7 +425,7 @@ mod tests {
                 let _ = sender.send(lock.is_ok());
             }
         });
-        let locked = receiver.recv_timeout(Duration::from_secs(10));
+        let locked = receiver.recv_timeout(std::time::Duration::from_secs(10));
         std::fs::write(&release, b"").unwrap();
         assert_eq!(
             locked,

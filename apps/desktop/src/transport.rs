@@ -258,15 +258,13 @@ pub struct WorkspaceClient {
 
 /// An HTTP client for `url` (`unix:PATH` or `http://...`) and the base its paths go under.
 fn http_client(url: &str, timeout: Option<Duration>) -> (reqwest::blocking::Client, String) {
-    let mut builder = reqwest::blocking::Client::builder().timeout(timeout);
-    let base = match url.strip_prefix("unix:") {
-        #[cfg(unix)]
-        Some(path) => {
-            builder = builder.unix_socket(path);
-            "http://localhost".to_owned()
-        }
-        _ => url.trim_end_matches('/').to_owned(),
-    };
+    let builder = reqwest::blocking::Client::builder().timeout(timeout);
+    #[cfg(unix)]
+    if let Some(path) = url.strip_prefix("unix:") {
+        let client = builder.unix_socket(path).build().expect("http client");
+        return (client, "http://localhost".to_owned());
+    }
+    let base = url.trim_end_matches('/').to_owned();
     (builder.build().expect("http client"), base)
 }
 
