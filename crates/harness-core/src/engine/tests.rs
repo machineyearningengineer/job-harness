@@ -42,7 +42,7 @@ fn prepare(h: &Engine, run: &str, key: &str) -> Value {
     call(
         h,
         "prepare_application",
-        json!({"run_id":run,"record":"applications/acme-engineer-123.md","company":"Acme","vacancy_url":"https://jobs.example.com/acme/123","source":"employer","posting_id":"123","cv_path":"output/cv.pdf","answers_path":"applications/answers.json","vacancy_text_path":"applications/vacancy.md","idempotency_key":key}),
+        json!({"run_id":run,"record":"applications/acme-engineer-123.md","company":"Acme","vacancy_url":"https://jobs.example.com/acme/123","source":"employer","posting_id":"123","cv_path":"output/cv.pdf","answers_path":"applications/answers.json","vacancy_text_path":"applications/vacancy.md","job":{"salary":"unknown","location":"London, UK","work_arrangement":"remote","office_days_per_week":0},"idempotency_key":key}),
     )
 }
 fn set_daily_budget(h: &Engine, limit: Value) {
@@ -63,7 +63,7 @@ fn prepare_second_run(h: &Engine) -> Value {
     call(
         h,
         "prepare_application",
-        json!({"run_id":run["run_id"],"record":"applications/example-engineer-456.md","company":"Example","vacancy_url":"https://jobs.example.com/example/456","source":"employer","posting_id":"456","cv_path":"output/cv.pdf","answers_path":"applications/answers.json","vacancy_text_path":"applications/vacancy.md","idempotency_key":"prepare2"}),
+        json!({"run_id":run["run_id"],"record":"applications/example-engineer-456.md","company":"Example","vacancy_url":"https://jobs.example.com/example/456","source":"employer","posting_id":"456","cv_path":"output/cv.pdf","answers_path":"applications/answers.json","vacancy_text_path":"applications/vacancy.md","job":{"salary":"unknown","location":"London, UK","work_arrangement":"remote","office_days_per_week":0},"idempotency_key":"prepare2"}),
     )
 }
 
@@ -369,7 +369,7 @@ fn changed_answers_do_not_start_reserved_submission() {
         h.load_state().unwrap()["attempts"][p["attempt_id"].as_str().unwrap()]["status"],
         "reserved"
     );
-    assert_eq!(h.call("prepare_application",&json!({"run_id":run,"record":"applications/acme-engineer-123.md","company":"Acme","vacancy_url":"https://jobs.example.com/acme/123","source":"employer","posting_id":"123","cv_path":"output/cv.pdf","answers_path":"applications/answers.json","vacancy_text_path":"applications/vacancy.md","idempotency_key":"prepare"}))["error"]["code"],"artifact_changed");
+    assert_eq!(h.call("prepare_application",&json!({"run_id":run,"record":"applications/acme-engineer-123.md","company":"Acme","vacancy_url":"https://jobs.example.com/acme/123","source":"employer","posting_id":"123","cv_path":"output/cv.pdf","answers_path":"applications/answers.json","vacancy_text_path":"applications/vacancy.md","job":{"salary":"unknown","location":"London, UK","work_arrangement":"remote","office_days_per_week":0},"idempotency_key":"prepare"}))["error"]["code"],"artifact_changed");
 }
 #[test]
 fn cancelled_attempts_still_count_toward_total_budget() {
@@ -384,7 +384,7 @@ fn cancelled_attempts_still_count_toward_total_budget() {
             json!({"attempt_id":p["attempt_id"],"summary":"Changed form","idempotency_key":format!("cancel{i}")}),
         );
     }
-    let args = json!({"run_id":run,"record":"applications/acme-engineer-123.md","company":"Acme","vacancy_url":"https://jobs.example.com/acme/123","source":"employer","posting_id":"123","cv_path":"output/cv.pdf","answers_path":"applications/answers.json","vacancy_text_path":"applications/vacancy.md","idempotency_key":"prepare4"});
+    let args = json!({"run_id":run,"record":"applications/acme-engineer-123.md","company":"Acme","vacancy_url":"https://jobs.example.com/acme/123","source":"employer","posting_id":"123","cv_path":"output/cv.pdf","answers_path":"applications/answers.json","vacancy_text_path":"applications/vacancy.md","job":{"salary":"unknown","location":"London, UK","work_arrangement":"remote","office_days_per_week":0},"idempotency_key":"prepare4"});
     assert_eq!(
         h.call("prepare_application", &args)["error"]["code"],
         "cap_reached"
@@ -539,7 +539,7 @@ fn concurrent_reservations_have_one_canonical_winner() {
     let h = Engine::open(dir.path()).unwrap();
     let r1 = start(&h, 1);
     let r2=call(&h,"start_run",json!({"operation":"apply","scope":{"sources":["employer"],"max_submissions":1,"dry_run":false},"user_request":"Second synthetic worker","idempotency_key":"run2"}))["run_id"].as_str().unwrap().to_owned();
-    let packet_args = |run: &str, key: &str| json!({"run_id":run,"record":"applications/acme-engineer-123.md","company":"Acme","vacancy_url":"https://jobs.example.com/acme/123","source":"employer","posting_id":"123","cv_path":"output/cv.pdf","answers_path":"applications/answers.json","vacancy_text_path":"applications/vacancy.md","idempotency_key":key});
+    let packet_args = |run: &str, key: &str| json!({"run_id":run,"record":"applications/acme-engineer-123.md","company":"Acme","vacancy_url":"https://jobs.example.com/acme/123","source":"employer","posting_id":"123","cv_path":"output/cv.pdf","answers_path":"applications/answers.json","vacancy_text_path":"applications/vacancy.md","job":{"salary":"unknown","location":"London, UK","work_arrangement":"remote","office_days_per_week":0},"idempotency_key":key});
     let p1 = call(&h, "prepare_packet", packet_args(&r1, "packet1"));
     let p2 = call(&h, "prepare_packet", packet_args(&r2, "packet2"));
     let barrier = Arc::new(Barrier::new(2));
@@ -1544,7 +1544,7 @@ fn preparation_requires_a_frozen_job_ad_or_an_explicit_reason() {
     let dir = fixture();
     let h = Engine::open(dir.path()).unwrap();
     let run = start(&h, 1);
-    let base = json!({"run_id":run,"record":"applications/acme-engineer-123.md","company":"Acme","vacancy_url":"https://jobs.example.com/acme/123","source":"employer","posting_id":"123","cv_path":"output/cv.pdf","answers_path":"applications/answers.json"});
+    let base = json!({"run_id":run,"record":"applications/acme-engineer-123.md","company":"Acme","vacancy_url":"https://jobs.example.com/acme/123","source":"employer","posting_id":"123","cv_path":"output/cv.pdf","answers_path":"applications/answers.json","job":{"salary":"unknown","location":"London, UK","work_arrangement":"remote","office_days_per_week":0}});
     let with = |extra: Value, key: &str| {
         let mut args = base.clone();
         for (k, v) in extra.as_object().unwrap() {
@@ -1647,7 +1647,7 @@ fn begin_needs_the_config_permission_for_its_channel() {
     let email = call(
         &h,
         "prepare_application",
-        json!({"run_id":run,"record":"applications/acme-engineer-123.md","company":"Acme","vacancy_url":"https://jobs.example.com/acme/123","source":"employer","posting_id":"123","cv_path":"output/cv.pdf","answers_path":"applications/answers.json","vacancy_text_path":"applications/vacancy.md","channel":"direct_email","idempotency_key":"email"}),
+        json!({"run_id":run,"record":"applications/acme-engineer-123.md","company":"Acme","vacancy_url":"https://jobs.example.com/acme/123","source":"employer","posting_id":"123","cv_path":"output/cv.pdf","answers_path":"applications/answers.json","vacancy_text_path":"applications/vacancy.md","channel":"direct_email","job":{"salary":"unknown","location":"London, UK","work_arrangement":"remote","office_days_per_week":0},"idempotency_key":"email"}),
     );
     let refused = h.call(
         "begin_submission",
@@ -1680,7 +1680,7 @@ fn excluded_ats_and_avoided_employers_are_refused_at_prepare_and_begin() {
     let run = start(&h, 2);
     let refused = h.call(
         "prepare_application",
-        &json!({"run_id":run,"record":"applications/acme-workday-9.md","company":"Acme","vacancy_url":"https://acme.wd3.myworkdayjobs.com/en-US/careers/job/9","source":"employer","cv_path":"output/cv.pdf","answers_path":"applications/answers.json","vacancy_text_path":"applications/vacancy.md","idempotency_key":"workday"}),
+        &json!({"run_id":run,"record":"applications/acme-workday-9.md","company":"Acme","vacancy_url":"https://acme.wd3.myworkdayjobs.com/en-US/careers/job/9","source":"employer","cv_path":"output/cv.pdf","answers_path":"applications/answers.json","vacancy_text_path":"applications/vacancy.md","job":{"salary":"unknown","location":"London, UK","work_arrangement":"remote","office_days_per_week":0},"idempotency_key":"workday"}),
     );
     assert_eq!(refused["error"]["code"], "excluded_by_filters", "{refused}");
     // A filter added after reservation still stops the begin.
@@ -1708,7 +1708,7 @@ fn same_employer_and_role_on_another_url_is_a_duplicate() {
     let run = start(&h, 1);
     let refused = h.call(
         "prepare_application",
-        &json!({"run_id":run,"record":"applications/acme-engineer-123.md","company":"Acme","vacancy_url":"https://jobs.example.com/acme/123","source":"employer","posting_id":"123","cv_path":"output/cv.pdf","answers_path":"applications/answers.json","vacancy_text_path":"applications/vacancy.md","idempotency_key":"prepare"}),
+        &json!({"run_id":run,"record":"applications/acme-engineer-123.md","company":"Acme","vacancy_url":"https://jobs.example.com/acme/123","source":"employer","posting_id":"123","cv_path":"output/cv.pdf","answers_path":"applications/answers.json","vacancy_text_path":"applications/vacancy.md","job":{"salary":"unknown","location":"London, UK","work_arrangement":"remote","office_days_per_week":0},"idempotency_key":"prepare"}),
     );
     assert_eq!(refused["error"]["code"], "duplicate_blocked", "{refused}");
     // A closed earlier attempt (e.g. an expired posting) does not block a new one.
@@ -1778,4 +1778,181 @@ fn a_host_pin_refuses_every_other_workspace() {
         check_workspace_pin(&root, &pin).unwrap_err().code,
         "workspace_not_pinned"
     );
+}
+
+fn prepare_job(h: &Engine, run: &str, key: &str, job: Value) -> Value {
+    h.call(
+        "prepare_application",
+        &json!({"run_id":run,"record":"applications/acme-engineer-123.md","company":"Acme","vacancy_url":"https://jobs.example.com/acme/123","source":"employer","posting_id":"123","cv_path":"output/cv.pdf","answers_path":"applications/answers.json","vacancy_text_path":"applications/vacancy.md","job":job,"idempotency_key":key}),
+    )
+}
+const JOB_LIMITS: &str = r#"{"permissions":{"auto_apply_portal":true},"discovery":{"min_base_salary":80000,"currency":"GBP","allowed_locations":["United Kingdom","London"],"allowed_work_arrangements":["remote","hybrid"],"max_office_days_per_week":3}}"#;
+
+#[test]
+fn job_terms_must_be_set_from_the_ad_before_preparing() {
+    let dir = fixture();
+    let h = Engine::open(dir.path()).unwrap();
+    let run = start(&h, 1);
+    for (job, key) in [
+        (Value::Null, "none"),
+        (
+            json!({"salary":"unknown","location":"London","work_arrangement":"remote"}),
+            "partial",
+        ),
+    ] {
+        let mut args = json!({"run_id":run,"record":"applications/acme-engineer-123.md","company":"Acme","vacancy_url":"https://jobs.example.com/acme/123","source":"employer","posting_id":"123","cv_path":"output/cv.pdf","answers_path":"applications/answers.json","vacancy_text_path":"applications/vacancy.md","idempotency_key":key});
+        if !job.is_null() {
+            args["job"] = job;
+        }
+        let refused = h.call("prepare_application", &args);
+        assert_eq!(refused["error"]["code"], "job_fields_missing", "{refused}");
+        assert!(
+            refused["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("office_days_per_week")
+        );
+    }
+}
+
+#[test]
+fn job_terms_outside_the_config_are_refused() {
+    let dir = fixture();
+    let h = Engine::open(dir.path()).unwrap();
+    write_settings(&h, serde_json::from_str(JOB_LIMITS).unwrap());
+    let run = start(&h, 1);
+    let good = json!({"salary":{"min":70000,"max":90000,"currency":"GBP","period":"year"},"location":"London, United Kingdom","work_arrangement":"hybrid","office_days_per_week":2});
+    for (change, key, reason) in [
+        (
+            json!({"salary":{"min":60000,"max":75000,"currency":"gbp","period":"year"}}),
+            "low",
+            "below the floor",
+        ),
+        (
+            json!({"location":"Berlin, Germany"}),
+            "place",
+            "allowed_locations",
+        ),
+        // Whole words only: "Londonderry" is not "London".
+        (
+            json!({"location":"Londonderry"}),
+            "word",
+            "allowed_locations",
+        ),
+        (
+            json!({"work_arrangement":"onsite","office_days_per_week":5}),
+            "onsite",
+            "allowed_work_arrangements",
+        ),
+        (json!({"office_days_per_week":4}), "days", "max_office_days"),
+    ] {
+        let mut job = good.clone();
+        for (k, v) in change.as_object().unwrap() {
+            job[k] = v.clone();
+        }
+        let refused = prepare_job(&h, &run, key, job);
+        assert_eq!(
+            refused["error"]["code"], "excluded_by_filters",
+            "{key}: {refused}"
+        );
+        assert!(
+            refused["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains(reason),
+            "{key}: {refused}"
+        );
+    }
+    let prepared = prepare_job(&h, &run, "good", good);
+    assert_eq!(prepared["ok"], true, "{prepared}");
+    assert_eq!(prepared["data"]["packet"]["job"]["unchecked"], json!([]));
+}
+
+#[test]
+fn an_unknown_salary_is_allowed_and_noted() {
+    let dir = fixture();
+    let h = Engine::open(dir.path()).unwrap();
+    write_settings(&h, serde_json::from_str(JOB_LIMITS).unwrap());
+    let run = start(&h, 1);
+    let prepared = prepare_job(
+        &h,
+        &run,
+        "unknown",
+        json!({"salary":"unknown","location":"Remote, United Kingdom","work_arrangement":"remote","office_days_per_week":0}),
+    );
+    assert_eq!(prepared["ok"], true, "{prepared}");
+    assert_eq!(
+        prepared["data"]["packet"]["job"]["unchecked"],
+        json!(["salary"])
+    );
+    let attempt = prepared["data"]["attempt_id"].as_str().unwrap();
+    // The note travels with the attempt into the coordinator.
+    let state = h.load_state().unwrap();
+    assert_eq!(state["attempts"][attempt]["job"]["salary"], "unknown");
+    assert_eq!(
+        state["attempts"][attempt]["job"]["unchecked"],
+        json!(["salary"])
+    );
+    // A day rate cannot be compared with an annual floor; it is noted, not refused.
+    let run2 = call(&h,"start_run",json!({"operation":"apply","scope":{"sources":["employer"],"max_submissions":1,"dry_run":false},"user_request":"Synthetic test","idempotency_key":"run2"}))["run_id"].as_str().unwrap().to_owned();
+    call(
+        &h,
+        "cancel_reservation",
+        json!({"attempt_id":attempt,"summary":"Retry with a day rate","idempotency_key":"cancel"}),
+    );
+    let day = prepare_job(
+        &h,
+        &run2,
+        "day",
+        json!({"salary":{"min":500,"currency":"GBP","period":"day"},"location":"London","work_arrangement":"hybrid","office_days_per_week":"unknown"}),
+    );
+    assert_eq!(day["ok"], true, "{day}");
+    assert_eq!(
+        day["data"]["packet"]["job"]["unchecked"],
+        json!(["office_days_per_week", "salary"])
+    );
+}
+
+#[test]
+fn begin_rechecks_job_terms_and_refuses_packets_without_them() {
+    let dir = fixture();
+    let h = Engine::open(dir.path()).unwrap();
+    let run = start(&h, 2);
+    let prepared = prepare(&h, &run, "prepare");
+    // A floor raised after reservation stops the begin.
+    let mut limits: Value = serde_json::from_str(JOB_LIMITS).unwrap();
+    limits["discovery"]["allowed_work_arrangements"] = json!(["hybrid"]);
+    write_settings(&h, limits);
+    let refused = h.call(
+        "begin_submission",
+        &json!({"attempt_id":prepared["attempt_id"],"idempotency_key":"begin"}),
+    );
+    assert_eq!(refused["error"]["code"], "excluded_by_filters", "{refused}");
+    // A reservation made before job terms existed must be prepared again.
+    write_settings(&h, json!({"permissions":{"auto_apply_portal":true}}));
+    let attempt = prepared["attempt_id"].as_str().unwrap();
+    let mut state = h.load_state().unwrap();
+    let packet_id = state["attempts"][attempt]["packet_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let path = dir
+        .path()
+        .join(format!("applications/operations/packets/{packet_id}.json"));
+    let mut packet: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    packet.as_object_mut().unwrap().remove("job");
+    let old_id = domain::digest(&domain::encoded(&packet).unwrap());
+    fs::write(
+        dir.path()
+            .join(format!("applications/operations/packets/{old_id}.json")),
+        domain::encoded(&packet).unwrap(),
+    )
+    .unwrap();
+    state["attempts"][attempt]["packet_id"] = json!(old_id);
+    h.commit(&mut state, &[]).unwrap();
+    let refused = h.call(
+        "begin_submission",
+        &json!({"attempt_id":attempt,"idempotency_key":"begin-old"}),
+    );
+    assert_eq!(refused["error"]["code"], "job_fields_missing", "{refused}");
 }

@@ -79,8 +79,8 @@ fn check_daily_submission_budget(
     Ok(())
 }
 
-/// Candidate filters decidable from the vacancy identity alone. Salary and
-/// office cadence need the ad itself and stay with the agent's review.
+/// Candidate filters decidable from the vacancy identity alone. Salary,
+/// location and office days come from the ad, in `check_job_terms`.
 fn check_filters(settings: &Value, packet: &Value) -> Result<()> {
     let discovery = &settings["discovery"];
     let texts = |key: &str| -> Vec<String> {
@@ -117,6 +117,105 @@ fn check_filters(settings: &Value, packet: &Value) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+const JOB_FIELDS: [&str; 4] = [
+    "salary",
+    "location",
+    "work_arrangement",
+    "office_days_per_week",
+];
+
+/// The agent reads salary, location, arrangement and office days from the
+/// frozen ad. Each must be set; "unknown" is an explicit value that passes and
+/// is listed in `unchecked`. A known value outside the candidate's config is
+/// refused. Returns the terms to store in the packet.
+fn check_job_terms(settings: &Value, job: Option<&Value>) -> Result<Value> {
+    let missing: Vec<&str> = JOB_FIELDS
+        .into_iter()
+        .filter(|field| job.and_then(|job| job.get(*field)).is_none())
+        .collect();
+    let Some(job) = job.filter(|_| missing.is_empty()) else {
+        return Err(Error::new(
+            "job_fields_missing",
+            format!(
+                "Set job.{} from the job ad; use \"unknown\" only when the ad does not say",
+                missing.join(", job.")
+            ),
+        ));
+    };
+    let discovery = &settings["discovery"];
+    let refuse = |message: String| Err(Error::new("excluded_by_filters", message));
+    let mut unchecked: Vec<&str> = JOB_FIELDS
+        .into_iter()
+        .filter(|field| job[*field] == "unknown")
+        .collect();
+    if let (Some(floor), Some(salary)) = (
+        discovery["min_base_salary"].as_f64(),
+        job["salary"].as_object(),
+    ) {
+        let currency = salary["currency"].as_str().unwrap_or_default();
+        let top = salary
+            .get("max")
+            .or(salary.get("min"))
+            .and_then(Value::as_f64);
+        let same_currency = discovery["currency"]
+            .as_str()
+            .is_none_or(|own| own.eq_ignore_ascii_case(currency));
+        match top {
+            Some(top) if salary["period"] == "year" && same_currency => {
+                if top < floor {
+                    return refuse(format!(
+                        "Salary up to {top} {currency} a year is below the floor of {floor}"
+                    ));
+                }
+            }
+            // Another currency, period or an open range cannot be compared.
+            _ => unchecked.push("salary"),
+        }
+    }
+    let words = |text: &str| -> String {
+        let words: Vec<String> = domain::casefold(text)
+            .split(|c: char| !c.is_alphanumeric())
+            .filter(|word| !word.is_empty())
+            .map(str::to_owned)
+            .collect();
+        format!(" {} ", words.join(" "))
+    };
+    if let (Some(allowed), Some(location)) = (
+        discovery["allowed_locations"].as_array(),
+        job["location"].as_str().filter(|l| *l != "unknown"),
+    ) && !allowed
+        .iter()
+        .filter_map(Value::as_str)
+        .any(|place| words(location).contains(&words(place)))
+    {
+        return refuse(format!("Location {location} is not in allowed_locations"));
+    }
+    if let (Some(allowed), Some(arrangement)) = (
+        discovery["allowed_work_arrangements"].as_array(),
+        job["work_arrangement"].as_str().filter(|a| *a != "unknown"),
+    ) && !allowed.iter().any(|a| a == arrangement)
+    {
+        return refuse(format!(
+            "Work arrangement {arrangement} is not in allowed_work_arrangements"
+        ));
+    }
+    if let (Some(max), Some(days)) = (
+        discovery["max_office_days_per_week"].as_f64(),
+        job["office_days_per_week"].as_f64(),
+    ) && days > max
+    {
+        return refuse(format!(
+            "{days} office days a week is over max_office_days_per_week ({max})"
+        ));
+    }
+    let mut terms = json!({});
+    for field in JOB_FIELDS {
+        terms[field] = job[field].clone();
+    }
+    terms["unchecked"] = json!(unchecked);
+    Ok(terms)
 }
 
 impl Engine {
@@ -287,7 +386,9 @@ impl Engine {
             ));
         }
         self.block_role_duplicate(record)?;
-        check_filters(&self.settings()?, args)?;
+        let settings = self.settings()?;
+        check_filters(&settings, args)?;
+        let job = check_job_terms(&settings, args.get("job"))?;
         if Path::new(s(args, "cv_path")?)
             .extension()
             .and_then(|x| x.to_str())
@@ -334,7 +435,7 @@ impl Engine {
             }
         };
         let mut source_hashes = serde_json::Map::new();
-        for source in self.settings()?["answer_sources"].as_array().unwrap() {
+        for source in settings["answer_sources"].as_array().unwrap() {
             let source = source.as_str().unwrap();
             source_hashes.insert(
                 source.into(),
@@ -345,6 +446,7 @@ impl Engine {
         if let Some(ch) = args.get("channel").and_then(Value::as_str) {
             packet["channel"] = json!(ch);
         }
+        packet["job"] = job;
         match vacancy {
             Some(path) => packet["vacancy"] = self.copy_artifact(path, "packets")?,
             None => packet["vacancy_unavailable"] = args["vacancy_text_unavailable"].clone(),
@@ -516,7 +618,9 @@ impl Engine {
             ));
         }
         self.block_role_duplicate(s(&packet, "record")?)?;
-        check_filters(&self.settings()?, &packet)?;
+        let settings = self.settings()?;
+        check_filters(&settings, &packet)?;
+        check_job_terms(&settings, packet.get("job"))?;
         let attempt_id = uuid::Uuid::new_v4().to_string();
         let mut attempt = packet;
         attempt["id"] = json!(attempt_id);
@@ -561,6 +665,7 @@ impl Engine {
         }
         self.block_role_duplicate(s(&packet, "record")?)?;
         check_filters(&settings, &packet)?;
+        check_job_terms(&settings, packet.get("job"))?;
         // Engine::call holds the exclusive workspace lock through the check and commit.
         let began = chrono::Utc::now();
         let channel = packet

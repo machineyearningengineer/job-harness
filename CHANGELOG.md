@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- **Job terms checked at preparation:** `prepare_packet` and `prepare_application` need `job` (salary, location, work arrangement, office days per week) read from the saved ad, with `"unknown"` as an explicit value; a missing field returns `job_fields_missing`. Known values below `discovery.min_base_salary` or outside the new optional `allowed_locations`, `allowed_work_arrangements` and `max_office_days_per_week` return `excluded_by_filters`, at preparation, reservation and begin. An unknown salary passes and is noted in the packet's `job.unchecked`. Reservations made before this release must be prepared again; closed records are not rechecked.
+
 ## 0.4.0 — Native desktop, Linux server & first release since 0.2.0
 
 - **Native GPUI desktop app and headless `jh serve`:** replaces the web/Tauri GUI; the desktop app opens a local folder or a remote `jh serve` (`--remote URL`).

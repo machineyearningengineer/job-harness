@@ -72,7 +72,7 @@ Ask the user for the minimum required details (do not invent anything):
 
 1. **CV PDF path** (imported/copied into the workspace and saved as `primary_cv` in `config/career-ledger.json`).
 2. **Target role families** (`target_roles`) and any initial CV tracks (`cv_tracks`, e.g. `["backend", "product", "ai"]`).
-3. **Timezone** (IANA name, e.g. `Europe/London`, `America/New_York`) and **search preferences** (`location_preferences`, `min_base_salary`, `currency`, `exclude_ats`).
+3. **Timezone** (IANA name, e.g. `Europe/London`, `America/New_York`) and **search preferences** (`location_preferences`, `min_base_salary`, `currency`, `exclude_ats`, and optionally `allowed_locations`, `allowed_work_arrangements`, `max_office_days_per_week`, which preparation enforces).
 4. **Core screening defaults** saved in `applications/approved-answers.md` (work authorisation, notice period, salary expectations, preferred work model, links).
 5. **Writing style & anti-patterns** in `config/career-ledger.json:communication` (locale, tone, sign-off).
 

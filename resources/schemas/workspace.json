@@ -97,6 +97,33 @@
           },
           "maxItems": 20
         },
+        "allowed_locations": {
+          "type": "array",
+          "description": "Places a role may be based. The job location must contain one of them as whole words, ignoring case.",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          },
+          "maxItems": 50
+        },
+        "allowed_work_arrangements": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "remote",
+              "hybrid",
+              "onsite"
+            ]
+          },
+          "maxItems": 3
+        },
+        "max_office_days_per_week": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 7
+        },
         "min_base_salary": {
           "type": "integer",
           "minimum": 0

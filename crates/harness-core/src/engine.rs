@@ -812,6 +812,9 @@ fn recovery(code: &str) -> &'static str {
         "excluded_by_filters" => {
             "Do not apply. The candidate's discovery filters exclude this vacancy; report it as excluded."
         }
+        "job_fields_missing" => {
+            "Read the saved job ad and pass job.salary, job.location, job.work_arrangement and job.office_days_per_week. Use \"unknown\" only where the ad does not say; prepare a new packet for an older reservation."
+        }
         "workspace_not_pinned" => {
             "Use the workspace this host pins. Do not copy a ledger to work around its limits."
         }

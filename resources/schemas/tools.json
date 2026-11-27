@@ -3539,6 +3539,86 @@
           "maxLength": 2000,
           "description": "Why the job ad cannot be saved (for example a recruiter email with no written spec). Use instead of vacancy_text_path."
         },
+        "job": {
+          "type": "object",
+          "description": "Terms read from the saved job ad. Every field is required; use \"unknown\" where the ad does not say. Checked against config discovery.min_base_salary, allowed_locations, allowed_work_arrangements and max_office_days_per_week.",
+          "properties": {
+            "salary": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "enum": [
+                    "unknown"
+                  ]
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "min": {
+                      "type": "number",
+                      "minimum": 0
+                    },
+                    "max": {
+                      "type": "number",
+                      "minimum": 0
+                    },
+                    "currency": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 16
+                    },
+                    "period": {
+                      "type": "string",
+                      "enum": [
+                        "year",
+                        "month",
+                        "day",
+                        "hour"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "currency",
+                    "period"
+                  ],
+                  "additionalProperties": false
+                }
+              ]
+            },
+            "location": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 500,
+              "description": "Where the role is based, as the ad says, or \"unknown\"."
+            },
+            "work_arrangement": {
+              "type": "string",
+              "enum": [
+                "remote",
+                "hybrid",
+                "onsite",
+                "unknown"
+              ]
+            },
+            "office_days_per_week": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "enum": [
+                    "unknown"
+                  ]
+                },
+                {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 7
+                }
+              ],
+              "description": "0 for fully remote, 5 for onsite unless the ad says otherwise."
+            }
+          },
+          "additionalProperties": false
+        },
         "posting_id": {
           "type": "string",
           "minLength": 1,
@@ -3730,6 +3810,25 @@
                         "direct_email",
                         "recruiter_outreach"
                       ]
+                    },
+                    "job": {
+                      "type": "object",
+                      "properties": {
+                        "salary": {},
+                        "location": {
+                          "type": "string"
+                        },
+                        "work_arrangement": {
+                          "type": "string"
+                        },
+                        "office_days_per_week": {},
+                        "unchecked": {
+                          "type": "array",
+                          "items": {
+                            "type": "string"
+                          }
+                        }
+                      }
                     }
                   },
                   "required": [
@@ -4161,6 +4260,25 @@
                         "direct_email",
                         "recruiter_outreach"
                       ]
+                    },
+                    "job": {
+                      "type": "object",
+                      "properties": {
+                        "salary": {},
+                        "location": {
+                          "type": "string"
+                        },
+                        "work_arrangement": {
+                          "type": "string"
+                        },
+                        "office_days_per_week": {},
+                        "unchecked": {
+                          "type": "array",
+                          "items": {
+                            "type": "string"
+                          }
+                        }
+                      }
                     }
                   },
                   "required": [
@@ -5744,6 +5862,25 @@
                         "direct_email",
                         "recruiter_outreach"
                       ]
+                    },
+                    "job": {
+                      "type": "object",
+                      "properties": {
+                        "salary": {},
+                        "location": {
+                          "type": "string"
+                        },
+                        "work_arrangement": {
+                          "type": "string"
+                        },
+                        "office_days_per_week": {},
+                        "unchecked": {
+                          "type": "array",
+                          "items": {
+                            "type": "string"
+                          }
+                        }
+                      }
                     }
                   },
                   "required": [
@@ -6049,6 +6186,86 @@
           "maxLength": 2000,
           "description": "Why the job ad cannot be saved (for example a recruiter email with no written spec). Use instead of vacancy_text_path."
         },
+        "job": {
+          "type": "object",
+          "description": "Terms read from the saved job ad. Every field is required; use \"unknown\" where the ad does not say. Checked against config discovery.min_base_salary, allowed_locations, allowed_work_arrangements and max_office_days_per_week.",
+          "properties": {
+            "salary": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "enum": [
+                    "unknown"
+                  ]
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "min": {
+                      "type": "number",
+                      "minimum": 0
+                    },
+                    "max": {
+                      "type": "number",
+                      "minimum": 0
+                    },
+                    "currency": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 16
+                    },
+                    "period": {
+                      "type": "string",
+                      "enum": [
+                        "year",
+                        "month",
+                        "day",
+                        "hour"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "currency",
+                    "period"
+                  ],
+                  "additionalProperties": false
+                }
+              ]
+            },
+            "location": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 500,
+              "description": "Where the role is based, as the ad says, or \"unknown\"."
+            },
+            "work_arrangement": {
+              "type": "string",
+              "enum": [
+                "remote",
+                "hybrid",
+                "onsite",
+                "unknown"
+              ]
+            },
+            "office_days_per_week": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "enum": [
+                    "unknown"
+                  ]
+                },
+                {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 7
+                }
+              ],
+              "description": "0 for fully remote, 5 for onsite unless the ad says otherwise."
+            }
+          },
+          "additionalProperties": false
+        },
         "posting_id": {
           "type": "string",
           "minLength": 1,
@@ -6240,6 +6457,25 @@
                         "direct_email",
                         "recruiter_outreach"
                       ]
+                    },
+                    "job": {
+                      "type": "object",
+                      "properties": {
+                        "salary": {},
+                        "location": {
+                          "type": "string"
+                        },
+                        "work_arrangement": {
+                          "type": "string"
+                        },
+                        "office_days_per_week": {},
+                        "unchecked": {
+                          "type": "array",
+                          "items": {
+                            "type": "string"
+                          }
+                        }
+                      }
                     }
                   },
                   "required": [
@@ -8238,6 +8474,25 @@
                             "direct_email",
                             "recruiter_outreach"
                           ]
+                        },
+                        "job": {
+                          "type": "object",
+                          "properties": {
+                            "salary": {},
+                            "location": {
+                              "type": "string"
+                            },
+                            "work_arrangement": {
+                              "type": "string"
+                            },
+                            "office_days_per_week": {},
+                            "unchecked": {
+                              "type": "array",
+                              "items": {
+                                "type": "string"
+                              }
+                            }
+                          }
                         }
                       },
                       "required": [
