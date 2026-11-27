@@ -17,5 +17,7 @@ Native GPU-accelerated desktop app built with Rust and [GPUI](https://gpui.rs), 
 cargo run --release --manifest-path apps/desktop/Cargo.toml -- --root "$HOME/Career/workspace"
 
 # Remote VPS (over SSH tunnel or Tailscale)
-cargo run --release --manifest-path apps/desktop/Cargo.toml -- --remote http://127.0.0.1:7420
+cargo run --release --manifest-path apps/desktop/Cargo.toml -- --remote http://127.0.0.1:7420 --token-file ~/.config/job-harness/server-token
 ```
+
+`jh serve` always needs its bearer token. The app reads it from `JOB_HARNESS_SERVE_TOKEN`, from `--token-file`, or from the file named by `JOB_HARNESS_SERVE_TOKEN_FILE`.

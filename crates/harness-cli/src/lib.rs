@@ -89,10 +89,17 @@ enum Command {
         #[arg(long)]
         check: bool,
     },
-    /// Select a default workspace in owner-only host settings.
+    /// Select a default workspace in owner-only host settings, or a `jh serve` that
+    /// `jh call` and `jh mcp` use instead of opening files (remote mode).
     Configure {
+        #[arg(long, required_unless_present = "remote", conflicts_with = "remote")]
+        workspace: Option<PathBuf>,
+        /// URL of a `jh serve`, for example http://127.0.0.1:7420.
+        #[arg(long, requires = "token_file")]
+        remote: Option<String>,
+        /// File holding that server's bearer token.
         #[arg(long)]
-        workspace: PathBuf,
+        token_file: Option<PathBuf>,
     },
     /// Invoke one typed tool. JSON from stdin or --input; compact JSON to stdout.
     Call {
@@ -178,6 +185,9 @@ enum Command {
         port: u16,
         #[arg(long)]
         identity: Option<PathBuf>,
+        /// Local copy of the server's token file (`jh service install` prints its path there).
+        #[arg(long)]
+        token_file: Option<PathBuf>,
     },
 }
 #[derive(Subcommand)]
@@ -401,6 +411,32 @@ fn input(path: Option<PathBuf>) -> anyhow::Result<Value> {
 }
 
 async fn execute(cli: Cli) -> anyhow::Result<Option<Value>> {
+    // Agent-facing tool calls go to the configured jh serve unless --root picks a ledger.
+    let remote = match &cli.command {
+        Command::Call { .. } | Command::Mcp { .. } if cli.root.is_none() => host::remote()?,
+        _ => None,
+    };
+    if let Some(client) = remote {
+        return match cli.command {
+            Command::Call { tool, input: path } => {
+                Ok(Some(client.call(&tool, &input(path)?).await))
+            }
+            Command::Mcp {
+                tool_profile,
+                deny_external_actions,
+            } => {
+                job_harness_protocol::mcp::serve(
+                    job_harness_protocol::mcp::Backend::Remote(client),
+                    tool_profile.name(),
+                    &Value::Object(contracts::specs().clone()),
+                    deny_external_actions,
+                )
+                .await?;
+                Ok(None)
+            }
+            _ => unreachable!(),
+        };
+    }
     match cli.command {
         Command::Demo { workspace } => return Ok(Some(success(onboarding::demo(&workspace)?))),
         Command::Capabilities { json } => {
@@ -453,7 +489,17 @@ async fn execute(cli: Cli) -> anyhow::Result<Option<Value>> {
                 contracts::workflow_schema().clone()
             }));
         }
-        Command::Configure { workspace } => return Ok(Some(success(host::configure(&workspace)?))),
+        Command::Configure {
+            workspace,
+            remote,
+            token_file,
+        } => {
+            return Ok(Some(success(match (workspace, remote, token_file) {
+                (Some(workspace), ..) => host::configure(&workspace)?,
+                (None, Some(url), Some(file)) => host::configure_remote(&url, &file).await?,
+                _ => unreachable!("clap requires a workspace or a remote with its token file"),
+            })));
+        }
         Command::Service { action } => {
             return Ok(Some(success(server::service(
                 || host::resolve(cli.root),
@@ -464,11 +510,13 @@ async fn execute(cli: Cli) -> anyhow::Result<Option<Value>> {
             ssh,
             port,
             identity,
+            token_file,
         } => {
             return Ok(Some(success(server::open(
                 &ssh,
                 port,
                 identity.as_deref(),
+                token_file.as_deref(),
             )?)));
         }
         Command::Context { action }
@@ -544,7 +592,9 @@ async fn execute(cli: Cli) -> anyhow::Result<Option<Value>> {
             deny_external_actions,
         } => {
             job_harness_protocol::mcp::serve(
-                &root,
+                job_harness_protocol::mcp::Backend::Local(std::sync::Arc::new(Engine::open(
+                    &root,
+                )?)),
                 tool_profile.name(),
                 &Value::Object(contracts::specs().clone()),
                 deny_external_actions,

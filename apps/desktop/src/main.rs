@@ -18,6 +18,21 @@ use gpui::{
 use std::path::PathBuf;
 use transport::WorkspaceTarget;
 
+/// `JOB_HARNESS_SERVE_TOKEN`, else the file from `--token-file` or `JOB_HARNESS_SERVE_TOKEN_FILE`.
+fn serve_token(args: &[String]) -> Option<String> {
+    if let Ok(token) = std::env::var("JOB_HARNESS_SERVE_TOKEN") {
+        return Some(token);
+    }
+    let file = args
+        .iter()
+        .position(|arg| arg == "--token-file")
+        .and_then(|i| args.get(i + 1).map(PathBuf::from))
+        .or_else(|| std::env::var_os("JOB_HARNESS_SERVE_TOKEN_FILE").map(PathBuf::from))?;
+    std::fs::read_to_string(file)
+        .ok()
+        .map(|text| text.trim().to_owned())
+}
+
 fn resolve_target() -> WorkspaceTarget {
     let args: Vec<String> = std::env::args().collect();
     let mut iter = args.iter().skip(1);
@@ -25,10 +40,9 @@ fn resolve_target() -> WorkspaceTarget {
         if arg == "--remote"
             && let Some(url) = iter.next()
         {
-            let token = std::env::var("JOB_HARNESS_SERVE_TOKEN").ok();
             return WorkspaceTarget::Remote {
                 url: url.clone(),
-                token,
+                token: serve_token(&args),
             };
         }
         if arg == "--root"
@@ -42,7 +56,7 @@ fn resolve_target() -> WorkspaceTarget {
     {
         return WorkspaceTarget::Remote {
             url,
-            token: std::env::var("JOB_HARNESS_SERVE_TOKEN").ok(),
+            token: serve_token(&args),
         };
     }
     if let Ok(root) = std::env::var("JOB_HARNESS_WORKSPACE")
@@ -96,7 +110,7 @@ fn main() {
         }
         Some("--help" | "-h") => {
             println!(
-                "Job Harness desktop\n\nUsage: job-harness-desktop [--root PATH | --remote URL]\n\nWith --remote, JOB_HARNESS_SERVE_TOKEN is sent as a bearer token when set."
+                "Job Harness desktop\n\nUsage: job-harness-desktop [--root PATH | --remote URL [--token-file PATH]]\n\nWith --remote, the server's token comes from JOB_HARNESS_SERVE_TOKEN, --token-file or JOB_HARNESS_SERVE_TOKEN_FILE."
             );
             return;
         }

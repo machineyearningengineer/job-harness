@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- **Remote mode for agents:** `jh configure --remote URL --token-file PATH` (or `JOB_HARNESS_REMOTE_URL` and `JOB_HARNESS_SERVE_TOKEN_FILE`) makes `jh call` and `jh mcp` send every tool call to a `jh serve` instead of opening files, so an agent can run as a user with no access to the ledger. **`jh serve` now always requires a bearer token**, even on loopback. Set `JOB_HARNESS_SERVE_TOKEN_FILE`, or `JOB_HARNESS_SERVE_TOKEN`; `jh service install` creates one. The desktop app and `jh open` take `--token-file`.
 - **Job terms checked at preparation:** `prepare_packet` and `prepare_application` need `job` (salary, location, work arrangement, office days per week) read from the saved ad, with `"unknown"` as an explicit value; a missing field returns `job_fields_missing`. Known values below `discovery.min_base_salary` or outside the new optional `allowed_locations`, `allowed_work_arrangements` and `max_office_days_per_week` return `excluded_by_filters`, at preparation, reservation and begin. An unknown salary passes and is noted in the packet's `job.unchecked`. Reservations made before this release must be prepared again; closed records are not rechecked.
 
 ## 0.4.0 — Native desktop, Linux server & first release since 0.2.0

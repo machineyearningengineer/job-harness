@@ -1,5 +1,6 @@
 //! Explicit host settings hold paths only, never candidate facts or credentials.
 use job_harness_core::{Engine, HarnessError};
+use job_harness_protocol::remote::{Client, read_token};
 use serde_json::{Value, json};
 use std::{
     fs,
@@ -64,6 +65,13 @@ fn read_selection(path: &Path, fallback: Option<&Path>) -> anyhow::Result<PathBu
         .into());
     }
     let data: Value = serde_json::from_slice(&fs::read(path)?)?;
+    if data["schema_version"] == 1 && data["remote"].is_object() && data["workspace"].is_null() {
+        return Err(HarnessError::new(
+            "invalid_arguments",
+            "This host reaches its workspace through jh serve, which only jh call and jh mcp use. Pass --root PATH for local commands.",
+        )
+        .into());
+    }
     if data["schema_version"] != 1 || !data["workspace"].is_string() {
         return Err(HarnessError::new(
             "invalid_arguments",
@@ -72,6 +80,58 @@ fn read_selection(path: &Path, fallback: Option<&Path>) -> anyhow::Result<PathBu
         .into());
     }
     Ok(PathBuf::from(data["workspace"].as_str().unwrap()))
+}
+
+/// Remote mode for `jh call` and `jh mcp`: a `jh serve` URL and the file holding its
+/// token, from `JOB_HARNESS_REMOTE_URL` and `JOB_HARNESS_SERVE_TOKEN_FILE` or from host
+/// settings. Source builds read only their development settings.
+pub fn remote() -> anyhow::Result<Option<Client>> {
+    let env = super::development::current()
+        .is_none()
+        .then(|| std::env::var("JOB_HARNESS_REMOTE_URL").ok())
+        .flatten()
+        .map(|url| (url, std::env::var_os("JOB_HARNESS_SERVE_TOKEN_FILE")));
+    let (url, token_file) = match env {
+        Some((url, file)) => (url, file.map(PathBuf::from)),
+        None => {
+            let path = settings_path()?;
+            let Ok(bytes) = fs::read(&path) else {
+                return Ok(None);
+            };
+            let data: Value = serde_json::from_slice(&bytes)?;
+            let Some(url) = data["remote"]["url"].as_str() else {
+                return Ok(None);
+            };
+            let file = data["remote"]["token_file"].as_str().map(PathBuf::from);
+            (url.to_owned(), file)
+        }
+    };
+    let token_file = token_file.ok_or_else(|| {
+        HarnessError::new(
+            "invalid_arguments",
+            "Remote mode needs the server's token file: set JOB_HARNESS_SERVE_TOKEN_FILE or run jh configure --remote URL --token-file PATH.",
+        )
+    })?;
+    let token = read_token(&token_file)?;
+    Ok(Some(Client::new(&url, token)?))
+}
+
+pub async fn configure_remote(url: &str, token_file: &Path) -> anyhow::Result<Value> {
+    let token_file = token_file.canonicalize()?;
+    let client = Client::new(url, read_token(&token_file)?)?;
+    let ready = client.call("bootstrap", &json!({})).await;
+    if ready["ok"] != true {
+        return Err(HarnessError::new(
+            "invalid_arguments",
+            format!(
+                "The server at {url} did not answer bootstrap: {}",
+                ready["error"]
+            ),
+        )
+        .into());
+    }
+    save(json!({"schema_version":1,"remote":{"url":url,"token_file":token_file}}))?;
+    Ok(json!({"remote":url,"token_file":token_file,"settings":settings_path()?}))
 }
 
 pub fn configure(root: &Path) -> anyhow::Result<Value> {
@@ -84,6 +144,13 @@ pub fn configure(root: &Path) -> anyhow::Result<Value> {
         )
         .into());
     }
+    let path = save(json!({"schema_version":1,"workspace":root}))?;
+    Ok(
+        json!({"workspace":root,"settings":path,"note":"Host-local path only. Credentials stay in the host's secure store."}),
+    )
+}
+
+fn save(settings: Value) -> anyhow::Result<PathBuf> {
     let path = settings_path()?;
     let parent = path
         .parent()
@@ -100,9 +167,7 @@ pub fn configure(root: &Path) -> anyhow::Result<Value> {
         fs::set_permissions(parent, fs::Permissions::from_mode(0o700))?;
     }
     let mut file = tempfile::NamedTempFile::new_in(parent)?;
-    file.write_all(
-        serde_json::to_string_pretty(&json!({"schema_version":1,"workspace":root}))?.as_bytes(),
-    )?;
+    file.write_all(serde_json::to_string_pretty(&settings)?.as_bytes())?;
     file.as_file().sync_all()?;
     file.persist(&path)
         .map_err(|_| HarnessError::new("io_error", "Could not save host settings."))?;
@@ -111,9 +176,7 @@ pub fn configure(root: &Path) -> anyhow::Result<Value> {
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
     }
-    Ok(
-        json!({"workspace":root,"settings":path,"note":"Host-local path only. Credentials stay in the host's secure store."}),
-    )
+    Ok(path)
 }
 
 #[cfg(test)]
