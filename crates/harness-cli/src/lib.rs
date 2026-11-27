@@ -188,6 +188,12 @@ enum Command {
         /// Local copy of the server's token file (`jh service install` prints its path there).
         #[arg(long)]
         token_file: Option<PathBuf>,
+        /// Hermes profile on the server for the app's chat (default: its active profile).
+        #[arg(long)]
+        hermes_profile: Option<String>,
+        /// Path of `hermes` on the server (default: the login PATH, then ~/.local/bin).
+        #[arg(long)]
+        hermes_path: Option<String>,
     },
 }
 #[derive(Subcommand)]
@@ -511,12 +517,18 @@ async fn execute(cli: Cli) -> anyhow::Result<Option<Value>> {
             port,
             identity,
             token_file,
+            hermes_profile,
+            hermes_path,
         } => {
             return Ok(Some(success(server::open(
                 &ssh,
                 port,
                 identity.as_deref(),
                 token_file.as_deref(),
+                server::Hermes {
+                    profile: hermes_profile.as_deref(),
+                    path: hermes_path.as_deref(),
+                },
             )?)));
         }
         Command::Context { action }

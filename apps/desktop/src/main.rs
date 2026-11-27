@@ -103,6 +103,17 @@ fn resolve_target(
     )))
 }
 
+/// `jh open --ssh` passes the server so chat runs its Hermes, not a local one.
+fn remote_hermes(args: &[String]) -> Option<(chat_bridge::SshHost, Option<String>)> {
+    let owned = |name: &str| set(flag(args, name).map(str::to_owned));
+    let host = chat_bridge::SshHost {
+        target: owned("--ssh")?,
+        identity: owned("--identity").map(PathBuf::from),
+        hermes_path: owned("--hermes-path"),
+    };
+    Some((host, owned("--hermes-profile")))
+}
+
 fn open_main_window(target: WorkspaceTarget, cx: &mut App) {
     let bounds = Bounds::centered(None, size(px(1260.0), px(780.0)), cx);
     let handle = cx
@@ -136,7 +147,7 @@ fn main() {
         }
         Some("--help" | "-h") => {
             println!(
-                "Job Harness desktop\n\nUsage: job-harness-desktop [--root PATH | --remote URL [--token-file PATH]]\n\nWith --remote, the server's token comes from --token-file, JOB_HARNESS_SERVE_TOKEN or JOB_HARNESS_SERVE_TOKEN_FILE. Without arguments it opens what `jh configure` saved."
+                "Job Harness desktop\n\nUsage: job-harness-desktop [--root PATH | --remote URL [--token-file PATH] [--ssh USER@HOST [--identity KEY] [--hermes-profile NAME] [--hermes-path PATH]]]\n\nWith --remote, the server's token comes from --token-file, JOB_HARNESS_SERVE_TOKEN or JOB_HARNESS_SERVE_TOKEN_FILE. With --ssh, chat runs Hermes on that server (jh open passes it). Without arguments it opens what `jh configure` saved."
             );
             return;
         }
@@ -150,6 +161,11 @@ fn main() {
             std::process::exit(2);
         }
     };
+    if matches!(target, WorkspaceTarget::Remote { .. })
+        && let Some((host, profile)) = remote_hermes(&args)
+    {
+        chat_bridge::use_remote_hermes(host, profile);
+    }
     let reopen_target = target.clone();
     let app = Application::new().with_assets(icons::EmbeddedIcons);
     app.on_reopen(move |cx: &mut App| {
@@ -190,6 +206,26 @@ mod tests {
             WorkspaceTarget::Remote { token, .. } => token,
             WorkspaceTarget::Local(path) => panic!("expected remote, got {path:?}"),
         }
+    }
+
+    #[test]
+    fn ssh_flags_select_a_remote_hermes() {
+        assert!(remote_hermes(&args(&["--remote", "http://127.0.0.1:7420"])).is_none());
+        let (host, profile) = remote_hermes(&args(&[
+            "--remote",
+            "http://127.0.0.1:7420",
+            "--ssh",
+            "bot@server",
+            "--identity",
+            "/keys/id",
+            "--hermes-profile",
+            "bot",
+        ]))
+        .unwrap();
+        assert_eq!(host.target, "bot@server");
+        assert_eq!(host.identity, Some(PathBuf::from("/keys/id")));
+        assert_eq!(host.hermes_path, None);
+        assert_eq!(profile.as_deref(), Some("bot"));
     }
 
     #[test]
