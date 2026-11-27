@@ -35,6 +35,7 @@ fn open_connection(path: &Path) -> Result<Connection> {
         storage::reject_symlink_ancestors(parent)?;
         fs::create_dir_all(parent)?;
     }
+    #[cfg(unix)]
     let created = !path.exists();
     let conn = Connection::open(path).map_err(sqlite_err)?;
     #[cfg(unix)]
