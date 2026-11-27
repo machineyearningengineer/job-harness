@@ -5,6 +5,7 @@ mod development;
 pub mod host;
 mod onboarding;
 mod presentation;
+mod server;
 use clap::{Parser, Subcommand, ValueEnum};
 use job_harness_core::{Engine, HarnessError, contracts};
 use serde_json::{Value, json};
@@ -160,6 +161,23 @@ enum Command {
     Secret {
         #[command(subcommand)]
         action: SecretCmd,
+    },
+    /// Checkpoint SQLite, then commit any change and push a git-backed workspace.
+    Sync,
+    /// Run this workspace on a Linux server as systemd user units (`jh serve` plus a 15-minute `jh sync`).
+    Service {
+        #[command(subcommand)]
+        action: server::ServiceCommand,
+    },
+    /// Open the desktop app on a server's `jh serve` through an SSH tunnel.
+    Open {
+        /// SSH destination, for example user@server.
+        #[arg(long)]
+        ssh: String,
+        #[arg(long, default_value_t = 7420)]
+        port: u16,
+        #[arg(long)]
+        identity: Option<PathBuf>,
     },
 }
 #[derive(Subcommand)]
@@ -436,6 +454,23 @@ async fn execute(cli: Cli) -> anyhow::Result<Option<Value>> {
             }));
         }
         Command::Configure { workspace } => return Ok(Some(success(host::configure(&workspace)?))),
+        Command::Service { action } => {
+            return Ok(Some(success(server::service(
+                || host::resolve(cli.root),
+                action,
+            )?)));
+        }
+        Command::Open {
+            ssh,
+            port,
+            identity,
+        } => {
+            return Ok(Some(success(server::open(
+                &ssh,
+                port,
+                identity.as_deref(),
+            )?)));
+        }
         Command::Context { action }
             if matches!(
                 &action,
@@ -673,7 +708,12 @@ async fn execute(cli: Cli) -> anyhow::Result<Option<Value>> {
         }
         Command::Context { action } => context::execute(&root, action).await?,
         Command::Secret { action } => handle_secret_cmd(action)?,
-        Command::Schemas { .. } | Command::ConfigSchema { .. } | Command::Configure { .. } => {
+        Command::Sync => server::sync(&root)?,
+        Command::Schemas { .. }
+        | Command::ConfigSchema { .. }
+        | Command::Configure { .. }
+        | Command::Open { .. }
+        | Command::Service { .. } => {
             unreachable!()
         }
     };
@@ -774,6 +814,7 @@ fn handle_secret_cmd(action: SecretCmd) -> anyhow::Result<Value> {
     }
 }
 
+#[cfg_attr(not(unix), allow(unused_variables))]
 fn read_secret_line(hidden: bool) -> anyhow::Result<String> {
     let mut line = String::new();
     #[cfg(not(unix))]

@@ -209,6 +209,17 @@ pub struct WorkspaceSnapshot {
     pub unresolved_attempts: u64,
     pub healthy: bool,
     pub status_note: String,
+    /// What a remote target is connected to, from `jh serve`'s health response.
+    pub remote_label: Option<String>,
+}
+
+/// `ledger · alice@server` from a `jh serve` `/v1/health` body; `None` for servers that predate it.
+pub fn remote_label(health: &Value) -> Option<String> {
+    let host = health["host"].as_str()?;
+    Some(match health["name"].as_str() {
+        Some(name) => format!("{name} · {host}"),
+        None => host.to_owned(),
+    })
 }
 
 pub fn stage_to_column(stage: &str) -> &'static str {
@@ -795,7 +806,21 @@ impl WorkspaceClient {
             } else {
                 format!("{unfinished_runs} unfinished run(s) need reconcile")
             },
+            remote_label: self.remote_health().as_ref().and_then(remote_label),
         })
+    }
+
+    fn remote_health(&self) -> Option<Value> {
+        let WorkspaceTarget::Remote { url, token } = &self.target else {
+            return None;
+        };
+        let mut req = self
+            .http
+            .get(format!("{}/v1/health", url.trim_end_matches('/')));
+        if let Some(tok) = token {
+            req = req.bearer_auth(tok);
+        }
+        req.send().ok()?.json().ok()
     }
 
     fn discover_profile_docs(&self) -> Vec<ProfileDoc> {
@@ -1666,6 +1691,24 @@ pub fn reveal_in_file_manager(path: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn remote_label_names_the_server_not_the_tunnel() {
+        let target = WorkspaceTarget::Remote {
+            url: "http://127.0.0.1:7420".into(),
+            token: None,
+        };
+        assert_eq!(target.label(), "Remote (127.0.0.1:7420)");
+        assert_eq!(
+            remote_label(&json!({"ok":true,"name":"ledger","host":"alice@server"})).as_deref(),
+            Some("ledger · alice@server")
+        );
+        assert_eq!(
+            remote_label(&json!({"ok":true,"host":"alice@server"})).as_deref(),
+            Some("alice@server")
+        );
+        assert_eq!(remote_label(&json!({"ok":true,"version":"0.3.0"})), None);
+    }
 
     #[test]
     fn column_stage_mapping_uses_valid_core_stages() {

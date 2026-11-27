@@ -4,6 +4,8 @@
 //! on click — never spawning Script Editor.
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+// Only the macOS bridge reports `Denied` or `Authorized`.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub enum NotificationAuthStatus {
     NotDetermined,
     Denied,

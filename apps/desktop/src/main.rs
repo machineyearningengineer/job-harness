@@ -88,6 +88,20 @@ fn open_main_window(target: WorkspaceTarget, cx: &mut App) {
 }
 
 fn main() {
+    // Answer without opening a window, so packaging checks and scripts can run headless.
+    match std::env::args().nth(1).as_deref() {
+        Some("--version" | "-V") => {
+            println!("job-harness-desktop {}", env!("CARGO_PKG_VERSION"));
+            return;
+        }
+        Some("--help" | "-h") => {
+            println!(
+                "Job Harness desktop\n\nUsage: job-harness-desktop [--root PATH | --remote URL]\n\nWith --remote, JOB_HARNESS_SERVE_TOKEN is sent as a bearer token when set."
+            );
+            return;
+        }
+        _ => {}
+    }
     let target = resolve_target();
     let reopen_target = target.clone();
     let app = Application::new().with_assets(icons::EmbeddedIcons);

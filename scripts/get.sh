@@ -82,6 +82,10 @@ if [ "$OS" = "Darwin" ] && command -v codesign >/dev/null 2>&1; then
   codesign -s - --force "$BIN_DIR/job-harness" >/dev/null 2>&1 || true
 fi
 ln -sf "$BIN_DIR/job-harness" "$BIN_DIR/jh"
+# Updating a server set up with `jh service install`: restart it on the new binary.
+if command -v systemctl >/dev/null 2>&1 && systemctl --user is-active --quiet job-harness.service 2>/dev/null; then
+  systemctl --user restart job-harness.service && printf 'Restarted job-harness.service on %s.\n' "$VERSION"
+fi
 
 printf '\nInstalled %s (%s) and aliased `jh`.\n' "$BIN_DIR/job-harness" "$VERSION"
 case ":$PATH:" in

@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Existing version tag to build (for example v0.3.0)
+        description: Existing version tag to build (for example v0.4.0)
         type: string
         required: true
       confirm_full_release:
@@ -30,14 +30,21 @@ defaults:
     shell: bash
 jobs:
   source:
-    if: inputs.confirm_full_release
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     env:
       RELEASE_TAG: ${{ inputs.tag }}
+      CONFIRMED: ${{ inputs.confirm_full_release }}
     outputs:
       commit: ${{ steps.identity.outputs.commit }}
     steps:
+      # Fail loudly: a skipped run looks like a release that silently never happened.
+      - name: Require explicit confirmation
+        run: |
+          if [ "$CONFIRMED" != true ]; then
+            printf '%s\n' 'confirm_full_release was not ticked; nothing was built. Re-run with confirm_full_release=true.' >&2
+            exit 1
+          fi
       - name: Validate an existing version tag
         run: |
           if [[ ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
@@ -75,7 +82,6 @@ jobs:
           printf 'commit=%s\n' "$commit" >> "$GITHUB_OUTPUT"
   build:
     needs: source
-    if: inputs.confirm_full_release
     # Each platform validates and links three separate native components.
     timeout-minutes: 90
     strategy:
@@ -251,3 +257,50 @@ jobs:
             PRE_FLAG="--prerelease"
           fi
           gh release create "$RELEASE_TAG" ./*.tar.gz ./*.zip SHA256SUMS --verify-tag $PRE_FLAG --title "Job Harness $RELEASE_TAG" --notes-file "../docs/releases/$RELEASE_TAG.md"
+  homebrew:
+    # Keep machineyearningengineer/homebrew-tap on the release just published.
+    needs: publish
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      RELEASE_TAG: ${{ inputs.tag }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: machineyearningengineer/homebrew-tap
+          ssh-key: ${{ secrets.HOMEBREW_TAP_DEPLOY_KEY }}
+      - name: Point the formula and cask at this release
+        run: |
+          gh release download "$RELEASE_TAG" --pattern SHA256SUMS --dir "$RUNNER_TEMP"
+          sum() {
+            awk -v f="$1" '$2 == f || $2 == ("*" f) { print $1 }' "$RUNNER_TEMP/SHA256SUMS" | grep -E '^[0-9a-f]{64}$'
+          }
+          # Rewrite the version, and the hash on each line that ends with "# <target>".
+          bump() {
+            file=$1 asset=$2
+            shift 2
+            [ -f "$file" ] || return 0
+            sed -i -E "s/^  version \"[^\"]*\"/  version \"${RELEASE_TAG#v}\"/" "$file"
+            for target in "$@"; do
+              hash=$(sum "${asset/TARGET/$target}")
+              sed -i -E "s/\"[0-9a-f]{64}\"(.*# $target)\$/\"$hash\"\1/" "$file"
+            done
+          }
+          bump Formula/job-harness.rb "job-harness-$RELEASE_TAG-TARGET.tar.gz" \
+            aarch64-apple-darwin x86_64-apple-darwin aarch64-unknown-linux-gnu x86_64-unknown-linux-gnu
+          bump Casks/job-harness.rb "Job-Harness-$RELEASE_TAG-TARGET.app.zip" aarch64-apple-darwin x86_64-apple-darwin
+          git diff --stat
+      - name: Push the tap update
+        run: |
+          if git diff --quiet; then
+            echo 'Tap already points at this release.'
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -qam "job-harness ${RELEASE_TAG#v}"
+          git push origin HEAD:main

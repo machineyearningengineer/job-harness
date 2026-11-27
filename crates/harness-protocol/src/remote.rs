@@ -32,6 +32,22 @@ struct AppState {
     revision: Arc<AtomicU64>,
     tx: broadcast::Sender<u64>,
     token: Option<String>,
+    /// `user@hostname` of the serving process, so clients can say where they are connected.
+    host: String,
+}
+
+fn server_host() -> String {
+    let user = std::env::var("USER")
+        .or_else(|_| std::env::var("LOGNAME"))
+        .unwrap_or_else(|_| "user".into());
+    let host = std::process::Command::new("hostname")
+        .output()
+        .ok()
+        .and_then(|out| String::from_utf8(out.stdout).ok())
+        .map(|name| name.trim().to_owned())
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| "server".into());
+    format!("{user}@{host}")
 }
 
 #[derive(Deserialize)]
@@ -70,6 +86,8 @@ async fn health(State(state): State<AppState>, headers: HeaderMap) -> (StatusCod
             "ok": true,
             "version": env!("CARGO_PKG_VERSION"),
             "workspace": state.engine.root(),
+            "name": state.engine.root().file_name().and_then(|name| name.to_str()),
+            "host": state.host,
             "revision": state.revision.load(Ordering::Relaxed)
         })),
     )
@@ -182,6 +200,8 @@ pub fn router(
     token: Option<String>,
 ) -> anyhow::Result<(Router, Option<RecommendedWatcher>)> {
     let engine = Arc::new(Engine::open(root)?);
+    // Refuse to serve a ledger whose coordinator this binary cannot read.
+    harness_core::state::load_for_read(engine.root())?;
     let revision = Arc::new(AtomicU64::new(1));
     let (tx, _) = broadcast::channel(64);
     let watcher = spawn_watcher(engine.root().to_path_buf(), revision.clone(), tx.clone());
@@ -190,6 +210,7 @@ pub fn router(
         revision,
         tx,
         token,
+        host: server_host(),
     };
     let app = Router::new()
         .route("/v1/health", get(health))
@@ -262,6 +283,12 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(ok_health.status(), StatusCode::OK);
+        let body = ok_health.into_body().collect().await.unwrap().to_bytes();
+        let health: Value = serde_json::from_slice(&body).unwrap();
+        let name = dir.path().file_name().unwrap().to_str().unwrap();
+        assert_eq!(health["name"], name);
+        let host = health["host"].as_str().unwrap();
+        assert!(host.contains('@') && !host.ends_with('@'), "{host}");
 
         let call_res = app
             .oneshot(
