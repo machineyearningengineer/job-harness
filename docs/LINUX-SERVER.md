@@ -137,16 +137,16 @@ With `jh` and the desktop app installed locally (macOS or Linux):
 jh open --ssh user@server
 ```
 
-Add `--identity ~/.ssh/key` if needed, and `--socket PATH` when the server is not
-the `jh service install` one (for example `/run/job-harness/ledger/serve.sock`).
+Add `--identity ~/.ssh/key` if needed, and `--socket PATH` when the ledger's socket
+is not the `jh service install` one (for example `/run/job-harness/ledger/serve.sock`).
 `jh open` only starts the desktop app (`job-harness-desktop` next to `jh`, then
 `/Applications/Job Harness.app`, then `PATH`) with these arguments.
 
 The app keeps its own SSH connection, as T3 Code and Hermes do: one OpenSSH
 ControlMaster per window (`ServerAliveInterval=15`, `ServerAliveCountMax=3`,
 `BatchMode=yes`, `ExitOnForwardFailure=yes`) with its control socket in a private
-0700 folder, and forwards a local Unix socket in that folder to the server's socket
-with `ssh -O forward`. Nothing listens on a local TCP port, so other users of your
+0700 folder, and forwards local Unix sockets in that folder to the server's ledger
+and agent host sockets with `ssh -O forward`. Nothing listens on a local TCP port, so other users of your
 computer cannot reach it. Your `~/.ssh/config`, agent, ProxyJump and known_hosts apply.
 
 The app checks the connection with `ssh -O check` and restarts the master when it
@@ -160,12 +160,60 @@ dies, with backoff from 1 to 60 seconds:
 
 When the connection is back, the board reloads. Quitting the app stops its master.
 
-The app's chat runs Hermes **on the server**, where the agent and its profile live:
-`ssh -T user@server -- hermes chat ...`, with the prompt on stdin. Pass
-`--hermes-profile NAME` for a profile other than the server's active one, and
-`--hermes-path PATH` if `hermes` is not on the login `PATH` or in `~/.local/bin`.
-Over SSH, chat sends no attachments and does not list past sessions or the fast-mode
-setting; those stay on the server.
+## Chat with an agent on the server
+
+The app's chat talks to agents **on the server**, where they and their settings
+live, through `jh agent-host`. It speaks the
+[Agent Client Protocol](https://agentclientprotocol.com) (ACP: JSON-RPC over
+stdio), so any ACP agent works: `hermes acp`, `gemini --experimental-acp`, the ACP
+adapters for Claude Code and Codex, or your own. Run it as the agent's user:
+
+```sh
+jh service install-agents --agent hermes="hermes acp"
+```
+
+That writes and starts `job-harness-agents.service`, a systemd user unit running
+`jh agent-host --socket $XDG_RUNTIME_DIR/job-harness-agents.sock --agent NAME=COMMAND`
+(repeat `--agent` for more; each command runs with `sh -lc`). The socket is mode
+0600 in your runtime directory, so only you and SSH sessions logged in as you can
+use it. The app forwards it over the same SSH connection as the ledger
+(`--agents-socket PATH` for another one) and chats with the first agent that starts.
+
+The host, not the app, owns each turn, as T3 Code's server does:
+
+- A turn goes on while the app is offline or closed. When the app reconnects it
+  re-attaches from the last event it showed, so nothing is lost or repeated.
+- Each session keeps its last 1000 events (at most 4 MB) for this. An app away for
+  longer is told part of the reply is gone, and can reopen the session from the list.
+- If the host itself restarts, a turn in flight is lost. Agents that support
+  `session/load` (Hermes does) keep the conversation, so you can reopen it.
+- A permission request from the agent shows in the chat panel with its options. One
+  nobody answers is cancelled after 10 minutes; the turn goes on.
+- An agent with no app attached and nothing to do for 30 minutes is stopped, and
+  started again on the next message.
+
+What chat offers comes from each agent's `initialize` answer: images when it accepts
+image prompts, the session list when it can list and load sessions, fast mode when
+a session config option offers `fast`, and models from its model option. The host
+declines the client file-system and terminal capabilities: the agent uses its own
+tools on the server. With no agent host on the server, the board works as usual and
+the chat panel says how to start one.
+
+### The protocol (for other clients and agents)
+
+Any ACP agent on stdio can be added with `--agent`. A client talks to the host with
+one JSON object per line on the socket:
+
+| Request | Answer |
+|---|---|
+| `{"id":1,"op":"agents"}` | `{"id":1,"result":{"agents":[{"name","init"}]}}`, `init` being the agent's `initialize` result (or `"error"`) |
+| `{"id":2,"op":"call","agent","method","params"}` | the ACP result or error, e.g. for `session/new`, `session/prompt`, `session/list`, `session/load`, `session/set_config_option` |
+| `{"op":"notify","agent","method","params"}` | none; e.g. `session/cancel` |
+| `{"op":"respond","agent","request","result"}` | none; answers `session/request_permission` (the first answer wins) |
+| `{"id":3,"op":"attach","agent","session","after":N}` | `{"id":3,"result":{"gap","latest"}}`, then each event after `N` (all new ones without `after`): `{"agent","session","seq","msg"}` for the agent's `session/update` and permission requests, `{…,"resolved"}` when one is answered, and `{…,"end"}` with the prompt's result when a turn ends |
+
+The Hermes gateway's own WebSocket protocol could be added later as another way in;
+ACP covers chat today.
 
 ## Update
 
@@ -183,5 +231,5 @@ how to install it; there is no automatic conversion. Ledgers that still keep
 
 ## Remove
 
-`jh service uninstall` stops and removes the three units. The ledger and its git
+`jh service uninstall` stops and removes the units, including the agent host's. The ledger and its git
 history are left as they are.

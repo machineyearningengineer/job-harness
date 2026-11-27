@@ -61,7 +61,7 @@ Wire it to the user's runtime:
 | **Codex CLI** | Add `[mcp_servers.career]` with `command` and `args` from `jh connect mcp` in `~/.codex/config.toml` |
 | **Cursor / Windsurf** | Add the `command` and `args` from `jh connect mcp` under MCP Servers in settings |
 | **OpenCode** | Add the stdio MCP command under `mcp` in `opencode.json` |
-| **Hermes Agent** | Use `jh --root "$PWD" call <tool> --input '{...}'` directly via terminal (0 persistent MCP schema tokens) and schedule routines from `config/career-routines.json`. When the agent runs as a user without file access to the ledger, drop `--root`: `jh call` then goes to the configured `jh serve` ([remote mode](LINUX-SERVER.md#agents-without-file-access-remote-mode)) |
+| **Hermes Agent** | Use `jh --root "$PWD" call <tool> --input '{...}'` directly via terminal (0 persistent MCP schema tokens) and schedule routines from `config/career-routines.json`. When the agent runs as a user without file access to the ledger, drop `--root`: `jh call` then goes to the configured `jh serve` ([remote mode](LINUX-SERVER.md#agents-without-file-access-remote-mode)). For the desktop app's chat on a server, run `jh service install-agents --agent hermes="hermes acp"` as that user ([chat](LINUX-SERVER.md#chat-with-an-agent-on-the-server)) |
 | **Any custom CLI agent** | Register yourself in `~/.config/job-harness/runtimes.json` (`[{"name":"MyAgent","command":"my-agent --stdin","models":["model-id"]}]`) so you appear in the desktop app's Agent selector and in-app chat automatically |
 
 ---
