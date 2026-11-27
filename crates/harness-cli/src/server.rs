@@ -248,9 +248,20 @@ pub fn open(ssh: &str, port: u16, identity: Option<&Path>) -> anyhow::Result<Val
     app.stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-    app.spawn().map_err(|err| {
-        fail("open_failed", format!("Tunnel is up at {url}, but the desktop app did not start ({err}). Install Job Harness desktop, or run it with --remote {url}."))
-    })?;
+    // `open` returns once the app is launched (or not found); the Linux binary keeps running.
+    let started = if cfg!(target_os = "macos") {
+        app.status().map(|status| status.success())
+    } else {
+        app.spawn().map(|_| true)
+    };
+    if !matches!(started, Ok(true)) {
+        return Err(fail(
+            "open_failed",
+            format!(
+                "Tunnel is up at {url}, but the desktop app did not start. Install the Job Harness desktop app, or run it with --remote {url}."
+            ),
+        ));
+    }
     Ok(json!({"url": url, "tunnel_started": tunnel}))
 }
 

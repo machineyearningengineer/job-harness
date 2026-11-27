@@ -366,6 +366,14 @@ impl Focusable for JobHarnessApp {
 }
 
 impl JobHarnessApp {
+    /// Remote targets name the server once its health is known; until then, the URL.
+    fn workspace_label(&self) -> String {
+        self.snapshot
+            .remote_label
+            .clone()
+            .unwrap_or_else(|| self.client.target.label())
+    }
+
     pub fn new(target: WorkspaceTarget, _window: &mut Window, cx: &mut Context<Self>) -> Self {
         let client = WorkspaceClient::new(target.clone());
         let saved = UiState::load();
@@ -3775,7 +3783,7 @@ impl JobHarnessApp {
         let profile_open = self.right_drawer == RightDrawer::Profile;
         let tidy_open = self.right_drawer == RightDrawer::Tidy;
         let tidy_n = self.tidy_count();
-        let ws_label = self.client.target.label();
+        let ws_label = self.workspace_label();
 
         div()
             .h(px(44.0))
@@ -9708,7 +9716,7 @@ impl JobHarnessApp {
                     .target
                     .local_root()
                     .map(|p| p.display().to_string())
-                    .unwrap_or_else(|| self.client.target.label());
+                    .unwrap_or_else(|| self.workspace_label());
                 Some(
                     div()
                         .id("profile-drawer")
@@ -14319,7 +14327,7 @@ impl JobHarnessApp {
                 let is_healthy = unresolved == 0 && rt_ready;
                 let ws_loc = format!(
                     "{} ({})",
-                    self.client.target.label(),
+                    self.workspace_label(),
                     if self.client.target.is_remote() {
                         "Remote"
                     } else {
