@@ -20,4 +20,4 @@ cargo run --release --manifest-path apps/desktop/Cargo.toml -- --root "$HOME/Car
 cargo run --release --manifest-path apps/desktop/Cargo.toml -- --remote http://127.0.0.1:7420 --token-file ~/.config/job-harness/server-token
 ```
 
-`jh serve` always needs its bearer token. The app reads it from `JOB_HARNESS_SERVE_TOKEN`, from `--token-file`, or from the file named by `JOB_HARNESS_SERVE_TOKEN_FILE`.
+`jh serve` always needs its bearer token. The app takes the first of `--token-file`, `JOB_HARNESS_SERVE_TOKEN`, and the file named by `JOB_HARNESS_SERVE_TOKEN_FILE`, and stops with an error if that file can't be read. Without arguments it opens what `jh configure` saved, including a `--remote` server and its token file.

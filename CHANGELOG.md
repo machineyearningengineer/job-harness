@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- **`jh serve` takes requests up to 8 MiB**, enough for `save_artifact`'s 5 MB; axum's 2 MiB default refused larger saves. In remote mode, a request the server rejects (HTTP 4xx without an envelope, such as 413) now returns a non-retryable `invalid_arguments` instead of `remote_unavailable`.
+- **Desktop token and settings:** `--token-file` now wins over `JOB_HARNESS_SERVE_TOKEN`, empty values are ignored, and an unreadable or empty token file stops the app with the reason instead of failing later as `unauthorized`. Without arguments the app opens the remote saved by `jh configure --remote`, and reads settings from `XDG_CONFIG_HOME` when it is set.
+
 ## 0.4.3 — Fixes from an outside audit
 
 - **`jh sync` never commits a stale database:** it takes the exclusive coordinator lock for the checkpoint, `git add` and commit, fails with `checkpoint_incomplete` when a reader keeps the WAL from folding in completely, and releases the lock before `git push`. Workspace export uses the same exclusive checkpoint. A missing `user.name` or `user.email` is filled in on its own, keeping whichever the owner set.
