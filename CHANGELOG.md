@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.4.4 — Remote mode, hardened
 
 - **`jh serve` takes requests up to 8 MiB**, enough for `save_artifact`'s 5 MB; axum's 2 MiB default refused larger saves. In remote mode, a request the server rejects (HTTP 4xx without an envelope, such as 413) now returns a non-retryable `invalid_arguments` instead of `remote_unavailable`.
 - **Desktop token and settings:** `--token-file` now wins over `JOB_HARNESS_SERVE_TOKEN`, empty values are ignored, and an unreadable or empty token file stops the app with the reason instead of failing later as `unauthorized`. Without arguments the app opens the remote saved by `jh configure --remote`, and reads settings from `XDG_CONFIG_HOME` when it is set.
