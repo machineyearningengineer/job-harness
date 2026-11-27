@@ -112,12 +112,12 @@ impl Engine {
         let separator = Regex::new(r"\s+[—–-]\s+").unwrap();
         let identity = |row: &Value| -> Option<(String, String)> {
             let mut parts = separator.splitn(row["title"].as_str()?, 2);
+            let (title_employer, role) = (parts.next()?, parts.next()?);
             let employer = row
                 .get("company")
                 .and_then(Value::as_str)
-                .or(parts.next())?;
-            let role: Vec<String> = parts
-                .last()?
+                .unwrap_or(title_employer);
+            let role: Vec<String> = role
                 .split(|c: char| !c.is_alphanumeric())
                 .filter(|word| !word.is_empty())
                 .map(domain::casefold)
