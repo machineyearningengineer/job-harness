@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- **Desktop shows roles in remote mode:** connected to a `jh serve`, the board was always empty because it listed roles with a blank `find_application` query, which the server refuses. It now reads the server's `applications/pipeline.json`, as the local view does.
+- **`read_artifact` returns files over 750 KB:** its declared output capped `content_base64` at the default one million characters, so larger files failed with `internal_contract_error` despite the documented 10 MB limit.
+
 ## 0.4.1 — Agents that can only ask
 
 - **Remote mode for agents:** `jh configure --remote URL --token-file PATH` (or `JOB_HARNESS_REMOTE_URL` and `JOB_HARNESS_SERVE_TOKEN_FILE`) makes `jh call` and `jh mcp` send every tool call to a `jh serve` instead of opening files, so an agent can run as a user with no access to the ledger. **`jh serve` now always requires a bearer token**, even on loopback. Set `JOB_HARNESS_SERVE_TOKEN_FILE`, or `JOB_HARNESS_SERVE_TOKEN`; `jh service install` creates one. The desktop app and `jh open` take `--token-file`. New `save_artifact` and `read_artifact` let such an agent hand over a job ad, answers or screenshot, and fetch a frozen CV to upload. Both work on immutable content-addressed files only.

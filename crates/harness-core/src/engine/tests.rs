@@ -1991,6 +1991,10 @@ fn an_agent_without_file_access_can_save_and_read_artifacts() {
             .unwrap(),
         fs::read(dir.path().join("output/cv.pdf")).unwrap()
     );
+    // Large files too: the pipeline view and real CVs pass a megabyte.
+    fs::write(dir.path().join("output/big.pdf"), vec![7u8; 2_000_000]).unwrap();
+    let big = call(&h, "read_artifact", json!({"path":"output/big.pdf"}));
+    assert_eq!(big["content_base64"].as_str().unwrap().len(), 2_666_668);
     for (tool, args) in [
         (
             "save_artifact",

@@ -912,11 +912,25 @@ impl WorkspaceClient {
             let built = job_harness_core::pipeline::build(root)?;
             return Ok(built.records);
         }
-        let res = self.call("find_application", json!({"query": "", "limit": 200}))?;
-        Ok(res["data"]["matches"]
-            .as_array()
-            .cloned()
-            .unwrap_or_default())
+        // The server's own pipeline view, the file the local branch reads.
+        use base64::Engine as _;
+        let res = self.call(
+            "read_artifact",
+            json!({"path": "applications/pipeline.json"}),
+        )?;
+        if res["ok"] != true {
+            bail!(
+                "{}",
+                res["error"]["message"]
+                    .as_str()
+                    .unwrap_or("Could not read the server's pipeline")
+            );
+        }
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(res["data"]["content_base64"].as_str().unwrap_or_default())
+            .context("Invalid pipeline encoding from server")?;
+        let parsed: Value = serde_json::from_slice(&bytes).context("Invalid pipeline.json")?;
+        Ok(parsed["records"].as_array().cloned().unwrap_or_default())
     }
 
     /// Guarded optimistic Kanban move using an atomic `execute_batch`:
