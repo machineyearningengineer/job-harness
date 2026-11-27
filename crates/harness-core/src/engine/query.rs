@@ -106,6 +106,46 @@ impl Engine {
         )
     }
 
+    /// Another record for the same employer and role title that already moved
+    /// past preparation blocks a second application through a different URL.
+    pub(super) fn role_duplicate(&self, record: &str) -> Result<Option<String>> {
+        let separator = Regex::new(r"\s+[—–-]\s+").unwrap();
+        let identity = |row: &Value| -> Option<(String, String)> {
+            let mut parts = separator.splitn(row["title"].as_str()?, 2);
+            let (title_employer, role) = (parts.next()?, parts.next()?);
+            let employer = row
+                .get("company")
+                .and_then(Value::as_str)
+                .unwrap_or(title_employer);
+            let role: Vec<String> = role
+                .split(|c: char| !c.is_alphanumeric())
+                .filter(|word| !word.is_empty())
+                .map(domain::casefold)
+                .collect();
+            (!role.is_empty()).then(|| (domain::company_key(employer), role.join(" ")))
+        };
+        let rows = pipeline::build(&self.root)?.records;
+        let own = Path::new(record).file_name().and_then(|x| x.to_str());
+        let Some(target) = rows
+            .iter()
+            .find(|row| row["record"].as_str() == own)
+            .and_then(identity)
+        else {
+            return Ok(None);
+        };
+        Ok(rows
+            .iter()
+            .filter(|row| row["record"].as_str() != own)
+            .filter(|row| {
+                // Unclassified legacy prose is not evidence of a live application.
+                let stage = row["stage"].as_str().unwrap_or("saved");
+                !["saved", "prepared", "closed"].contains(&stage)
+                    && (row["tracking_source"] == "structured" || stage != "needs-review")
+            })
+            .find(|row| identity(row).as_ref() == Some(&target))
+            .and_then(|row| row["record"].as_str().map(str::to_owned)))
+    }
+
     pub(super) fn duplicate_records(&self) -> Result<Vec<DuplicateRecord>> {
         let rows = pipeline::build(&self.root)?.records;
         let employer_pattern = Regex::new(r"\s+[—–-]\s+").unwrap();

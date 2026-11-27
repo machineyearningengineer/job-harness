@@ -12,7 +12,7 @@ fn fixture() -> tempfile::TempDir {
     }
     fs::write(
         dir.path().join("config/career-ledger.json"),
-        r#"{"schema_version":1,"timezone":"UTC","primary_cv":"output/cv.pdf"}"#,
+        r#"{"schema_version":1,"timezone":"UTC","primary_cv":"output/cv.pdf","permissions":{"auto_archive_mail":true}}"#,
     )
     .unwrap();
     fs::write(dir.path().join("output/cv.pdf"), "%PDF-1.7\nSynthetic\n").unwrap();
@@ -683,4 +683,31 @@ fn daily_withdraw_is_human_selected_queued_only_and_can_be_reapproved() {
         call(&engine, "reconcile_tracker", json!({}))["pending_mail_action_count"],
         1
     );
+}
+
+#[test]
+fn archive_begin_needs_the_candidates_config_permission() {
+    let dir = fixture();
+    let engine = Engine::open(dir.path()).unwrap();
+    let run = start(&engine, "run");
+    let path = "applications/evidence/mail.json";
+    let hash = save(
+        &dir,
+        path,
+        &snapshot(vec![row("m1", "t1", "rejection", false)]),
+    );
+    let plan = record(&engine, &run, path, &hash, "review");
+    approve(&engine, &plan, &run, "approve");
+    fs::write(
+        dir.path().join("config/career-ledger.json"),
+        r#"{"schema_version":1,"timezone":"UTC","primary_cv":"output/cv.pdf","permissions":{"auto_archive_mail":false}}"#,
+    )
+    .unwrap();
+    let mut begin = without_action(selection(&plan, &run, "begin_archive", "begin"));
+    begin["mail_observations_path"] = json!(path);
+    begin["expected_source_sha256"] = json!(hash);
+    let before = crate::state::load(dir.path()).unwrap();
+    let refused = engine.call("begin_mail_archive", &begin);
+    assert_eq!(refused["error"]["code"], "permission_denied", "{refused}");
+    assert_eq!(before, crate::state::load(dir.path()).unwrap());
 }

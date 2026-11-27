@@ -53,6 +53,7 @@ fn imported_pdf_can_be_explicitly_selected_and_frozen_without_weakening_submit_g
     let provenance = std::fs::read(&provenance_path).unwrap();
     let mut config: Value = serde_json::from_slice(&initial_config).unwrap();
     config["primary_cv"] = json!(retained);
+    config["permissions"]["auto_apply_portal"] = json!(true);
     std::fs::write(&config_path, config.to_string()).unwrap();
     let bootstrap = call(&root, "bootstrap", json!({"operation":"apply"}));
     assert_eq!(bootstrap["ok"], true, "{bootstrap}");
@@ -559,5 +560,36 @@ fn windows_host_settings_use_appdata_and_preserve_drive_paths_with_spaces() {
     assert_eq!(
         output(selected)["data"]["ledger"],
         serde_json::json!(root.canonicalize().unwrap())
+    );
+}
+
+#[test]
+fn a_workspace_pin_refuses_a_copied_ledger() {
+    let temp = tempfile::tempdir().unwrap();
+    let pinned = temp.path().join("workspace");
+    let copy = temp.path().join("copy");
+    assert_eq!(output(run(&pinned, &["init"]))["ok"], true);
+    assert_eq!(output(run(&copy, &["init"]))["ok"], true);
+    let pin = temp.path().join("allowed-workspaces");
+    std::fs::write(&pin, format!("{}\n", pinned.display())).unwrap();
+    let input = temp.path().join("tool-input.json");
+    std::fs::write(&input, "{}").unwrap();
+    let pinned_call = |root: &Path| {
+        output(
+            Command::new(env!("CARGO_BIN_EXE_job-harness"))
+                .arg("--root")
+                .arg(root)
+                .args(["call", "bootstrap", "--input", input.to_str().unwrap()])
+                .env("XDG_CONFIG_HOME", temp.path().join("host-settings"))
+                .env("JOB_HARNESS_WORKSPACE_PIN", &pin)
+                .output()
+                .unwrap(),
+        )
+    };
+    assert_eq!(pinned_call(&pinned)["ok"], true);
+    let refused = pinned_call(&copy);
+    assert_eq!(
+        refused["error"]["code"], "workspace_not_pinned",
+        "{refused}"
     );
 }

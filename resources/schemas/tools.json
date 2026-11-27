@@ -3974,7 +3974,7 @@
     }
   },
   "begin_submission": {
-    "description": "Mark one attempt submitting immediately before the external Submit. A crash now requires outcome reconciliation.",
+    "description": "Mark one attempt submitting immediately before the external Submit. Refused with permission_denied unless config permissions allow the channel (auto_apply_portal for portal, auto_send_first_contact_email for email channels). A crash now requires outcome reconciliation.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -14433,7 +14433,7 @@
     }
   },
   "begin_mail_archive": {
-    "description": "Begin an explicitly human-confirmed mail archive once after fresh host readback. Returns a one-shot permit only for the selected unchanged targets; the host performs the mail action and records its outcome through daily_update. Never batch or blindly retry this boundary.",
+    "description": "Begin an explicitly human-confirmed mail archive once after fresh host readback. Refused with permission_denied unless config permissions.auto_archive_mail is true. Returns a one-shot permit only for the selected unchanged targets; the host performs the mail action and records its outcome through daily_update. Never batch or blindly retry this boundary.",
     "inputSchema": {
       "type": "object",
       "properties": {

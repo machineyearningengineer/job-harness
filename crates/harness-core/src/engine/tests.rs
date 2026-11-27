@@ -6,7 +6,7 @@ fn fixture() -> tempfile::TempDir {
     }
     fs::write(
         dir.path().join("config/career-ledger.json"),
-        r#"{"schema_version":1,"timezone":"UTC","primary_cv":"output/cv.pdf"}"#,
+        r#"{"schema_version":1,"timezone":"UTC","primary_cv":"output/cv.pdf","permissions":{"auto_apply_portal":true}}"#,
     )
     .unwrap();
     fs::write(dir.path().join("applications/acme-engineer-123.md"),"# Acme — Senior Engineer\n\n- Stage: saved\n- Source URL: https://jobs.example.com/acme/123?utm_source=old\n").unwrap();
@@ -48,7 +48,7 @@ fn prepare(h: &Engine, run: &str, key: &str) -> Value {
 fn set_daily_budget(h: &Engine, limit: Value) {
     fs::write(
         h.root.join("config/career-ledger.json"),
-        json!({"schema_version":1,"timezone":"UTC","primary_cv":"output/cv.pdf","max_daily_submissions":limit}).to_string(),
+        json!({"schema_version":1,"timezone":"UTC","primary_cv":"output/cv.pdf","max_daily_submissions":limit,"permissions":{"auto_apply_portal":true}}).to_string(),
     )
     .unwrap();
 }
@@ -1604,5 +1604,178 @@ fn preparation_requires_a_frozen_job_ad_or_an_explicit_reason() {
     assert_eq!(
         prepared["packet"]["vacancy_unavailable"],
         "Recruiter email with no written spec"
+    );
+}
+
+fn write_settings(h: &Engine, extra: Value) {
+    let mut settings = json!({"schema_version":1,"timezone":"UTC","primary_cv":"output/cv.pdf"});
+    for (key, value) in extra.as_object().unwrap() {
+        settings[key] = value.clone();
+    }
+    fs::write(
+        h.root.join("config/career-ledger.json"),
+        settings.to_string(),
+    )
+    .unwrap();
+}
+
+#[test]
+fn begin_needs_the_config_permission_for_its_channel() {
+    let dir = fixture();
+    let h = Engine::open(dir.path()).unwrap();
+    let run = start(&h, 2);
+    let prepared = prepare(&h, &run, "prepare");
+    let begin = json!({"attempt_id":prepared["attempt_id"],"idempotency_key":"begin"});
+    for settings in [
+        json!({}),
+        json!({"permissions":{}}),
+        json!({"permissions":{"auto_apply_portal":false,"auto_send_first_contact_email":true}}),
+    ] {
+        write_settings(&h, settings);
+        let before = crate::state::load(dir.path()).unwrap();
+        let refused = h.call("begin_submission", &begin);
+        assert_eq!(refused["error"]["code"], "permission_denied", "{refused}");
+        assert_eq!(before, crate::state::load(dir.path()).unwrap());
+    }
+    // Portal permission does not cover sending a first-contact email.
+    write_settings(&h, json!({"permissions":{"auto_apply_portal":true}}));
+    call(
+        &h,
+        "cancel_reservation",
+        json!({"attempt_id":prepared["attempt_id"],"summary":"Switch channel","idempotency_key":"cancel"}),
+    );
+    let email = call(
+        &h,
+        "prepare_application",
+        json!({"run_id":run,"record":"applications/acme-engineer-123.md","company":"Acme","vacancy_url":"https://jobs.example.com/acme/123","source":"employer","posting_id":"123","cv_path":"output/cv.pdf","answers_path":"applications/answers.json","vacancy_text_path":"applications/vacancy.md","channel":"direct_email","idempotency_key":"email"}),
+    );
+    let refused = h.call(
+        "begin_submission",
+        &json!({"attempt_id":email["attempt_id"],"idempotency_key":"begin-email"}),
+    );
+    assert_eq!(refused["error"]["code"], "permission_denied", "{refused}");
+    write_settings(
+        &h,
+        json!({"permissions":{"auto_apply_portal":true,"auto_send_first_contact_email":true}}),
+    );
+    assert_eq!(
+        call(
+            &h,
+            "begin_submission",
+            json!({"attempt_id":email["attempt_id"],"idempotency_key":"begin-email"})
+        )["ready_for_single_submit"],
+        true
+    );
+}
+
+#[test]
+fn excluded_ats_and_avoided_employers_are_refused_at_prepare_and_begin() {
+    let dir = fixture();
+    fs::write(dir.path().join("applications/acme-workday-9.md"), "# Acme — Platform Engineer\n\n- Stage: saved\n- Source URL: https://acme.wd3.myworkdayjobs.com/en-US/careers/job/9\n").unwrap();
+    let h = Engine::open(dir.path()).unwrap();
+    write_settings(
+        &h,
+        json!({"permissions":{"auto_apply_portal":true},"discovery":{"exclude_ats":["Workday"]}}),
+    );
+    let run = start(&h, 2);
+    let refused = h.call(
+        "prepare_application",
+        &json!({"run_id":run,"record":"applications/acme-workday-9.md","company":"Acme","vacancy_url":"https://acme.wd3.myworkdayjobs.com/en-US/careers/job/9","source":"employer","cv_path":"output/cv.pdf","answers_path":"applications/answers.json","vacancy_text_path":"applications/vacancy.md","idempotency_key":"workday"}),
+    );
+    assert_eq!(refused["error"]["code"], "excluded_by_filters", "{refused}");
+    // A filter added after reservation still stops the begin.
+    let prepared = prepare(&h, &run, "prepare");
+    write_settings(
+        &h,
+        json!({"permissions":{"auto_apply_portal":true},"discovery":{"avoid_list":["ACME"]}}),
+    );
+    let refused = h.call(
+        "begin_submission",
+        &json!({"attempt_id":prepared["attempt_id"],"idempotency_key":"begin"}),
+    );
+    assert_eq!(refused["error"]["code"], "excluded_by_filters", "{refused}");
+}
+
+#[test]
+fn same_employer_and_role_on_another_url_is_a_duplicate() {
+    let dir = fixture();
+    fs::write(
+        dir.path().join("applications/acme-senior-engineer-linkedin.md"),
+        "# Acme — Senior  engineer\n\n<!-- tracking\n{\"stage\":\"applied\",\"checked\":\"2026-10-12\",\"next_action\":\"Wait\",\"company\":\"Acme\",\"vacancy_url\":\"https://www.linkedin.com/jobs/view/42\"}\n-->\n",
+    )
+    .unwrap();
+    let h = Engine::open(dir.path()).unwrap();
+    let run = start(&h, 1);
+    let refused = h.call(
+        "prepare_application",
+        &json!({"run_id":run,"record":"applications/acme-engineer-123.md","company":"Acme","vacancy_url":"https://jobs.example.com/acme/123","source":"employer","posting_id":"123","cv_path":"output/cv.pdf","answers_path":"applications/answers.json","vacancy_text_path":"applications/vacancy.md","idempotency_key":"prepare"}),
+    );
+    assert_eq!(refused["error"]["code"], "duplicate_blocked", "{refused}");
+    // A closed earlier attempt (e.g. an expired posting) does not block a new one.
+    fs::write(
+        dir.path().join("applications/acme-senior-engineer-linkedin.md"),
+        "# Acme — Senior Engineer\n\n<!-- tracking\n{\"stage\":\"closed\",\"outcome\":\"expired\",\"checked\":\"2026-10-12\",\"next_action\":\"None\",\"company\":\"Acme\",\"vacancy_url\":\"https://www.linkedin.com/jobs/view/42\"}\n-->\n",
+    )
+    .unwrap();
+    prepare(&h, &run, "prepare");
+}
+
+#[test]
+fn no_tool_can_write_configuration_or_outside_the_workspace() {
+    let dir = fixture();
+    let h = Engine::open(dir.path()).unwrap();
+    let config = fs::read(dir.path().join("config/career-ledger.json")).unwrap();
+    let run = start(&h, 1);
+    for record in [
+        "config/career-ledger.json",
+        "config/career-ledger.md",
+        "applications/../config/career-ledger.md",
+        "/etc/job-harness/allowed-workspaces",
+        "../outside.md",
+    ] {
+        for tool in ["update_application", "record_event"] {
+            let result = h.call(
+                tool,
+                &json!({"run_id":run,"kind":"status_updated","record":record,"tracking":{"stage":"saved"},"summary":"Attempted config write","evidence":["applications/approved-answers.md"],"idempotency_key":format!("{tool}:{record}")}),
+            );
+            assert_eq!(result["ok"], false, "{tool} {record}: {result}");
+        }
+        let result = h.call(
+            "create_application",
+            &json!({"run_id":run,"record":record,"company":"X","role":"Y","vacancy_url":"https://x.example/1","source":"employer","fit_reason":"x","evidence":["applications/approved-answers.md"],"idempotency_key":format!("create:{record}")}),
+        );
+        assert_eq!(result["ok"], false, "create {record}: {result}");
+        let result = h.call(
+            "save_receipt",
+            &json!({"run_id":run,"path":record,"idempotency_key":format!("receipt:{record}")}),
+        );
+        assert_eq!(result["ok"], false, "receipt {record}: {result}");
+    }
+    assert_eq!(
+        config,
+        fs::read(dir.path().join("config/career-ledger.json")).unwrap()
+    );
+    assert!(!dir.path().join("config/career-ledger.md").exists());
+}
+
+#[test]
+fn a_host_pin_refuses_every_other_workspace() {
+    let dir = fixture();
+    let copy = fixture();
+    let pins = tempfile::tempdir().unwrap();
+    let pin = pins.path().join("allowed-workspaces");
+    let root = fs::canonicalize(dir.path()).unwrap();
+    let copy_root = fs::canonicalize(copy.path()).unwrap();
+    check_workspace_pin(&root, &pin).unwrap(); // no pin file: no restriction
+    fs::write(&pin, format!("# pinned\n{}\n", dir.path().display())).unwrap();
+    check_workspace_pin(&root, &pin).unwrap();
+    assert_eq!(
+        check_workspace_pin(&copy_root, &pin).unwrap_err().code,
+        "workspace_not_pinned"
+    );
+    fs::write(&pin, "").unwrap();
+    assert_eq!(
+        check_workspace_pin(&root, &pin).unwrap_err().code,
+        "workspace_not_pinned"
     );
 }
