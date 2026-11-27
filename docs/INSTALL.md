@@ -18,6 +18,10 @@
 
 Manual archives and `SHA256SUMS` for macOS (`aarch64`/`x86_64`), Linux (`aarch64`/`x86_64`), and Windows (`x86_64`) live on [GitHub Releases](https://github.com/machineyearningengineer/job-harness/releases).
 
+## Update
+
+Re-run the same one-line installer; it replaces the binary in place. To run a ledger on an always-on Linux machine, see [LINUX-SERVER.md](LINUX-SERVER.md).
+
 ## Workspace setup
 
 Keep your private career workspace outside any software checkout:

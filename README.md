@@ -113,6 +113,9 @@ Read https://raw.githubusercontent.com/machineyearningengineer/job-harness/main/
 # macOS / Linux
 curl -fsSL https://raw.githubusercontent.com/machineyearningengineer/job-harness/main/scripts/get.sh | sh
 
+# or with Homebrew (macOS / Linux); desktop app: brew install --cask machineyearningengineer/tap/job-harness
+brew install machineyearningengineer/tap/job-harness
+
 # Initialize a private workspace & print MCP config
 jh setup --workspace "$HOME/Career/workspace"
 jh --root "$HOME/Career/workspace" connect mcp
@@ -163,6 +166,7 @@ All technical specifications, connector guides, and contracts are organized unde
 | **Architecture & invariants** | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) |
 | **Design & writing principles** | [docs/DESIGN-PRINCIPLES.md](docs/DESIGN-PRINCIPLES.md) |
 | **Agent setup & installation** | [docs/AGENT-SETUP.md](docs/AGENT-SETUP.md) · [docs/INSTALL.md](docs/INSTALL.md) |
+| **Run on a Linux server (systemd, git sync, SSH)** | [docs/LINUX-SERVER.md](docs/LINUX-SERVER.md) |
 | **Desktop workbench & remote sync** | [apps/desktop/README.md](apps/desktop/README.md) |
 | **Daily workflow, CVs & backups** | [resources/guides/career-operations.md](resources/guides/career-operations.md) · [docs/CV.md](docs/CV.md) · [docs/BUNDLES.md](docs/BUNDLES.md) |
 | **v2 tool contract & development** | [resources/guides/job-harness-contract.md](resources/guides/job-harness-contract.md) · [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) · [CONTRIBUTING.md](CONTRIBUTING.md) |

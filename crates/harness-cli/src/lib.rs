@@ -454,6 +454,12 @@ async fn execute(cli: Cli) -> anyhow::Result<Option<Value>> {
             }));
         }
         Command::Configure { workspace } => return Ok(Some(success(host::configure(&workspace)?))),
+        Command::Service { action } => {
+            return Ok(Some(success(server::service(
+                || host::resolve(cli.root),
+                action,
+            )?)));
+        }
         Command::Open {
             ssh,
             port,
@@ -703,11 +709,11 @@ async fn execute(cli: Cli) -> anyhow::Result<Option<Value>> {
         Command::Context { action } => context::execute(&root, action).await?,
         Command::Secret { action } => handle_secret_cmd(action)?,
         Command::Sync => server::sync(&root)?,
-        Command::Service { action } => server::service(&root, action)?,
         Command::Schemas { .. }
         | Command::ConfigSchema { .. }
         | Command::Configure { .. }
-        | Command::Open { .. } => {
+        | Command::Open { .. }
+        | Command::Service { .. } => {
             unreachable!()
         }
     };
@@ -808,6 +814,7 @@ fn handle_secret_cmd(action: SecretCmd) -> anyhow::Result<Value> {
     }
 }
 
+#[cfg_attr(not(unix), allow(unused_variables))]
 fn read_secret_line(hidden: bool) -> anyhow::Result<String> {
     let mut line = String::new();
     #[cfg(not(unix))]

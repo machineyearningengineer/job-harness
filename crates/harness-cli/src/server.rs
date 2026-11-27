@@ -145,7 +145,11 @@ fn systemctl(args: &[&str]) -> anyhow::Result<String> {
     )
 }
 
-pub fn service(root: &Path, action: ServiceCommand) -> anyhow::Result<Value> {
+/// `root` is resolved only for `install`, so `uninstall` works without a workspace.
+pub fn service(
+    root: impl FnOnce() -> anyhow::Result<PathBuf>,
+    action: ServiceCommand,
+) -> anyhow::Result<Value> {
     if !cfg!(target_os = "linux") {
         return Err(fail(
             "service_failed",
@@ -155,7 +159,7 @@ pub fn service(root: &Path, action: ServiceCommand) -> anyhow::Result<Value> {
     let dir = unit_dir()?;
     match action {
         ServiceCommand::Install { port } => {
-            let root = root.canonicalize()?;
+            let root = root()?.canonicalize()?;
             // Refuse a ledger this binary cannot serve before anything is written.
             state::load_for_read(Engine::open(&root)?.root())?;
             let binary = std::env::current_exe()?.canonicalize()?;
