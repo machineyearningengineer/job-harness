@@ -32,6 +32,7 @@ export interface ToolArguments {
   "preview_packet": { "packet_id": string; };
   "propose_note": { "note_id": string; "expected_source_sha256": string; "items": Array<{ "id": string; "kind": "summary" | "addition" | "next_step"; "text": string; "citations": Array<{ "path": string; "sha256": string; "start_line": number; "end_line": number; }>; }>; "questions"?: Array<string>; "idempotency_key": string; };
   "query_batch": { "steps": Array<{ "id": string; "tool": string; "arguments": Record<string, JsonValue>; }>; };
+  "read_artifact": { "path": string; };
   "read_record": { "path": string; };
   "rebuild_pipeline": { "idempotency_key": string; };
   "reconcile_tracker": { "offset"?: number; "limit"?: number; };
@@ -40,6 +41,7 @@ export interface ToolArguments {
   "reserve_submission": { "run_id": string; "packet_id": string; "idempotency_key": string; };
   "review_note": { "note_id": string; "proposal_id"?: string; "include_original"?: boolean; };
   "review_queue": { "offset"?: number; "limit"?: number; "mail_observations_path"?: string; };
+  "save_artifact": { "name": string; "content_base64": string; "idempotency_key": string; };
   "save_receipt": { "run_id": string; "path": string; "idempotency_key": string; };
   "search_workspace": { "query": string; "limit"?: number; };
   "start_run": { "operation": "review_inbox" | "tidy_inbox" | "discover" | "apply" | "schedule" | "prepare_interview" | "update_knowledge" | "reconcile" | "daily_check" | "daily_update"; "scope": { "sources"?: Array<string>; "max_submissions"?: number; "max_attempts"?: number; "max_roles"?: number; "dry_run"?: boolean; "since"?: string; "until"?: string; "query"?: string; "company"?: string; "record"?: string; }; "user_request": string; "idempotency_key": string; };

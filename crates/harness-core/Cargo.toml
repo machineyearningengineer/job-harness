@@ -24,6 +24,7 @@ unicode-casefold.workspace = true
 zip.workspace = true
 rusqlite.workspace = true
 jsonschema.workspace = true
+base64 = "0.23"
 
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true

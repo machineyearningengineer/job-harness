@@ -108,13 +108,13 @@ fn unit_word(path: &Path) -> String {
     format!("\"{escaped}\"")
 }
 
-pub fn units(binary: &Path, root: &Path, port: u16) -> [(&'static str, String); 3] {
-    let (bin, root) = (unit_word(binary), unit_word(root));
+pub fn units(binary: &Path, root: &Path, port: u16, token: &Path) -> [(&'static str, String); 3] {
+    let (bin, root, token) = (unit_word(binary), unit_word(root), unit_word(token));
     [
         (
             UNITS[0],
             format!(
-                "[Unit]\nDescription=Job Harness ledger server on 127.0.0.1:{port}\n\n[Service]\nExecStart={bin} --root {root} serve --bind 127.0.0.1:{port}\nRestart=on-failure\nRestartSec=10\n\n[Install]\nWantedBy=default.target\n"
+                "[Unit]\nDescription=Job Harness ledger server on 127.0.0.1:{port}\n\n[Service]\nEnvironment=JOB_HARNESS_SERVE_TOKEN_FILE={token}\nExecStart={bin} --root {root} serve --bind 127.0.0.1:{port}\nRestart=on-failure\nRestartSec=10\n\n[Install]\nWantedBy=default.target\n"
             ),
         ),
         (
@@ -130,12 +130,30 @@ pub fn units(binary: &Path, root: &Path, port: u16) -> [(&'static str, String); 
     ]
 }
 
-fn unit_dir() -> anyhow::Result<PathBuf> {
-    let config = std::env::var_os("XDG_CONFIG_HOME")
+fn config_dir() -> anyhow::Result<PathBuf> {
+    std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
-        .ok_or_else(|| fail("service_failed", "HOME is not set"))?;
-    Ok(config.join("systemd/user"))
+        .ok_or_else(|| fail("service_failed", "HOME is not set"))
+}
+/// Keep an existing token so clients stay configured; otherwise write a new owner-only one.
+fn ensure_token(path: &Path) -> anyhow::Result<()> {
+    if path.is_file() {
+        return Ok(());
+    }
+    use std::io::{Read, Write};
+    let mut bytes = [0u8; 24];
+    std::fs::File::open("/dev/urandom")?.read_exact(&mut bytes)?;
+    let token: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+    std::fs::create_dir_all(path.parent().unwrap_or(Path::new(".")))?;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    options
+        .open(path)?
+        .write_all(format!("{token}\n").as_bytes())?;
+    Ok(())
 }
 
 fn systemctl(args: &[&str]) -> anyhow::Result<String> {
@@ -156,15 +174,17 @@ pub fn service(
             "jh service manages systemd user units and runs on Linux only.",
         ));
     }
-    let dir = unit_dir()?;
+    let dir = config_dir()?.join("systemd/user");
     match action {
         ServiceCommand::Install { port } => {
             let root = root()?.canonicalize()?;
             // Refuse a ledger this binary cannot serve before anything is written.
             state::load_for_read(Engine::open(&root)?.root())?;
             let binary = std::env::current_exe()?.canonicalize()?;
+            let token = config_dir()?.join("job-harness/serve-token");
+            ensure_token(&token)?;
             std::fs::create_dir_all(&dir)?;
-            for (name, text) in units(&binary, &root, port) {
+            for (name, text) in units(&binary, &root, port, &token) {
                 std::fs::write(dir.join(name), text)?;
             }
             systemctl(&["daemon-reload"])?;
@@ -173,9 +193,10 @@ pub fn service(
             systemctl(&["restart", UNITS[0], UNITS[2]])?;
             let user = std::env::var("USER").unwrap_or_else(|_| "$USER".into());
             Ok(json!({
-                "units": dir, "workspace": root, "url": format!("http://127.0.0.1:{port}"),
+                "units": dir, "workspace": root, "url": format!("http://127.0.0.1:{port}"), "token_file": token,
                 "next": [
-                    format!("Check: curl -fsS http://127.0.0.1:{port}/v1/health"),
+                    format!("Check: curl -fsS -H \"Authorization: Bearer $(cat {})\" http://127.0.0.1:{port}/v1/health", token.display()),
+                    format!("Point agents on this server at it, without file access: jh configure --remote http://127.0.0.1:{port} --token-file {}", token.display()),
                     format!("Keep services running after logout (needs root): sudo loginctl enable-linger {user}"),
                     format!("Optional, make ledger config read-only (needs root; undo with -i): sudo chattr -R +i {}", root.join("config").display()),
                 ]
@@ -202,7 +223,13 @@ fn listening(addr: SocketAddr) -> bool {
 }
 
 /// Tunnel 127.0.0.1:PORT to the same port on an SSH host (unless already open) and start the desktop app.
-pub fn open(ssh: &str, port: u16, identity: Option<&Path>) -> anyhow::Result<Value> {
+/// The token reaches the app as a file path, never as an argument or a logged value.
+pub fn open(
+    ssh: &str,
+    port: u16,
+    identity: Option<&Path>,
+    token_file: Option<&Path>,
+) -> anyhow::Result<Value> {
     let addr = SocketAddr::from(([127, 0, 0, 1], port));
     let tunnel = !listening(addr);
     if tunnel {
@@ -245,6 +272,9 @@ pub fn open(ssh: &str, port: u16, identity: Option<&Path>) -> anyhow::Result<Val
         command.args(["--remote", &url]);
         command
     };
+    if let Some(file) = token_file {
+        app.arg("--token-file").arg(file.canonicalize()?);
+    }
     app.stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
@@ -275,7 +305,11 @@ mod tests {
             Path::new("/opt/jh bin/job-harness"),
             Path::new("/data/100% $ledger"),
             7555,
+            Path::new("/home/u/.config/job-harness/serve-token"),
         );
+        assert!(serve.1.contains(
+            "Environment=JOB_HARNESS_SERVE_TOKEN_FILE=\"/home/u/.config/job-harness/serve-token\"\n"
+        ));
         assert_eq!(serve.0, "job-harness.service");
         assert!(serve.1.contains(
             "ExecStart=\"/opt/jh bin/job-harness\" --root \"/data/100%% $$ledger\" serve --bind 127.0.0.1:7555\n"

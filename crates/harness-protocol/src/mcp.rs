@@ -1,5 +1,5 @@
 //! Official Rust MCP SDK over local stdio, with compact version 2 envelopes.
-use crate::{FOCUSED_TOOLS, deferred};
+use crate::{FOCUSED_TOOLS, deferred, remote::Client};
 use harness_core::Engine;
 use rmcp::{
     ErrorData, RoleServer, ServerHandler, ServiceExt,
@@ -14,9 +14,16 @@ use std::{path::Path, sync::Arc};
 
 const INSTRUCTIONS: &str = "First call bootstrap once per session (do not re-read guides on simple follow-ups). Never read applications/pipeline.md or pipeline.json directly; use query_batch or read_record instead. For single-role stage moves or archiving, call update_application directly (it rebuilds the pipeline automatically; skip reconcile_tracker). Load other specialized schemas with inspect_tools(names=[...], include_schemas=true) and batch related local work. Canonical vacancy records and sourced answers control facts. A run or capability does not grant authority. Host connectors own browser, email, calendar and credentials. Freeze/reserve, begin once, submit externally once, finish with verified evidence. Never repeat a submitting or outcome_unknown attempt. These tools only mutate local records; they cannot submit forms, send mail or book meetings.";
 
+/// Where tool calls run: this process's ledger, or a `jh serve` (remote mode).
+#[derive(Clone)]
+pub enum Backend {
+    Local(Arc<Engine>),
+    Remote(Client),
+}
+
 #[derive(Clone)]
 pub struct McpServer {
-    engine: Arc<Engine>,
+    backend: Backend,
     tools: Arc<Vec<Tool>>,
     catalog: Arc<Vec<String>>,
     focused: bool,
@@ -29,6 +36,15 @@ impl McpServer {
     }
     pub fn with_policy(
         root: &Path,
+        profile: &str,
+        specs: &Value,
+        coordination_only: bool,
+    ) -> anyhow::Result<Self> {
+        let engine = Backend::Local(Arc::new(Engine::open(root)?));
+        Self::with_backend(engine, profile, specs, coordination_only)
+    }
+    pub fn with_backend(
+        backend: Backend,
         profile: &str,
         specs: &Value,
         coordination_only: bool,
@@ -59,7 +75,7 @@ impl McpServer {
             tools.push(serde_json::from_value(entry)?);
         }
         Ok(Self {
-            engine: Arc::new(Engine::open(root)?),
+            backend,
             tools: Arc::new(tools),
             catalog: Arc::new(catalog),
             focused: profile == "focused",
@@ -75,7 +91,13 @@ impl McpServer {
         {
             deferred(name)
         } else {
-            self.engine.call(name, arguments)
+            match &self.backend {
+                Backend::Local(engine) => engine.call(name, arguments),
+                // Callers run this on a blocking thread inside the runtime.
+                Backend::Remote(client) => {
+                    tokio::runtime::Handle::current().block_on(client.call(name, arguments))
+                }
+            }
         }
     }
 }
@@ -134,12 +156,12 @@ impl ServerHandler for McpServer {
 }
 
 pub async fn serve(
-    root: &Path,
+    backend: Backend,
     profile: &str,
     specs: &Value,
     coordination_only: bool,
 ) -> anyhow::Result<()> {
-    let service = McpServer::with_policy(root, profile, specs, coordination_only)?
+    let service = McpServer::with_backend(backend, profile, specs, coordination_only)?
         .serve(rmcp::transport::stdio())
         .await?;
     service.waiting().await?;

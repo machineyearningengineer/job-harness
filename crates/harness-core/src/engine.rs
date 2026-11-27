@@ -408,6 +408,7 @@ impl Engine {
                 args.get("scope").cloned().unwrap_or(json!({})),
             ),
             "read_record" => self.read_record(s(args, "path")?),
+            "read_artifact" => self.read_artifact(s(args, "path")?),
             "find_application" => self.find_application(args),
             "suggest_meeting_times" => {
                 crate::scheduling::suggest(args, &self.settings()?, chrono::Utc::now())
@@ -446,6 +447,7 @@ impl Engine {
                     json!({"run_id":args["run_id"],"artifact":self.copy_artifact(s(args,"path")?,"receipts")?}),
                 )
             }
+            "save_artifact" => self.save_artifact(args),
             "prepare_packet" => self.prepare_packet(args, state),
             "get_packet" => Ok(
                 json!({"packet_id":args["packet_id"],"packet":self.packet(s(args,"packet_id")?)?}),

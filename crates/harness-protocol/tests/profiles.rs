@@ -1,5 +1,8 @@
 use harness_core::{contracts, workspace};
-use job_harness_protocol::{FOCUSED_TOOLS, mcp::McpServer};
+use job_harness_protocol::{
+    FOCUSED_TOOLS,
+    mcp::{Backend, McpServer},
+};
 use serde_json::{Value, json};
 
 #[test]
@@ -54,4 +57,30 @@ fn focused_profile_defers_specialized_tools_with_actionable_next_step() {
             "tool_denied"
         );
     }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn remote_backend_applies_the_same_profile_through_jh_serve() {
+    let temp = tempfile::tempdir().unwrap();
+    workspace::initialize(temp.path()).unwrap();
+    let token = "0123456789abcdef0123".to_owned();
+    let (app, _watcher) = job_harness_protocol::remote::router(temp.path(), token.clone()).unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move { axum::serve(listener, app).await });
+    let client = job_harness_protocol::remote::Client::new(&url, token).unwrap();
+    let specs = Value::Object(contracts::specs().clone());
+    let server = McpServer::with_backend(Backend::Remote(client), "focused", &specs, true).unwrap();
+    let (boot, deferred, denied) = tokio::task::spawn_blocking(move || {
+        (
+            server.invoke("bootstrap", &json!({})),
+            server.invoke("find_application", &json!({})),
+            server.invoke("begin_submission", &json!({})),
+        )
+    })
+    .await
+    .unwrap();
+    assert_eq!(boot["ok"], true, "{boot}");
+    assert_eq!(deferred["error"]["code"], "deferred_tool");
+    assert_eq!(denied["error"]["code"], "tool_denied");
 }

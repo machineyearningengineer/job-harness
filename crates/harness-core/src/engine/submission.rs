@@ -325,6 +325,11 @@ impl Engine {
             .and_then(|x| x.to_str())
             .unwrap_or_default()
             .to_ascii_lowercase();
+        self.store_artifact(&bytes, &ext, folder, source)
+    }
+    /// Content-addressed and immutable: the same bytes always land at the same path.
+    fn store_artifact(&self, bytes: &[u8], ext: &str, folder: &str, source: &str) -> Result<Value> {
+        let sha = domain::digest(bytes);
         let rel = format!("applications/operations/{folder}/{sha}.{ext}");
         let target = self.safe_path(
             &rel,
@@ -338,9 +343,45 @@ impl Engine {
             ));
         }
         if !target.exists() {
-            storage::atomic_write(&target, &bytes)?;
+            storage::atomic_write(&target, bytes)?;
         }
         Ok(json!({"path":rel,"sha256":sha,"original_path":source}))
+    }
+    /// For an agent without file access: save supplied bytes (a job ad, answers, a
+    /// screenshot) where the path-taking tools can use them. Nothing is overwritten.
+    pub(super) fn save_artifact(&self, args: &Value) -> Result<Value> {
+        use base64::Engine as _;
+        let name = s(args, "name")?;
+        let ext = Path::new(name)
+            .extension()
+            .and_then(|x| x.to_str())
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        if !["pdf", "md", "txt", "json", "jpg", "png"].contains(&ext.as_str()) {
+            return Err(Error::new(
+                "invalid_arguments",
+                "Name the file .pdf, .md, .txt, .json, .jpg or .png",
+            ));
+        }
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(s(args, "content_base64")?)
+            .map_err(|_| Error::new("invalid_arguments", "content_base64 is not base64"))?;
+        if bytes.len() > 5_000_000 {
+            return Err(Error::new("invalid_arguments", "Artifact exceeds 5 MB"));
+        }
+        self.store_artifact(&bytes, &ext, "uploads", name)
+    }
+    /// The bytes of a saved artifact, such as a frozen CV to upload, for an agent without file access.
+    pub(super) fn read_artifact(&self, rel: &str) -> Result<Value> {
+        use base64::Engine as _;
+        let bytes =
+            fs::read(self.artifact_path(rel, &["pdf", "md", "txt", "json", "jpg", "png"])?)?;
+        if bytes.len() > 10_000_000 {
+            return Err(Error::new("invalid_arguments", "Artifact exceeds 10 MB"));
+        }
+        Ok(
+            json!({"path":rel,"sha256":domain::digest(&bytes),"content_base64":base64::engine::general_purpose::STANDARD.encode(&bytes)}),
+        )
     }
     pub(super) fn prepare_packet(&self, args: &Value, state: &Value) -> Result<Value> {
         let run = self.active_run(state, s(args, "run_id")?)?;

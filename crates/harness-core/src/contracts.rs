@@ -238,7 +238,8 @@ pub fn is_read_only(name: &str) -> Option<bool> {
         | "context_pack"
         | "workflow_check"
         | "daily_check"
-        | "suggest_meeting_times" => Some(true),
+        | "suggest_meeting_times"
+        | "read_artifact" => Some(true),
         "start_run"
         | "begin_mail_archive"
         | "daily_update"
@@ -247,6 +248,7 @@ pub fn is_read_only(name: &str) -> Option<bool> {
         | "update_application"
         | "create_application"
         | "save_receipt"
+        | "save_artifact"
         | "prepare_packet"
         | "reserve_submission"
         | "begin_submission"
