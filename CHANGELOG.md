@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.5 — Desktop chat on the server
+
+- **Chat runs where the agent lives:** opened with `jh open --ssh user@server`, the desktop app's chat runs that server's Hermes over SSH (`ssh -T user@server -- hermes chat ...`, prompt on stdin) instead of a local Hermes. New `jh open --hermes-profile NAME` and `--hermes-path PATH`. Over SSH, chat refuses attachments and does not list past sessions or the fast-mode setting, which live on the server.
+- **No assumed Hermes profile:** without `JOB_HARNESS_HERMES_PROFILE` the app passes no `-p`, so Hermes uses its own active profile, and reads that profile's models and sessions. A hardcoded profile name that no longer existed made chat fail.
+- **`jh open` runs the desktop binary directly** (next to `jh`, then `/Applications/Job Harness.app`), so the app inherits `JOB_HARNESS_SERVE_TOKEN` and two servers can be open at once. With `--identity`, ssh uses only that key.
+
 ## 0.4.4 — Remote mode, hardened
 
 - **`jh serve` takes requests up to 8 MiB**, enough for `save_artifact`'s 5 MB; axum's 2 MiB default refused larger saves. In remote mode, a request the server rejects (HTTP 4xx without an envelope, such as 413) now returns a non-retryable `invalid_arguments` instead of `remote_unavailable`.

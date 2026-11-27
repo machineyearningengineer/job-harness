@@ -229,11 +229,43 @@ fn listening(addr: SocketAddr) -> bool {
 
 /// Tunnel 127.0.0.1:PORT to the same port on an SSH host (unless already open) and start the desktop app.
 /// The token reaches the app as a file path, never as an argument or a logged value.
+/// Which Hermes on the server the desktop app's chat runs.
+pub struct Hermes<'a> {
+    pub profile: Option<&'a str>,
+    pub path: Option<&'a str>,
+}
+
+/// Desktop arguments after `--remote URL`: the token file and, so chat runs on
+/// the server, the SSH target, identity and Hermes.
+fn app_args(
+    ssh: &str,
+    identity: Option<&Path>,
+    token_file: Option<&Path>,
+    hermes: &Hermes,
+) -> anyhow::Result<Vec<std::ffi::OsString>> {
+    let mut args: Vec<std::ffi::OsString> = vec![];
+    if let Some(file) = token_file {
+        args.extend(["--token-file".into(), file.canonicalize()?.into()]);
+    }
+    args.extend(["--ssh".into(), ssh.into()]);
+    if let Some(identity) = identity {
+        args.extend(["--identity".into(), std::path::absolute(identity)?.into()]);
+    }
+    if let Some(profile) = hermes.profile {
+        args.extend(["--hermes-profile".into(), profile.into()]);
+    }
+    if let Some(path) = hermes.path {
+        args.extend(["--hermes-path".into(), path.into()]);
+    }
+    Ok(args)
+}
+
 pub fn open(
     ssh: &str,
     port: u16,
     identity: Option<&Path>,
     token_file: Option<&Path>,
+    hermes: Hermes,
 ) -> anyhow::Result<Value> {
     let addr = SocketAddr::from(([127, 0, 0, 1], port));
     let tunnel = !listening(addr);
@@ -242,7 +274,9 @@ pub fn open(
         command.args(["-f", "-N", "-o", "ExitOnForwardFailure=yes", "-L"]);
         command.arg(format!("127.0.0.1:{port}:127.0.0.1:{port}"));
         if let Some(identity) = identity {
-            command.arg("-i").arg(identity);
+            command
+                .args(["-o", "IdentitiesOnly=yes", "-i"])
+                .arg(identity);
         }
         let status = command
             .arg(ssh)
@@ -262,34 +296,22 @@ pub fn open(
         }
     }
     let url = format!("http://127.0.0.1:{port}");
-    let mut app = if cfg!(target_os = "macos") {
-        let mut command = Command::new("open");
-        command.args(["-a", "Job Harness", "--args", "--remote", &url]);
-        command
-    } else {
-        // Prefer a desktop binary next to this one, then PATH.
-        let sibling = std::env::current_exe()?.with_file_name("job-harness-desktop");
-        let mut command = Command::new(if sibling.is_file() {
-            sibling
-        } else {
-            PathBuf::from("job-harness-desktop")
-        });
-        command.args(["--remote", &url]);
-        command
-    };
-    if let Some(file) = token_file {
-        app.arg("--token-file").arg(file.canonicalize()?);
-    }
+    // Run the desktop binary itself, so it inherits this environment (such as
+    // JOB_HARNESS_SERVE_TOKEN) and two servers can be open at once. Prefer one
+    // next to this binary, then the macOS app bundle, then PATH.
+    let sibling = std::env::current_exe()?.with_file_name("job-harness-desktop");
+    let bundle = PathBuf::from("/Applications/Job Harness.app/Contents/MacOS/job-harness-desktop");
+    let binary = [sibling, bundle]
+        .into_iter()
+        .find(|path| path.is_file())
+        .unwrap_or_else(|| PathBuf::from("job-harness-desktop"));
+    let mut app = Command::new(binary);
+    app.args(["--remote", &url]);
+    app.args(app_args(ssh, identity, token_file, &hermes)?);
     app.stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-    // `open` returns once the app is launched (or not found); the Linux binary keeps running.
-    let started = if cfg!(target_os = "macos") {
-        app.status().map(|status| status.success())
-    } else {
-        app.spawn().map(|_| true)
-    };
-    if !matches!(started, Ok(true)) {
+    if app.spawn().is_err() {
         return Err(fail(
             "open_failed",
             format!(
@@ -466,6 +488,37 @@ mod tests {
             "sync held the ledger lock during git push"
         );
         syncing.join().unwrap().unwrap();
+    }
+
+    #[test]
+    fn open_passes_the_server_and_its_hermes_to_the_app() {
+        let none = Hermes {
+            profile: None,
+            path: None,
+        };
+        assert_eq!(
+            app_args("bot@server", None, None, &none).unwrap(),
+            ["--ssh", "bot@server"]
+        );
+        let named = Hermes {
+            profile: Some("bot"),
+            path: Some("~/.local/bin/hermes"),
+        };
+        let id = std::path::absolute("/keys/id").unwrap();
+        let args = app_args("bot@server", Some(&id), None, &named).unwrap();
+        assert_eq!(
+            args,
+            [
+                "--ssh",
+                "bot@server",
+                "--identity",
+                id.to_str().unwrap(),
+                "--hermes-profile",
+                "bot",
+                "--hermes-path",
+                "~/.local/bin/hermes"
+            ]
+        );
     }
 
     #[test]

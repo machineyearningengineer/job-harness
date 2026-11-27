@@ -103,8 +103,16 @@ appears in a command line.
 
 This starts `ssh -N -L 127.0.0.1:7420:127.0.0.1:7420 user@server` in the background
 unless something already listens on that local port, then launches the desktop app
-with `--remote http://127.0.0.1:7420 --token-file PATH` (on macOS `Job Harness.app`; on Linux
-`job-harness-desktop` next to `jh` or on `PATH`).
+with `--remote http://127.0.0.1:7420 --token-file PATH` (`job-harness-desktop` next to
+`jh`, then `/Applications/Job Harness.app`, then `PATH`). The app inherits this shell's
+environment, so `JOB_HARNESS_SERVE_TOKEN` works in place of `--token-file`.
+
+The app's chat runs Hermes **on the server**, where the agent and its profile live:
+`ssh -T user@server -- hermes chat ...`, with the prompt on stdin. Pass
+`--hermes-profile NAME` for a profile other than the server's active one, and
+`--hermes-path PATH` if `hermes` is not on the login `PATH` or in `~/.local/bin`.
+Over SSH, chat sends no attachments and does not list past sessions or the fast-mode
+setting; those stay on the server.
 
 ## Update
 
@@ -115,7 +123,7 @@ Re-run the installer on the server. It replaces the binary in place and, when
 curl -fsSL https://raw.githubusercontent.com/machineyearningengineer/job-harness/main/scripts/get.sh | sh
 ```
 
-Pin a version with `JOB_HARNESS_VERSION=v0.4.4` before `sh`. If a ledger and the
+Pin a version with `JOB_HARNESS_VERSION=v0.4.5` before `sh`. If a ledger and the
 binary disagree on format, every command says which version the ledger needs and
 how to install it; there is no automatic conversion. Ledgers that still keep
 `applications/operations/state.json` need job-harness 0.2.x.
