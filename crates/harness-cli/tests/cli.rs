@@ -83,7 +83,7 @@ fn imported_pdf_can_be_explicitly_selected_and_frozen_without_weakening_submit_g
     );
     assert_eq!(created["ok"], true, "{created}");
     std::fs::write(root.join("applications/answers.json"), "{\"fixture\":true}").unwrap();
-    let arguments = json!({"run_id":run_id,"record":"applications/example-engineer-123.md","company":"Example","vacancy_url":"https://jobs.example.invalid/example/123","source":"employer","posting_id":"123","cv_path":retained,"answers_path":"applications/answers.json","vacancy_text_unavailable":"Synthetic CLI fixture without a written ad","idempotency_key":"import-packet"});
+    let arguments = json!({"run_id":run_id,"record":"applications/example-engineer-123.md","company":"Example","vacancy_url":"https://jobs.example.invalid/example/123","source":"employer","posting_id":"123","cv_path":retained,"answers_path":"applications/answers.json","vacancy_text_unavailable":"Synthetic CLI fixture without a written ad","job":{"salary":"unknown","location":"London, UK","work_arrangement":"remote","office_days_per_week":0},"idempotency_key":"import-packet"});
     let packet = call(&root, "prepare_packet", arguments.clone());
     assert_eq!(packet["ok"], true, "{packet}");
     let cv = &packet["data"]["packet"]["cv"];
