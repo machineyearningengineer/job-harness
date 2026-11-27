@@ -182,6 +182,8 @@ pub fn router(
     token: Option<String>,
 ) -> anyhow::Result<(Router, Option<RecommendedWatcher>)> {
     let engine = Arc::new(Engine::open(root)?);
+    // Refuse to serve a ledger whose coordinator this binary cannot read.
+    harness_core::state::load_for_read(engine.root())?;
     let revision = Arc::new(AtomicU64::new(1));
     let (tx, _) = broadcast::channel(64);
     let watcher = spawn_watcher(engine.root().to_path_buf(), revision.clone(), tx.clone());

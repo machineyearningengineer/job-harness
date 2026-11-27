@@ -10,6 +10,10 @@ use std::{
 };
 
 pub const DB_REL_PATH: &str = "applications/operations/harness.sqlite";
+/// Coordinator file of job-harness 0.2.x ledgers. Read never; only detected to explain the mismatch.
+const LEGACY_STATE_REL_PATH: &str = "applications/operations/state.json";
+const SCHEMA_VERSION: u64 = 1;
+const INSTALL: &str = "curl -fsSL https://raw.githubusercontent.com/machineyearningengineer/job-harness/main/scripts/get.sh";
 
 fn sqlite_err(err: rusqlite::Error) -> Error {
     Error::new("io_error", format!("SQLite coordinator error: {err}"))
@@ -18,6 +22,15 @@ fn sqlite_err(err: rusqlite::Error) -> Error {
 fn db_path(root: &Path) -> Result<PathBuf> {
     let path = storage::safe_path(root, DB_REL_PATH, &["applications"], &[".sqlite"])?;
     storage::reject_symlink_ancestors(&path)?;
+    if !path.exists() && root.join(LEGACY_STATE_REL_PATH).exists() {
+        return Err(Error::new(
+            "unsupported_layout",
+            format!(
+                "This ledger stores its coordinator in {LEGACY_STATE_REL_PATH}, the job-harness 0.2.x format. job-harness {} needs {DB_REL_PATH}. Open this ledger with job-harness 0.2.0 ({INSTALL} | JOB_HARNESS_VERSION=v0.2.0 sh). There is no automatic conversion; the ledger was not changed.",
+                env!("CARGO_PKG_VERSION")
+            ),
+        ));
+    }
     for suffix in ["", "-wal", "-shm"] {
         let candidate = PathBuf::from(format!("{}{suffix}", path.display()));
         if candidate.is_symlink() {
@@ -271,8 +284,18 @@ fn load_inner(root: &Path, include_all_events: bool) -> Result<Value> {
         let parsed: Value = serde_json::from_str(&v).map_err(|_| invalid())?;
         obj.insert(k, parsed);
     }
-    if !obj.contains_key("schema_version") {
-        return Err(invalid());
+    match obj.get("schema_version").and_then(Value::as_u64) {
+        None => return Err(invalid()),
+        Some(found) if found > SCHEMA_VERSION => {
+            return Err(Error::new(
+                "unsupported_layout",
+                format!(
+                    "This ledger uses coordinator schema {found}, written by a newer job-harness; job-harness {} reads schema {SCHEMA_VERSION}. Update job-harness ({INSTALL} | sh) and retry; the ledger was not changed.",
+                    env!("CARGO_PKG_VERSION")
+                ),
+            ));
+        }
+        Some(_) => {}
     }
 
     let mut runs = Map::new();
@@ -575,6 +598,46 @@ mod tests {
         fs::create_dir_all(root.path().join("applications/operations/packets")).unwrap();
         assert_eq!(load(root.path()).unwrap_err().code, "invalid_state");
         assert!(!root.path().join(DB_REL_PATH).exists());
+    }
+    #[test]
+    fn legacy_state_json_ledger_names_the_version_it_needs() {
+        let root = tempfile::tempdir().unwrap();
+        let legacy = root.path().join(LEGACY_STATE_REL_PATH);
+        fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+        fs::write(&legacy, b"{}").unwrap();
+        for err in [
+            load(root.path()).unwrap_err(),
+            save(
+                root.path(),
+                &json!({"schema_version":1,"runs":{},"attempts":{},"events":[]}),
+            )
+            .unwrap_err(),
+        ] {
+            assert_eq!(err.code, "unsupported_layout");
+            assert!(
+                err.message.contains("JOB_HARNESS_VERSION=v0.2.0"),
+                "{}",
+                err.message
+            );
+        }
+        assert!(!root.path().join(DB_REL_PATH).exists());
+        assert_eq!(fs::read(&legacy).unwrap(), b"{}");
+    }
+    #[test]
+    fn newer_schema_asks_for_an_update_without_writing() {
+        let root = tempfile::tempdir().unwrap();
+        init(root.path()).unwrap();
+        let conn = Connection::open(root.path().join(DB_REL_PATH)).unwrap();
+        conn.execute(
+            "UPDATE meta SET value = '2' WHERE key = 'schema_version'",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+        let err = load(root.path()).unwrap_err();
+        assert_eq!(err.code, "unsupported_layout");
+        assert!(err.message.contains("schema 2"), "{}", err.message);
+        assert!(err.message.contains("get.sh | sh"), "{}", err.message);
     }
     #[test]
     fn sqlite_wal_roundtrip_and_delta_append() {

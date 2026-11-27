@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Existing version tag to build (for example v0.3.0)
+        description: Existing version tag to build (for example v0.4.0)
         type: string
         required: true
       confirm_full_release:
@@ -30,14 +30,21 @@ defaults:
     shell: bash
 jobs:
   source:
-    if: inputs.confirm_full_release
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     env:
       RELEASE_TAG: ${{ inputs.tag }}
+      CONFIRMED: ${{ inputs.confirm_full_release }}
     outputs:
       commit: ${{ steps.identity.outputs.commit }}
     steps:
+      # Fail loudly: a skipped run looks like a release that silently never happened.
+      - name: Require explicit confirmation
+        run: |
+          if [ "$CONFIRMED" != true ]; then
+            printf '%s\n' 'confirm_full_release was not ticked; nothing was built. Re-run with confirm_full_release=true.' >&2
+            exit 1
+          fi
       - name: Validate an existing version tag
         run: |
           if [[ ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
@@ -75,7 +82,6 @@ jobs:
           printf 'commit=%s\n' "$commit" >> "$GITHUB_OUTPUT"
   build:
     needs: source
-    if: inputs.confirm_full_release
     # Each platform validates and links three separate native components.
     timeout-minutes: 90
     strategy:
