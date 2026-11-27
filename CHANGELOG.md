@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.4.2 — The desktop board over a server
 
 - **Desktop shows roles in remote mode:** connected to a `jh serve`, the board was always empty because it listed roles with a blank `find_application` query, which the server refuses. It now reads the server's `applications/pipeline.json`, as the local view does.
 - **`read_artifact` returns files over 750 KB:** its declared output capped `content_base64` at the default one million characters, so larger files failed with `internal_contract_error` despite the documented 10 MB limit.
