@@ -38,7 +38,6 @@ struct State {
     link: Link,
     since: Instant,
     retry_now: bool,
-    master: Option<u32>,
     error: Option<String>,
 }
 
@@ -71,7 +70,6 @@ pub fn open(
             link: Link::Reconnecting,
             since: Instant::now(),
             retry_now: false,
-            master: None,
             error: None,
         }),
         wake: Condvar::new(),
@@ -82,13 +80,13 @@ pub fn open(
     Ok(tunnel)
 }
 
-/// The link after a failed attempt: Offline once down for [`OFFLINE_AFTER`], and it
-/// stays Offline (still retrying) until a connection succeeds.
-fn after_failure(link: Link, how_long: Duration) -> Link {
-    if link == Link::Offline || how_long > OFFLINE_AFTER {
+/// Reconnecting for longer than [`OFFLINE_AFTER`] shows as Offline; it is still
+/// retried until a connection succeeds.
+fn shown(link: Link, down_for: Duration) -> Link {
+    if link == Link::Reconnecting && down_for > OFFLINE_AFTER {
         Link::Offline
     } else {
-        Link::Reconnecting
+        link
     }
 }
 
@@ -105,10 +103,11 @@ impl Tunnel {
         &self.target
     }
 
-    /// The link as the UI shows it, and for how long it has been so.
+    /// The link as the UI shows it, and for how long it has been up or down.
     pub fn link(&self) -> (Link, Duration) {
         let state = self.state.lock().unwrap();
-        (state.link, state.since.elapsed())
+        let how_long = state.since.elapsed();
+        (shown(state.link, how_long), how_long)
     }
 
     pub fn last_error(&self) -> Option<String> {
@@ -274,17 +273,14 @@ impl Tunnel {
             match self.connect() {
                 Ok(mut master) => {
                     attempt = 0;
-                    self.state.lock().unwrap().master = Some(master.id());
                     self.set(Link::Connected, None);
                     self.watch(&mut master);
                     let _ = master.kill();
                     let _ = master.wait();
-                    self.state.lock().unwrap().master = None;
                     self.set(Link::Reconnecting, None);
                 }
                 Err(err) => {
-                    let (link, how_long) = self.link();
-                    self.set(after_failure(link, how_long), Some(err));
+                    self.set(Link::Reconnecting, Some(err));
                     let delay = backoff(attempt, uuid::Uuid::new_v4().as_u128());
                     attempt = attempt.saturating_add(1);
                     let state = self.state.lock().unwrap();
@@ -335,15 +331,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_failed_attempt_turns_offline_after_thirty_seconds_and_stays() {
+    fn reconnecting_shows_as_offline_after_thirty_seconds() {
         let secs = Duration::from_secs;
-        assert_eq!(after_failure(Link::Connected, secs(0)), Link::Reconnecting);
-        assert_eq!(
-            after_failure(Link::Reconnecting, secs(29)),
-            Link::Reconnecting
-        );
-        assert_eq!(after_failure(Link::Reconnecting, secs(31)), Link::Offline);
-        assert_eq!(after_failure(Link::Offline, secs(0)), Link::Offline);
+        assert_eq!(shown(Link::Connected, secs(99)), Link::Connected);
+        assert_eq!(shown(Link::Reconnecting, secs(29)), Link::Reconnecting);
+        assert_eq!(shown(Link::Reconnecting, secs(31)), Link::Offline);
     }
 
     #[test]
