@@ -9,28 +9,11 @@ use std::{
     path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::{
-        Arc, OnceLock,
+        Arc,
         atomic::{AtomicBool, Ordering},
         mpsc::Sender,
     },
 };
-
-/// The server a remote workspace lives on, reached as `jh open --ssh` did. Chat
-/// runs that server's Hermes, where the agent and its profile live.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct SshHost {
-    pub target: String,
-    pub identity: Option<PathBuf>,
-    /// Remote `hermes` path; unset finds it on the login PATH or in ~/.local/bin.
-    pub hermes_path: Option<String>,
-}
-
-static REMOTE_HERMES: OnceLock<(SshHost, Option<String>)> = OnceLock::new();
-
-/// Set once at startup in remote mode: chat runs Hermes on `host` with `profile`.
-pub fn use_remote_hermes(host: SshHost, profile: Option<String>) {
-    let _ = REMOTE_HERMES.set((host, profile));
-}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AgentRuntime {
@@ -38,8 +21,9 @@ pub enum AgentRuntime {
         binary: PathBuf,
         /// `-p` profile; unset uses Hermes's own active profile.
         profile: Option<String>,
-        ssh: Option<SshHost>,
     },
+    /// An ACP agent on the server, through its `jh agent-host` (see `acp`).
+    Remote,
     ClaudeCode {
         binary: PathBuf,
     },
@@ -76,6 +60,14 @@ pub enum StreamEvent {
     Usage {
         total_tokens: u64,
     },
+    /// The agent asks before a tool runs: options are (id, label).
+    Permission {
+        request: String,
+        title: String,
+        options: Vec<(String, String)>,
+    },
+    /// The permission request was answered (here, elsewhere or by timeout).
+    PermissionDone,
     Done,
     Error(String),
 }
@@ -375,12 +367,7 @@ fn hermes_home(profile: Option<&str>) -> PathBuf {
     }
 }
 
-fn shell_quote(word: &str) -> String {
-    format!("'{}'", word.replace('\'', "'\\''"))
-}
-
-/// Hermes's arguments after the binary. `--in` names a local folder, so callers
-/// pass no workspace for a remote Hermes.
+/// Hermes's arguments after the binary.
 fn hermes_args(
     profile: Option<&str>,
     workspace: Option<&Path>,
@@ -429,62 +416,17 @@ fn hermes_args(
     args
 }
 
-/// `ssh` arguments that run `hermes ARGS` on `host`, with the prompt on stdin.
-/// Without an explicit path, a login shell finds `hermes` (a plain `ssh host cmd`
-/// PATH often misses `~/.local/bin`).
-fn ssh_args(host: &SshHost, hermes: &[OsString]) -> Vec<OsString> {
-    let words: Vec<String> = hermes
-        .iter()
-        .map(|word| shell_quote(&word.to_string_lossy()))
-        .collect();
-    let launcher = match host.hermes_path.as_deref() {
-        Some("~") => "\"$HOME\"".to_owned(),
-        Some(path) if path.starts_with("~/") => format!("\"$HOME\"{}", shell_quote(&path[1..])),
-        Some(path) => shell_quote(path),
-        None => format!(
-            "bash -lc {} hermes",
-            shell_quote(
-                "command -v hermes >/dev/null || PATH=\"$HOME/.local/bin:$PATH\"; exec hermes \"$@\""
-            )
-        ),
-    };
-    let mut args: Vec<OsString> = ["-T", "-o", "BatchMode=yes"].map(OsString::from).into();
-    if let Some(identity) = &host.identity {
-        args.extend([
-            "-o".into(),
-            "IdentitiesOnly=yes".into(),
-            "-i".into(),
-            identity.into(),
-        ]);
-    }
-    args.extend([
-        OsString::from(&host.target),
-        "--".into(),
-        std::iter::once(launcher)
-            .chain(words)
-            .collect::<Vec<_>>()
-            .join(" ")
-            .into(),
-    ]);
-    args
-}
-
 impl AgentRuntime {
     /// Every host agent CLI available on this machine, in preference order.
     pub fn detect_all() -> Vec<Self> {
         let mut out = Vec::new();
-        // In remote mode the agent lives on the server; never run a local Hermes there.
-        if let Some((host, profile)) = REMOTE_HERMES.get() {
-            out.push(Self::Hermes {
-                binary: PathBuf::from("hermes"),
-                profile: profile.clone(),
-                ssh: Some(host.clone()),
-            });
+        // In remote mode the agents live on the server, beside the ledger.
+        if crate::acp::enabled() {
+            out.push(Self::Remote);
         } else if let Some(binary) = find_hermes() {
             out.push(Self::Hermes {
                 binary,
                 profile: hermes_profile(),
-                ssh: None,
             });
         }
         if let Some(binary) = which_in_path("claude") {
@@ -537,6 +479,7 @@ impl AgentRuntime {
     pub fn kind(&self) -> &'static str {
         match self {
             Self::Hermes { .. } => "hermes",
+            Self::Remote => "remote",
             Self::ClaudeCode { .. } => "claude",
             Self::Codex { .. } => "codex",
             Self::Pi { .. } => "pi",
@@ -548,6 +491,7 @@ impl AgentRuntime {
     pub fn short_name(&self) -> &str {
         match self {
             Self::Hermes { .. } => "Hermes",
+            Self::Remote => "Agent",
             Self::ClaudeCode { .. } => "Claude",
             Self::Codex { .. } => "Codex",
             Self::Pi { .. } => "Pi",
@@ -570,7 +514,9 @@ impl AgentRuntime {
             }
             Self::Hermes { .. } => format!("jh{root_flag} connect mcp --client hermes"),
             Self::Pi { .. } => format!("jh{root_flag} connect mcp"),
-            Self::Custom { .. } | Self::Unconfigured => format!("jh{root_flag} connect mcp"),
+            Self::Remote | Self::Custom { .. } | Self::Unconfigured => {
+                format!("jh{root_flag} connect mcp")
+            }
         }
     }
 
@@ -602,6 +548,7 @@ impl AgentRuntime {
                 model_route_supports_fast_mode(model, provider)
             }
             Self::Codex { .. } => true,
+            Self::Remote => crate::acp::supports_fast_mode(),
             Self::ClaudeCode { .. } => {
                 let m = opts
                     .model
@@ -617,11 +564,7 @@ impl AgentRuntime {
 
     /// Reads whether Hermes's profile config currently has a fast/priority `service_tier`.
     pub fn read_configured_fast_mode(&self) -> Option<bool> {
-        // A remote Hermes's config is on the server; fast mode is hidden there.
-        let Self::Hermes {
-            profile, ssh: None, ..
-        } = self
-        else {
+        let Self::Hermes { profile, .. } = self else {
             return None;
         };
         let text =
@@ -640,12 +583,7 @@ impl AgentRuntime {
 
     /// Persists Hermes's `agent.service_tier` asynchronously when toggled from the UI.
     pub fn sync_fast_mode(&self, enabled: bool) {
-        if let Self::Hermes {
-            binary,
-            profile,
-            ssh: None,
-        } = self
-        {
+        if let Self::Hermes { binary, profile } = self {
             let bin = binary.clone();
             let prof = profile.clone();
             let tier = if enabled { "priority" } else { "normal" };
@@ -665,10 +603,8 @@ impl AgentRuntime {
     /// Model presets read from the runtime's own config (Hermes, Codex, Pi, Custom) or CLI aliases.
     pub fn model_presets(&self) -> Vec<ModelPreset> {
         match self {
-            Self::Hermes {
-                profile, ssh: None, ..
-            } => hermes_presets(profile.as_deref()),
-            Self::Hermes { .. } => Vec::new(),
+            Self::Hermes { profile, .. } => hermes_presets(profile.as_deref()),
+            Self::Remote => crate::acp::model_presets(),
             Self::ClaudeCode { .. } => ["sonnet", "opus", "haiku"]
                 .into_iter()
                 .map(|m| ModelPreset {
@@ -703,18 +639,10 @@ impl AgentRuntime {
 
     pub fn label(&self) -> String {
         match self {
-            Self::Hermes {
-                profile, ssh: None, ..
-            } => format!("Hermes ({})", hermes_profile_name(profile.as_deref())),
-            Self::Hermes {
-                profile,
-                ssh: Some(host),
-                ..
-            } => format!(
-                "Hermes ({} on {})",
-                profile.as_deref().unwrap_or("active profile"),
-                host.target
-            ),
+            Self::Hermes { profile, .. } => {
+                format!("Hermes ({})", hermes_profile_name(profile.as_deref()))
+            }
+            Self::Remote => crate::acp::label(),
             Self::ClaudeCode { .. } => "Claude Code".into(),
             Self::Codex { .. } => "Codex".into(),
             Self::Pi { .. } => "Pi".into(),
@@ -724,25 +652,24 @@ impl AgentRuntime {
     }
 
     /// True when this runtime maintains a native session store we can list read-only and resume.
-    /// A remote Hermes's sessions are on the server, so they are not listed.
     pub fn supports_sessions(&self) -> bool {
-        matches!(
-            self,
-            Self::Hermes { ssh: None, .. } | Self::ClaudeCode { .. } | Self::Codex { .. }
-        )
+        match self {
+            Self::Remote => crate::acp::supports_sessions(),
+            _ => matches!(
+                self,
+                Self::Hermes { .. } | Self::ClaudeCode { .. } | Self::Codex { .. }
+            ),
+        }
     }
 
     /// Reads the last ~8 recent sessions directly from the host runtime's own store (zero Job Harness DB).
     pub fn list_recent_sessions(&self, workspace: Option<&Path>) -> Vec<HostSession> {
         match self {
-            Self::Hermes {
-                profile, ssh: None, ..
-            } => list_hermes_sessions(profile.as_deref()),
+            Self::Hermes { profile, .. } => list_hermes_sessions(profile.as_deref()),
+            Self::Remote => crate::acp::list_sessions(),
             Self::ClaudeCode { .. } => list_claude_sessions(workspace),
             Self::Codex { .. } => list_codex_sessions(),
-            Self::Hermes { .. } | Self::Pi { .. } | Self::Custom { .. } | Self::Unconfigured => {
-                Vec::new()
-            }
+            Self::Pi { .. } | Self::Custom { .. } | Self::Unconfigured => Vec::new(),
         }
     }
 
@@ -773,15 +700,20 @@ impl AgentRuntime {
     ) {
         let runtime = self.clone();
         std::thread::spawn(move || {
-            if let Err(err) = run_streaming(
-                &runtime,
-                workspace.as_deref(),
-                &prompt,
-                &attachments,
-                &opts,
-                &tx,
-                &cancel,
-            ) {
+            let result = if runtime == Self::Remote {
+                crate::acp::stream_turn(&prompt, &attachments, &opts, &tx, &cancel)
+            } else {
+                run_streaming(
+                    &runtime,
+                    workspace.as_deref(),
+                    &prompt,
+                    &attachments,
+                    &opts,
+                    &tx,
+                    &cancel,
+                )
+            };
+            if let Err(err) = result {
                 let _ = tx.send(StreamEvent::Error(err.to_string()));
             }
             let _ = tx.send(StreamEvent::Done);
@@ -804,40 +736,17 @@ fn run_streaming(
     }
     let mut non_native_files = Vec::new();
     let (mut cmd, json_stream) = match runtime {
-        AgentRuntime::Hermes {
-            binary,
-            profile,
-            ssh,
-        } => {
-            let c = match ssh {
-                None => {
-                    let mut images = Vec::new();
-                    for att in attachments {
-                        if is_image_path(att) {
-                            images.push(att.clone());
-                        } else {
-                            non_native_files.push(att.clone());
-                        }
-                    }
-                    let mut c = Command::new(binary);
-                    c.args(hermes_args(profile.as_deref(), workspace, opts, &images));
-                    c
+        AgentRuntime::Hermes { binary, profile } => {
+            let mut images = Vec::new();
+            for att in attachments {
+                if is_image_path(att) {
+                    images.push(att.clone());
+                } else {
+                    non_native_files.push(att.clone());
                 }
-                Some(host) => {
-                    if !attachments.is_empty() {
-                        bail!(
-                            "Attachments stay on this computer, and Hermes runs on {}. Paste the text into the message instead.",
-                            host.target
-                        );
-                    }
-                    let mut c = Command::new("ssh");
-                    c.args(ssh_args(
-                        host,
-                        &hermes_args(profile.as_deref(), None, opts, &[]),
-                    ));
-                    c
-                }
-            };
+            }
+            let mut c = Command::new(binary);
+            c.args(hermes_args(profile.as_deref(), workspace, opts, &images));
             (c, true)
         }
         AgentRuntime::ClaudeCode { binary } => {
@@ -938,6 +847,7 @@ fn run_streaming(
             non_native_files.extend(attachments.iter().cloned());
             (c, true)
         }
+        AgentRuntime::Remote => unreachable!("remote turns go through acp::stream_turn"),
         AgentRuntime::Unconfigured => {
             bail!(
                 "No host agent runtime detected (Hermes, Claude Code, Codex, or JOB_HARNESS_AGENT_CMD). Install one or run setup from your agent."
@@ -2151,72 +2061,5 @@ mod hermes_command_tests {
         let named = strings(&hermes_args(Some("bot"), None, &opts, &[]));
         assert_eq!(&named[..3], ["-p", "bot", "chat"]);
         assert!(!named.contains(&"--in".to_owned()));
-    }
-
-    #[test]
-    fn a_remote_hermes_runs_over_ssh_with_quoted_arguments() {
-        let host = SshHost {
-            target: "bot@server".into(),
-            identity: Some(PathBuf::from("/keys/id")),
-            hermes_path: None,
-        };
-        let args = strings(&ssh_args(&host, &["-p".into(), "it's me".into()]));
-        assert_eq!(
-            &args[..9],
-            [
-                "-T",
-                "-o",
-                "BatchMode=yes",
-                "-o",
-                "IdentitiesOnly=yes",
-                "-i",
-                "/keys/id",
-                "bot@server",
-                "--"
-            ]
-        );
-        assert!(args[9].starts_with("bash -lc '"), "{}", args[9]);
-        assert!(
-            args[9].ends_with(" hermes '-p' 'it'\\''s me'"),
-            "{}",
-            args[9]
-        );
-        let explicit = SshHost {
-            hermes_path: Some("~/bin/my hermes".into()),
-            identity: None,
-            ..host
-        };
-        let args = strings(&ssh_args(&explicit, &["chat".into()]));
-        assert_eq!(args.len(), 6);
-        assert_eq!(args[5], "\"$HOME\"'/bin/my hermes' 'chat'");
-    }
-
-    /// The remote command survives a real POSIX shell word for word.
-    #[cfg(unix)]
-    #[test]
-    fn the_remote_command_round_trips_through_a_shell() {
-        use std::os::unix::fs::PermissionsExt;
-        let dir = tempfile::tempdir().unwrap();
-        let fake = dir.path().join("hermes");
-        std::fs::write(&fake, "#!/bin/sh\nprintf '%s\\n' \"$@\"\n").unwrap();
-        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let words = ["-p", "a b", "it's", "$HOME", "`x`", "\"q\"", "semi;colon"];
-        let host = SshHost {
-            target: "unused".into(),
-            identity: None,
-            hermes_path: Some(fake.display().to_string()),
-        };
-        let args = ssh_args(&host, &words.map(OsString::from));
-        let out = Command::new("sh")
-            .arg("-c")
-            .arg(args.last().unwrap())
-            .output()
-            .unwrap();
-        let printed: Vec<String> = String::from_utf8(out.stdout)
-            .unwrap()
-            .lines()
-            .map(str::to_owned)
-            .collect();
-        assert_eq!(printed, words);
     }
 }

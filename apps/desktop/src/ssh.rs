@@ -1,7 +1,7 @@
 //! The app's own SSH connection to a server, as T3 Code and Hermes keep theirs: one
-//! OpenSSH ControlMaster that this process starts, watches and restarts. The ledger's
-//! Unix socket is forwarded to a private local socket over it, and commands run
-//! through it without logging in again. OpenSSH brings `~/.ssh/config`, the agent,
+//! OpenSSH ControlMaster that this process starts, watches and restarts. The server's
+//! Unix sockets (the ledger's, the agent host's) are forwarded to private local sockets
+//! over it, and commands run through it without logging in again. OpenSSH brings `~/.ssh/config`, the agent,
 //! ProxyJump and known_hosts with it.
 use std::{
     ffi::OsString,
@@ -25,8 +25,9 @@ const OFFLINE_AFTER: Duration = Duration::from_secs(30);
 pub struct Tunnel {
     target: String,
     identity: Option<PathBuf>,
-    /// The server's `jh serve` socket; `None` until asked, for the `jh service install` one.
-    remote_socket: Mutex<Option<String>>,
+    /// The server sockets to forward, in order; one with a `$` is expanded by the
+    /// server's shell once.
+    sockets: Mutex<Vec<String>>,
     /// Private (0700) folder for the control socket and the forwarded sockets, short
     /// enough for macOS's 104-byte socket path limit.
     dir: PathBuf,
@@ -48,11 +49,17 @@ pub fn tunnel() -> Option<&'static Arc<Tunnel>> {
     TUNNEL.get()
 }
 
-/// Start the one supervised connection for this process.
+/// The `jh service install` ledger socket on the server.
+pub const LEDGER_SOCKET: &str = "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/job-harness/serve.sock";
+/// The `jh service install-agents` agent host socket on the server.
+pub const AGENTS_SOCKET: &str = "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/job-harness-agents.sock";
+
+/// Start the one supervised connection for this process, forwarding each of the
+/// server's `sockets` to [`Tunnel::local_socket`] of the same index.
 pub fn open(
     target: String,
     identity: Option<PathBuf>,
-    remote_socket: Option<String>,
+    sockets: Vec<String>,
 ) -> std::io::Result<&'static Arc<Tunnel>> {
     let base = std::env::var_os("XDG_RUNTIME_DIR")
         .map(PathBuf::from)
@@ -64,7 +71,7 @@ pub fn open(
     let tunnel = Arc::new(Tunnel {
         target,
         identity,
-        remote_socket: Mutex::new(remote_socket),
+        sockets: Mutex::new(sockets),
         dir,
         state: Mutex::new(State {
             link: Link::Reconnecting,
@@ -120,9 +127,9 @@ impl Tunnel {
         self.wake.notify_all();
     }
 
-    /// The forwarded ledger socket, as a `unix:` URL for the app's HTTP client.
-    pub fn ledger_url(&self) -> String {
-        format!("unix:{}", self.dir.join("l.sock").display())
+    /// The local end of the server socket given at `index` to [`open`].
+    pub fn local_socket(&self, index: usize) -> PathBuf {
+        self.dir.join(format!("{index}.sock"))
     }
 
     fn control(&self) -> PathBuf {
@@ -144,15 +151,14 @@ impl Tunnel {
     }
 
     /// A command run on the server through the master: `ssh ... TARGET -- WORDS`.
-    pub fn exec(&self, remote: &str) -> Command {
+    fn exec(&self, remote: &str) -> Command {
         let mut command = self.ssh();
         command.args(["-T", &self.target, "--", remote]);
         command
     }
 
-    /// Forward `local` (removed first if stale) to the server's Unix socket or
-    /// `127.0.0.1:PORT`.
-    pub fn forward(&self, local: &Path, remote: &str) -> Result<(), String> {
+    /// Forward `local` (removed first if stale) to the server's Unix socket.
+    fn forward(&self, local: &Path, remote: &str) -> Result<(), String> {
         let _ = std::fs::remove_file(local);
         let mut spec = OsString::from(local);
         spec.push(":");
@@ -227,28 +233,33 @@ impl Tunnel {
         }
     }
 
-    /// The server socket to forward: as given, else the `jh service install` one.
-    fn remote_socket(&self) -> Result<String, String> {
-        if let Some(path) = self.remote_socket.lock().unwrap().clone() {
+    /// The server path of socket `index`, expanded by the server's shell if needed.
+    fn remote_socket(&self, index: usize) -> Result<String, String> {
+        let path = self.sockets.lock().unwrap()[index].clone();
+        if !path.contains('$') {
             return Ok(path);
         }
         let output = self
-            .exec(r#"printf %s "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/job-harness/serve.sock""#)
+            .exec(&format!("printf %s \"{path}\""))
             .output()
             .map_err(|err| err.to_string())?;
-        let path = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-        if !output.status.success() || path.is_empty() {
-            return Err("Could not find the server's socket; pass --socket PATH.".into());
+        let expanded = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+        if !output.status.success() || expanded.is_empty() {
+            return Err(format!(
+                "Could not find {path} on the server; pass its path."
+            ));
         }
-        *self.remote_socket.lock().unwrap() = Some(path.clone());
-        Ok(path)
+        self.sockets.lock().unwrap()[index] = expanded.clone();
+        Ok(expanded)
     }
 
     fn connect(&self) -> Result<Child, String> {
         let mut master = self.start_master()?;
-        let forwarded = self
-            .remote_socket()
-            .and_then(|remote| self.forward(&self.dir.join("l.sock"), &remote));
+        let count = self.sockets.lock().unwrap().len();
+        let forwarded = (0..count).try_for_each(|index| {
+            let remote = self.remote_socket(index)?;
+            self.forward(&self.local_socket(index), &remote)
+        });
         if let Err(err) = forwarded {
             let _ = master.kill();
             let _ = master.wait();

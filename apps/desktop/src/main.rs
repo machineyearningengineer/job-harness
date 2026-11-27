@@ -1,4 +1,5 @@
 //! Native GPUI desktop binary for Job Harness.
+mod acp;
 mod app;
 mod chat_bridge;
 mod demo_seed;
@@ -105,7 +106,7 @@ fn resolve_target(
 }
 
 /// With `--ssh` (and no `--remote`), the app opens its own supervised SSH connection
-/// and reaches the server's `jh serve` socket through it.
+/// and reaches the server's `jh serve` and `jh agent-host` sockets through it.
 fn ssh_target(args: &[String]) -> Option<std::io::Result<WorkspaceTarget>> {
     if flag(args, "--remote").is_some() {
         return None;
@@ -116,24 +117,19 @@ fn ssh_target(args: &[String]) -> Option<std::io::Result<WorkspaceTarget>> {
         ssh::open(
             target,
             owned("--identity").map(PathBuf::from),
-            owned("--socket"),
+            vec![
+                owned("--socket").unwrap_or_else(|| ssh::LEDGER_SOCKET.into()),
+                owned("--agents-socket").unwrap_or_else(|| ssh::AGENTS_SOCKET.into()),
+            ],
         )
-        .map(|tunnel| WorkspaceTarget::Remote {
-            url: tunnel.ledger_url(),
-            token: None,
+        .map(|tunnel| {
+            acp::open(tunnel.local_socket(1));
+            WorkspaceTarget::Remote {
+                url: format!("unix:{}", tunnel.local_socket(0).display()),
+                token: None,
+            }
         }),
     )
-}
-
-/// `jh open --ssh` passes the server so chat runs its Hermes, not a local one.
-fn remote_hermes(args: &[String]) -> Option<(chat_bridge::SshHost, Option<String>)> {
-    let owned = |name: &str| set(flag(args, name).map(str::to_owned));
-    let host = chat_bridge::SshHost {
-        target: owned("--ssh")?,
-        identity: owned("--identity").map(PathBuf::from),
-        hermes_path: owned("--hermes-path"),
-    };
-    Some((host, owned("--hermes-profile")))
 }
 
 fn open_main_window(target: WorkspaceTarget, cx: &mut App) {
@@ -169,7 +165,7 @@ fn main() {
         }
         Some("--help" | "-h") => {
             println!(
-                "Job Harness desktop\n\nUsage: job-harness-desktop [--root PATH | --ssh USER@HOST [--identity KEY] [--socket PATH] [--hermes-profile NAME] [--hermes-path PATH] | --remote URL [--token-file PATH]]\n\nWith --ssh, the app keeps its own SSH connection to that server, reaches its jh serve socket (--socket, default the one jh service install makes) and runs chat on its Hermes; jh open passes these. With --remote http://..., the server's token comes from --token-file, JOB_HARNESS_SERVE_TOKEN or JOB_HARNESS_SERVE_TOKEN_FILE. Without arguments it opens what `jh configure` saved."
+                "Job Harness desktop\n\nUsage: job-harness-desktop [--root PATH | --ssh USER@HOST [--identity KEY] [--socket PATH] [--agents-socket PATH] | --remote URL [--token-file PATH]]\n\nWith --ssh, the app keeps its own SSH connection to that server, reaches its jh serve socket (--socket, default the one jh service install makes) and chats with the ACP agents of its jh agent-host (--agents-socket, default the one jh service install-agents makes); jh open passes these. With --remote http://..., the server's token comes from --token-file, JOB_HARNESS_SERVE_TOKEN or JOB_HARNESS_SERVE_TOKEN_FILE. Without arguments it opens what `jh configure` saved."
             );
             return;
         }
@@ -188,11 +184,6 @@ fn main() {
             std::process::exit(2);
         }
     };
-    if matches!(target, WorkspaceTarget::Remote { .. })
-        && let Some((host, profile)) = remote_hermes(&args)
-    {
-        chat_bridge::use_remote_hermes(host, profile);
-    }
     let reopen_target = target.clone();
     let app = Application::new().with_assets(icons::EmbeddedIcons);
     app.on_reopen(move |cx: &mut App| {
@@ -240,26 +231,6 @@ mod tests {
             WorkspaceTarget::Remote { token, .. } => token,
             WorkspaceTarget::Local(path) => panic!("expected remote, got {path:?}"),
         }
-    }
-
-    #[test]
-    fn ssh_flags_select_a_remote_hermes() {
-        assert!(remote_hermes(&args(&["--remote", "http://127.0.0.1:7420"])).is_none());
-        let (host, profile) = remote_hermes(&args(&[
-            "--remote",
-            "http://127.0.0.1:7420",
-            "--ssh",
-            "bot@server",
-            "--identity",
-            "/keys/id",
-            "--hermes-profile",
-            "bot",
-        ]))
-        .unwrap();
-        assert_eq!(host.target, "bot@server");
-        assert_eq!(host.identity, Some(PathBuf::from("/keys/id")));
-        assert_eq!(host.hermes_path, None);
-        assert_eq!(profile.as_deref(), Some("bot"));
     }
 
     #[test]

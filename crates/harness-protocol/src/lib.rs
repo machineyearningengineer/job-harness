@@ -1,4 +1,5 @@
 //! Thin transports. Domain rules and workspace authority remain in harness-core.
+pub mod agent_host;
 pub mod context_host;
 pub mod mcp;
 pub mod provider;
