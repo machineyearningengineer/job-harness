@@ -39,6 +39,8 @@ use std::{
 };
 
 /// A dropped tunnel shows its banner only after this, so a quick reconnect is silent.
+/// An agent's open permission request: (request, title, (option id, label)).
+type Permission = (String, String, Vec<(String, String)>);
 const LINK_BANNER_AFTER: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Debug)]
@@ -345,6 +347,10 @@ pub struct JobHarnessApp {
     stream_cancel: Option<Arc<AtomicBool>>,
     /// The tunnel's link as last drawn, and whether its banner was due.
     link_seen: Option<(Link, bool)>,
+    /// Why the server's chat is unavailable, as last shown.
+    agent_problem: Option<String>,
+    /// The agent's open permission request: (request, title, (option id, label)).
+    permission: Option<Permission>,
     stream_turn_id: u64,
     chat_follow: bool,
     chat_ruler_hover: Option<usize>,
@@ -565,6 +571,8 @@ impl JobHarnessApp {
             stream_status: String::new(),
             stream_cancel: None,
             link_seen: None,
+            agent_problem: None,
+            permission: None,
             stream_turn_id: 0,
             chat_follow: true,
             chat_ruler_hover: None,
@@ -721,6 +729,11 @@ impl JobHarnessApp {
                             let seen = Some((link, how_long > LINK_BANNER_AFTER));
                             if app.link_seen != seen {
                                 app.link_seen = seen;
+                                dirty = true;
+                            }
+                            let problem = crate::acp::problem();
+                            if app.agent_problem != problem {
+                                app.agent_problem = problem;
                                 dirty = true;
                             }
                         }
@@ -3161,6 +3174,12 @@ impl JobHarnessApp {
                                         last.is_error = true;
                                     }
                                 }
+                                StreamEvent::Permission {
+                                    request,
+                                    title,
+                                    options,
+                                } => app.permission = Some((request, title, options)),
+                                StreamEvent::PermissionDone => app.permission = None,
                                 StreamEvent::Done => done = true,
                             }
                         }
@@ -3853,6 +3872,67 @@ impl JobHarnessApp {
                             })),
                     )
                 })
+                .into_any_element(),
+        )
+    }
+
+    /// Above the composer: the agent's permission request with its options, or why
+    /// the server's chat is unavailable.
+    fn render_agent_notice(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let card = div()
+            .mx_3()
+            .mb_1()
+            .px_3()
+            .py_2()
+            .flex()
+            .flex_wrap()
+            .items_center()
+            .gap_2()
+            .rounded(theme::r_md())
+            .bg(theme::amber_wash())
+            .text_xs()
+            .text_color(theme::amber_text());
+        if let Some((request, title, options)) = self.permission.clone() {
+            let button = |id: String, label: String, option: Option<String>| {
+                let request = request.clone();
+                div()
+                    .id(SharedString::from(format!("permission-{id}")))
+                    .px_2()
+                    .py_0p5()
+                    .rounded(theme::r_sm())
+                    .border_1()
+                    .border_color(theme::amber_accent())
+                    .cursor_pointer()
+                    .hover(|s| s.bg(theme::row_hover()))
+                    .child(label)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        let (request, option) = (request.clone(), option.clone());
+                        std::thread::spawn(move || {
+                            crate::acp::respond(&request, option.as_deref())
+                        });
+                        this.permission = None;
+                        cx.notify();
+                    }))
+            };
+            return Some(
+                card.id("agent-permission")
+                    .child(div().w_full().child(format!("Allow? {title}")))
+                    .children(
+                        options
+                            .into_iter()
+                            .map(|(id, label)| button(id.clone(), label, Some(id))),
+                    )
+                    .child(button("cancel".into(), "Cancel".into(), None))
+                    .into_any_element(),
+            );
+        }
+        if self.runtime != AgentRuntime::Remote {
+            return None;
+        }
+        let problem = self.agent_problem.clone()?;
+        Some(
+            card.id("agent-unavailable")
+                .child(problem)
                 .into_any_element(),
         )
     }
@@ -6235,6 +6315,7 @@ impl JobHarnessApp {
                     )
                 },
             )
+            .children(self.render_agent_notice(cx))
             // T3 Code-grade unified composer card (mathematically locked to rail width or centered 728px in full-screen!)
             .child(
                 div()

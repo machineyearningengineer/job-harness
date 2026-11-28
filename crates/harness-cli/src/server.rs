@@ -12,13 +12,24 @@ const UNITS: [&str; 3] = [
     "job-harness-sync.service",
     "job-harness-sync.timer",
 ];
+const AGENTS_UNIT: &str = "job-harness-agents.service";
+/// The agent host's socket in the user's runtime directory (/run/user/UID, 0700).
+pub const AGENTS_SOCKET: &str = "job-harness-agents.sock";
 
 #[derive(Subcommand)]
 pub enum ServiceCommand {
     /// Write and enable systemd user units: `jh serve` on a Unix socket only you can reach
     /// and a 15-minute `jh sync`.
     Install,
-    /// Stop, disable and remove the units written by `install`; the ledger is not touched.
+    /// Write and enable a systemd user unit running `jh agent-host` for this user's ACP
+    /// agents, so the app's chat turns keep running while it is away.
+    InstallAgents {
+        /// NAME=COMMAND: an ACP agent on stdio, e.g. `hermes=hermes acp`; repeatable.
+        #[arg(long = "agent", required = true)]
+        agents: Vec<String>,
+    },
+    /// Stop, disable and remove the units written by `install` and `install-agents`; the
+    /// ledger is not touched.
     Uninstall,
 }
 
@@ -99,9 +110,9 @@ pub fn sync(root: &Path) -> anyhow::Result<Value> {
 }
 
 /// systemd `ExecStart` word: quoted, with `%`, `$`, `\` and `"` escaped.
-fn unit_word(path: &Path) -> String {
-    let text = path.display().to_string();
+fn unit_word(text: impl std::fmt::Display) -> String {
     let escaped = text
+        .to_string()
         .replace('\\', "\\\\")
         .replace('"', "\\\"")
         .replace('%', "%%")
@@ -113,7 +124,7 @@ fn unit_word(path: &Path) -> String {
 const SOCKET: &str = "job-harness/serve.sock";
 
 pub fn units(binary: &Path, root: &Path) -> [(&'static str, String); 3] {
-    let (bin, root) = (unit_word(binary), unit_word(root));
+    let (bin, root) = (unit_word(binary.display()), unit_word(root.display()));
     [
         (
             UNITS[0],
@@ -134,6 +145,18 @@ pub fn units(binary: &Path, root: &Path) -> [(&'static str, String); 3] {
             "[Unit]\nDescription=Sync the Job Harness ledger every 15 minutes\n\n[Timer]\nOnCalendar=*:0/15\nPersistent=true\n\n[Install]\nWantedBy=timers.target\n".to_owned(),
         ),
     ]
+}
+
+/// The agent host's user unit; each agent is `NAME=COMMAND`.
+pub fn agents_unit(binary: &Path, agents: &[String]) -> String {
+    let agents: String = agents
+        .iter()
+        .map(|agent| format!(" --agent {}", unit_word(agent)))
+        .collect();
+    format!(
+        "[Unit]\nDescription=Job Harness agent host on a Unix socket\n\n[Service]\nExecStart={} agent-host --socket %t/{AGENTS_SOCKET}{agents}\nRestart=on-failure\nRestartSec=10\n\n[Install]\nWantedBy=default.target\n",
+        unit_word(binary.display())
+    )
 }
 
 fn config_dir() -> anyhow::Result<PathBuf> {
@@ -190,12 +213,30 @@ pub fn service(
                 ]
             }))
         }
+        ServiceCommand::InstallAgents { agents } => {
+            #[cfg(unix)]
+            job_harness_protocol::agent_host::parse_agents(&agents)?;
+            let binary = std::env::current_exe()?.canonicalize()?;
+            std::fs::create_dir_all(&dir)?;
+            std::fs::write(dir.join(AGENTS_UNIT), agents_unit(&binary, &agents))?;
+            systemctl(&["daemon-reload"])?;
+            systemctl(&["enable", AGENTS_UNIT])?;
+            systemctl(&["restart", AGENTS_UNIT])?;
+            let user = std::env::var("USER").unwrap_or_else(|_| "$USER".into());
+            Ok(json!({
+                "unit": dir.join(AGENTS_UNIT),
+                "next": [
+                    format!("Open it from your computer: jh open --ssh {user}@SERVER"),
+                    format!("Keep it running after logout (needs root): sudo loginctl enable-linger {user}"),
+                ]
+            }))
+        }
         ServiceCommand::Uninstall => {
             // Units may already be gone; removal below is what makes a re-run safe.
-            let _ = systemctl(&["disable", "--now", UNITS[0], UNITS[2]]);
+            let _ = systemctl(&["disable", "--now", UNITS[0], UNITS[2], AGENTS_UNIT]);
             let _ = systemctl(&["stop", UNITS[1]]);
             let mut removed = Vec::new();
-            for name in UNITS {
+            for name in UNITS.into_iter().chain([AGENTS_UNIT]) {
                 if std::fs::remove_file(dir.join(name)).is_ok() {
                     removed.push(name);
                 }
@@ -206,29 +247,19 @@ pub fn service(
     }
 }
 
-/// Which Hermes on the server the desktop app's chat runs.
-pub struct Hermes<'a> {
-    pub profile: Option<&'a str>,
-    pub path: Option<&'a str>,
-}
-
-/// Desktop arguments: the SSH target, and optionally its key, the server's socket
-/// and the Hermes chat runs.
+/// Desktop arguments: the SSH target, and optionally its key, the server's ledger
+/// socket and its agent host socket.
 fn app_args(
     ssh: &str,
     identity: Option<&Path>,
     socket: Option<&str>,
-    hermes: &Hermes,
+    agents_socket: Option<&str>,
 ) -> anyhow::Result<Vec<std::ffi::OsString>> {
     let mut args: Vec<std::ffi::OsString> = vec!["--ssh".into(), ssh.into()];
     if let Some(identity) = identity {
         args.extend(["--identity".into(), std::path::absolute(identity)?.into()]);
     }
-    for (flag, value) in [
-        ("--socket", socket),
-        ("--hermes-profile", hermes.profile),
-        ("--hermes-path", hermes.path),
-    ] {
+    for (flag, value) in [("--socket", socket), ("--agents-socket", agents_socket)] {
         if let Some(value) = value {
             args.extend([flag.into(), value.into()]);
         }
@@ -242,7 +273,7 @@ pub fn open(
     ssh: &str,
     identity: Option<&Path>,
     socket: Option<&str>,
-    hermes: Hermes,
+    agents_socket: Option<&str>,
 ) -> anyhow::Result<Value> {
     // Run the desktop binary itself, so two servers can be open at once. Prefer one
     // next to this binary, then the macOS app bundle, then PATH.
@@ -253,7 +284,7 @@ pub fn open(
         .find(|path| path.is_file())
         .unwrap_or_else(|| PathBuf::from("job-harness-desktop"));
     let mut app = Command::new(binary);
-    app.args(app_args(ssh, identity, socket, &hermes)?);
+    app.args(app_args(ssh, identity, socket, agents_socket)?);
     app.stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
@@ -436,21 +467,19 @@ mod tests {
     }
 
     #[test]
-    fn open_passes_the_server_and_its_hermes_to_the_app() {
-        let none = Hermes {
-            profile: None,
-            path: None,
-        };
+    fn open_passes_the_server_and_its_sockets_to_the_app() {
         assert_eq!(
-            app_args("bot@server", None, None, &none).unwrap(),
+            app_args("bot@server", None, None, None).unwrap(),
             ["--ssh", "bot@server"]
         );
-        let named = Hermes {
-            profile: Some("bot"),
-            path: Some("~/.local/bin/hermes"),
-        };
         let id = std::path::absolute("/keys/id").unwrap();
-        let args = app_args("bot@server", Some(&id), Some("/run/jh/serve.sock"), &named).unwrap();
+        let args = app_args(
+            "bot@server",
+            Some(&id),
+            Some("/run/jh/serve.sock"),
+            Some("/run/user/1/agents.sock"),
+        )
+        .unwrap();
         assert_eq!(
             args,
             [
@@ -460,12 +489,22 @@ mod tests {
                 id.to_str().unwrap(),
                 "--socket",
                 "/run/jh/serve.sock",
-                "--hermes-profile",
-                "bot",
-                "--hermes-path",
-                "~/.local/bin/hermes"
+                "--agents-socket",
+                "/run/user/1/agents.sock"
             ]
         );
+    }
+
+    #[test]
+    fn the_agent_host_unit_quotes_each_agent() {
+        let unit = agents_unit(
+            Path::new("/bin/jh"),
+            &["bot=hermes -p bot acp".into(), "x=run 100%".into()],
+        );
+        assert!(unit.contains(
+            "ExecStart=\"/bin/jh\" agent-host --socket %t/job-harness-agents.sock --agent \"bot=hermes -p bot acp\" --agent \"x=run 100%%\"\n"
+        ));
+        assert!(unit.contains("WantedBy=default.target"));
     }
 
     #[test]

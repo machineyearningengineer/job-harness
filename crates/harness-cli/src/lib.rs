@@ -187,12 +187,22 @@ enum Command {
         /// The server's `jh serve` socket (default: the one `jh service install` makes).
         #[arg(long)]
         socket: Option<String>,
-        /// Hermes profile on the server for the app's chat (default: its active profile).
+        /// The server's `jh agent-host` socket for chat (default: the one
+        /// `jh service install-agents` makes).
         #[arg(long)]
-        hermes_profile: Option<String>,
-        /// Path of `hermes` on the server (default: the login PATH, then ~/.local/bin).
+        agents_socket: Option<String>,
+    },
+    /// Keep ACP agents (Agent Client Protocol on stdio) running for the desktop app's
+    /// chat, on a Unix socket only this user can reach. Turns go on while no app is
+    /// attached and are replayed when it comes back.
+    AgentHost {
+        /// Default: $XDG_RUNTIME_DIR/job-harness-agents.sock.
         #[arg(long)]
-        hermes_path: Option<String>,
+        socket: Option<PathBuf>,
+        /// NAME=COMMAND, e.g. `hermes=hermes acp` or `gemini=gemini --experimental-acp`;
+        /// repeatable.
+        #[arg(long = "agent", required = true)]
+        agents: Vec<String>,
     },
 }
 #[derive(Subcommand)]
@@ -515,19 +525,29 @@ async fn execute(cli: Cli) -> anyhow::Result<Option<Value>> {
             ssh,
             identity,
             socket,
-            hermes_profile,
-            hermes_path,
+            agents_socket,
         } => {
             return Ok(Some(success(server::open(
                 &ssh,
                 identity.as_deref(),
                 socket.as_deref(),
-                server::Hermes {
-                    profile: hermes_profile.as_deref(),
-                    path: hermes_path.as_deref(),
-                },
+                agents_socket.as_deref(),
             )?)));
         }
+        #[cfg(unix)]
+        Command::AgentHost { socket, agents } => {
+            let agents = job_harness_protocol::agent_host::parse_agents(&agents)?;
+            let socket = match socket {
+                Some(socket) => socket,
+                None => std::env::var_os("XDG_RUNTIME_DIR")
+                    .map(|dir| PathBuf::from(dir).join(server::AGENTS_SOCKET))
+                    .ok_or_else(|| anyhow::anyhow!("XDG_RUNTIME_DIR is not set; pass --socket"))?,
+            };
+            job_harness_protocol::agent_host::run(&socket, agents).await?;
+            return Ok(None);
+        }
+        #[cfg(not(unix))]
+        Command::AgentHost { .. } => anyhow::bail!("jh agent-host needs Unix sockets"),
         Command::Context { action }
             if matches!(
                 &action,
@@ -772,6 +792,7 @@ async fn execute(cli: Cli) -> anyhow::Result<Option<Value>> {
         | Command::ConfigSchema { .. }
         | Command::Configure { .. }
         | Command::Open { .. }
+        | Command::AgentHost { .. }
         | Command::Service { .. } => {
             unreachable!()
         }
