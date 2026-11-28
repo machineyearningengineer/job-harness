@@ -1,8 +1,5 @@
 use harness_core::{contracts, workspace};
-use job_harness_protocol::{
-    FOCUSED_TOOLS,
-    mcp::{Backend, McpServer},
-};
+use job_harness_protocol::{FOCUSED_TOOLS, mcp::McpServer};
 use serde_json::{Value, json};
 
 #[test]
@@ -62,6 +59,7 @@ fn focused_profile_defers_specialized_tools_with_actionable_next_step() {
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn remote_backend_applies_the_same_profile_through_jh_serve() {
+    use job_harness_protocol::mcp::Backend;
     let temp = tempfile::tempdir().unwrap();
     workspace::initialize(temp.path()).unwrap();
     let (app, _watcher) = job_harness_protocol::remote::router(temp.path()).unwrap();
