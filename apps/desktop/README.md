@@ -20,4 +20,4 @@ cargo run --release --manifest-path apps/desktop/Cargo.toml -- --root "$HOME/Car
 cargo run --release --manifest-path apps/desktop/Cargo.toml -- --ssh user@server [--identity KEY] [--socket PATH]
 ```
 
-`jh serve` always needs its bearer token. The app takes the first of `--token-file`, `JOB_HARNESS_SERVE_TOKEN`, and the file named by `JOB_HARNESS_SERVE_TOKEN_FILE`, and stops with an error if that file can't be read. Without arguments it opens what `jh configure` saved, including a `--remote` server and its token file.
+`jh serve` listens only on a Unix socket, whose file permissions decide who may call; there is no token. `--remote unix:PATH` opens a socket on this computer. Without arguments it opens what `jh configure` saved, including a `--remote` socket.

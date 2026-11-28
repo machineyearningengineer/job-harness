@@ -677,28 +677,21 @@ fn sync_keeps_a_configured_name_and_fills_in_only_the_missing_email() {
 }
 
 #[test]
-fn configure_remote_names_a_missing_token_file() {
+fn configure_remote_takes_only_a_socket() {
     let temp = tempfile::tempdir().unwrap();
-    let missing = temp.path().join("no-such-token");
     let refused = output(
         Command::new(env!("CARGO_BIN_EXE_job-harness"))
-            .args([
-                "configure",
-                "--remote",
-                "http://127.0.0.1:9",
-                "--token-file",
-            ])
-            .arg(&missing)
+            .args(["configure", "--remote", "http://127.0.0.1:9"])
             .env("XDG_CONFIG_HOME", temp.path().join("host-settings"))
             .output()
             .unwrap(),
     );
-    assert_eq!(refused["error"]["code"], "token_required", "{refused}");
+    assert_eq!(refused["ok"], false, "{refused}");
     assert!(
         refused["error"]["message"]
             .as_str()
             .unwrap()
-            .contains("no-such-token"),
+            .contains("unix:PATH"),
         "{refused}"
     );
 }

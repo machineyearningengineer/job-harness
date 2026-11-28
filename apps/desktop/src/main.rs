@@ -31,31 +31,6 @@ fn set(value: Option<String>) -> Option<String> {
     value.map(|v| v.trim().to_owned()).filter(|v| !v.is_empty())
 }
 
-fn read_token(file: &str) -> Result<String, String> {
-    let text = std::fs::read_to_string(file)
-        .map_err(|err| format!("Cannot read token file {file}: {err}"))?;
-    set(Some(text)).ok_or_else(|| format!("Token file {file} is empty"))
-}
-
-/// The server's token, first found of: `--token-file`, `JOB_HARNESS_SERVE_TOKEN`,
-/// `JOB_HARNESS_SERVE_TOKEN_FILE`, the token file saved by `jh configure --remote`.
-fn serve_token(
-    args: &[String],
-    env: &dyn Fn(&str) -> Option<String>,
-    saved: Option<&str>,
-) -> Result<Option<String>, String> {
-    if let Some(file) = flag(args, "--token-file") {
-        return read_token(file).map(Some);
-    }
-    if let Some(token) = set(env("JOB_HARNESS_SERVE_TOKEN")) {
-        return Ok(Some(token));
-    }
-    match set(env("JOB_HARNESS_SERVE_TOKEN_FILE")).or(saved.map(str::to_owned)) {
-        Some(file) => read_token(&file).map(Some),
-        None => Ok(None),
-    }
-}
-
 /// `jh`'s settings: `$XDG_CONFIG_HOME/job-harness/settings.json`, else `~/.config/...`.
 fn settings(env: &dyn Fn(&str) -> Option<String>) -> serde_json::Value {
     let base = set(env("XDG_CONFIG_HOME"))
@@ -72,29 +47,28 @@ fn resolve_target(
     args: &[String],
     env: &dyn Fn(&str) -> Option<String>,
 ) -> Result<WorkspaceTarget, String> {
-    let remote = |url: &str, saved: Option<&str>| {
+    let remote = |url: &str| {
         Ok(WorkspaceTarget::Remote {
             url: url.to_owned(),
-            token: serve_token(args, env, saved)?,
         })
     };
     let mut iter = args.iter().skip(1);
     while let Some(arg) = iter.next() {
         match (arg.as_str(), iter.next()) {
-            ("--remote", Some(url)) => return remote(url, None),
+            ("--remote", Some(url)) => return remote(url),
             ("--root", Some(path)) => return Ok(WorkspaceTarget::Local(PathBuf::from(path))),
             _ => {}
         }
     }
     if let Some(url) = set(env("JOB_HARNESS_REMOTE_URL")) {
-        return remote(&url, None);
+        return remote(&url);
     }
     if let Some(root) = set(env("JOB_HARNESS_WORKSPACE")) {
         return Ok(WorkspaceTarget::Local(PathBuf::from(root)));
     }
     let saved = settings(env);
     if let Some(url) = saved["remote"]["url"].as_str() {
-        return remote(url, saved["remote"]["token_file"].as_str());
+        return remote(url);
     }
     if let Some(ws) = saved["workspace"].as_str() {
         return Ok(WorkspaceTarget::Local(PathBuf::from(ws)));
@@ -126,7 +100,6 @@ fn ssh_target(args: &[String]) -> Option<std::io::Result<WorkspaceTarget>> {
             acp::open(tunnel.local_socket(1));
             WorkspaceTarget::Remote {
                 url: format!("unix:{}", tunnel.local_socket(0).display()),
-                token: None,
             }
         }),
     )
@@ -165,7 +138,7 @@ fn main() {
         }
         Some("--help" | "-h") => {
             println!(
-                "Job Harness desktop\n\nUsage: job-harness-desktop [--root PATH | --ssh USER@HOST [--identity KEY] [--socket PATH] [--agents-socket PATH] | --remote URL [--token-file PATH]]\n\nWith --ssh, the app keeps its own SSH connection to that server, reaches its jh serve socket (--socket, default the one jh service install makes) and chats with the ACP agents of its jh agent-host (--agents-socket, default the one jh service install-agents makes); jh open passes these. With --remote http://..., the server's token comes from --token-file, JOB_HARNESS_SERVE_TOKEN or JOB_HARNESS_SERVE_TOKEN_FILE. Without arguments it opens what `jh configure` saved."
+                "Job Harness desktop\n\nUsage: job-harness-desktop [--root PATH | --ssh USER@HOST [--identity KEY] [--socket PATH] [--agents-socket PATH] | --remote unix:PATH]\n\nWith --ssh, the app keeps its own SSH connection to that server, reaches its jh serve socket (--socket, default the one jh service install makes) and chats with the ACP agents of its jh agent-host (--agents-socket, default the one jh service install-agents makes); jh open passes these. With --remote unix:PATH, it opens a jh serve socket on this computer. Without arguments it opens what `jh configure` saved."
             );
             return;
         }
@@ -226,70 +199,14 @@ mod tests {
         move |key| vars.get(key).cloned()
     }
 
-    fn token(target: Result<WorkspaceTarget, String>) -> Option<String> {
-        match target.unwrap() {
-            WorkspaceTarget::Remote { token, .. } => token,
-            WorkspaceTarget::Local(path) => panic!("expected remote, got {path:?}"),
-        }
-    }
-
-    #[test]
-    fn an_explicit_token_file_wins_and_empty_values_are_ignored() {
-        let dir = tempfile::tempdir().unwrap();
-        let file = dir.path().join("token");
-        std::fs::write(&file, "from-file-0123456789\n").unwrap();
-        let file = file.to_str().unwrap();
-        let env_token = env(&[("JOB_HARNESS_SERVE_TOKEN", "from-env-0123456789")]);
-        let remote = args(&["--remote", "http://127.0.0.1:7420", "--token-file", file]);
-        assert_eq!(
-            token(resolve_target(&remote, &env_token)).as_deref(),
-            Some("from-file-0123456789")
-        );
-        let bare = args(&["--remote", "http://127.0.0.1:7420"]);
-        assert_eq!(
-            token(resolve_target(&bare, &env_token)).as_deref(),
-            Some("from-env-0123456789")
-        );
-        let blank = env(&[
-            ("JOB_HARNESS_SERVE_TOKEN", "  "),
-            ("JOB_HARNESS_SERVE_TOKEN_FILE", file),
-        ]);
-        assert_eq!(
-            token(resolve_target(&bare, &blank)).as_deref(),
-            Some("from-file-0123456789")
-        );
-    }
-
-    #[test]
-    fn an_unreadable_token_file_is_an_error_not_a_missing_token() {
-        let missing = args(&["--remote", "http://x", "--token-file", "/nonexistent/token"]);
-        let err = resolve_target(&missing, &env(&[])).unwrap_err();
-        assert!(err.contains("/nonexistent/token"), "{err}");
-        let dir = tempfile::tempdir().unwrap();
-        let empty = dir.path().join("token");
-        std::fs::write(&empty, "\n").unwrap();
-        let blank = args(&[
-            "--remote",
-            "http://x",
-            "--token-file",
-            empty.to_str().unwrap(),
-        ]);
-        assert!(
-            resolve_target(&blank, &env(&[]))
-                .unwrap_err()
-                .contains("empty")
-        );
-    }
-
     #[test]
     fn saved_settings_open_the_configured_remote_under_xdg_config_home() {
         let dir = tempfile::tempdir().unwrap();
-        let token_file = dir.path().join("token");
-        std::fs::write(&token_file, "saved-0123456789abcdef").unwrap();
         std::fs::create_dir_all(dir.path().join("job-harness")).unwrap();
         std::fs::write(
             dir.path().join("job-harness/settings.json"),
-            serde_json::json!({"schema_version":1,"remote":{"url":"http://127.0.0.1:7421","token_file":token_file}}).to_string(),
+            serde_json::json!({"schema_version":1,"remote":{"url":"unix:/run/jh/serve.sock"}})
+                .to_string(),
         )
         .unwrap();
         let env = env(&[
@@ -297,10 +214,7 @@ mod tests {
             ("HOME", "/nonexistent-home"),
         ]);
         match resolve_target(&args(&[]), &env).unwrap() {
-            WorkspaceTarget::Remote { url, token } => {
-                assert_eq!(url, "http://127.0.0.1:7421");
-                assert_eq!(token.as_deref(), Some("saved-0123456789abcdef"));
-            }
+            WorkspaceTarget::Remote { url } => assert_eq!(url, "unix:/run/jh/serve.sock"),
             other => panic!("expected the saved remote, got {:?}", other.label()),
         }
         assert!(matches!(

@@ -1,8 +1,5 @@
 use harness_core::{contracts, workspace};
-use job_harness_protocol::{
-    FOCUSED_TOOLS,
-    mcp::{Backend, McpServer},
-};
+use job_harness_protocol::{FOCUSED_TOOLS, mcp::McpServer};
 use serde_json::{Value, json};
 
 #[test]
@@ -59,17 +56,19 @@ fn focused_profile_defers_specialized_tools_with_actionable_next_step() {
     }
 }
 
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn remote_backend_applies_the_same_profile_through_jh_serve() {
+    use job_harness_protocol::mcp::Backend;
     let temp = tempfile::tempdir().unwrap();
     workspace::initialize(temp.path()).unwrap();
-    let token = "0123456789abcdef0123".to_owned();
-    let (app, _watcher) =
-        job_harness_protocol::remote::router(temp.path(), Some(token.clone())).unwrap();
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let url = format!("http://{}", listener.local_addr().unwrap());
+    let (app, _watcher) = job_harness_protocol::remote::router(temp.path()).unwrap();
+    let sockets = tempfile::tempdir().unwrap();
+    let socket = sockets.path().join("serve.sock");
+    let listener = tokio::net::UnixListener::bind(&socket).unwrap();
     tokio::spawn(async move { axum::serve(listener, app).await });
-    let client = job_harness_protocol::remote::Client::new(&url, Some(token)).unwrap();
+    let url = format!("unix:{}", socket.display());
+    let client = job_harness_protocol::remote::Client::new(&url).unwrap();
     let specs = Value::Object(contracts::specs().clone());
     let server = McpServer::with_backend(Backend::Remote(client), "focused", &specs, true).unwrap();
     let (boot, deferred, denied) = tokio::task::spawn_blocking(move || {

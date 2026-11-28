@@ -52,8 +52,8 @@ It prints, but does not run, two root-only follow-ups:
 Check it: `curl -fsS --unix-socket "$XDG_RUNTIME_DIR/job-harness/serve.sock" http://localhost/v1/health`
 and `systemctl --user status job-harness`.
 
-`jh serve --bind 127.0.0.1:PORT` still serves TCP for older clients, and only with a
-bearer token from `JOB_HARNESS_SERVE_TOKEN_FILE` (or `JOB_HARNESS_SERVE_TOKEN`).
+`jh serve` listens only on a Unix socket (`--bind unix:PATH`); there is no TCP port
+and no token. Other computers reach it over SSH, below.
 
 ## Agents without file access (remote mode)
 
@@ -224,7 +224,7 @@ Re-run the installer on the server. It replaces the binary in place and, when
 curl -fsSL https://raw.githubusercontent.com/machineyearningengineer/job-harness/main/scripts/get.sh | sh
 ```
 
-Pin a version with `JOB_HARNESS_VERSION=v0.4.6` before `sh`. If a ledger and the
+Pin a version with `JOB_HARNESS_VERSION=v0.5.0` before `sh`. If a ledger and the
 binary disagree on format, every command says which version the ledger needs and
 how to install it; there is no automatic conversion. Ledgers that still keep
 `applications/operations/state.json` need job-harness 0.2.x.
