@@ -21,6 +21,8 @@ pub enum Link {
 
 /// Reconnecting for longer than this is Offline (still retried in the background).
 const OFFLINE_AFTER: Duration = Duration::from_secs(30);
+/// A control command (`-O check`, a forward, a path lookup) that takes longer failed.
+const CONTROL_TIMEOUT: Duration = Duration::from_secs(15);
 
 pub struct Tunnel {
     target: String,
@@ -49,6 +51,9 @@ pub fn tunnel() -> Option<&'static Arc<Tunnel>> {
     TUNNEL.get()
 }
 
+/// The server user's runtime folder, the one part of a socket path the server's
+/// shell expands.
+const RUNTIME_DIR: &str = "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}";
 /// The `jh service install` ledger socket on the server.
 pub const LEDGER_SOCKET: &str = "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/job-harness/serve.sock";
 /// The `jh service install-agents` agent host socket on the server.
@@ -65,9 +70,7 @@ pub fn open(
         .map(PathBuf::from)
         .unwrap_or_else(std::env::temp_dir);
     let dir = base.join(format!("jh-{}", std::process::id()));
-    std::fs::create_dir_all(&dir)?;
-    #[cfg(unix)]
-    std::fs::set_permissions(&dir, std::os::unix::fs::PermissionsExt::from_mode(0o700))?;
+    private_dir(&dir)?;
     let tunnel = Arc::new(Tunnel {
         target,
         identity,
@@ -85,6 +88,21 @@ pub fn open(
     let supervised = tunnel.clone();
     std::thread::spawn(move || supervised.supervise());
     Ok(tunnel)
+}
+
+/// Make `dir` 0700 in one step, or fail: never use one someone else prepared. One left
+/// by an earlier process with this pid is ours to replace.
+fn private_dir(dir: &Path) -> std::io::Result<()> {
+    if std::fs::remove_dir_all(dir).is_err() && std::fs::symlink_metadata(dir).is_ok() {
+        return Err(std::io::Error::other(format!(
+            "{} exists and is not ours to replace",
+            dir.display()
+        )));
+    }
+    let mut builder = std::fs::DirBuilder::new();
+    #[cfg(unix)]
+    std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+    builder.create(dir)
 }
 
 /// Reconnecting for longer than [`OFFLINE_AFTER`] shows as Offline; it is still
@@ -177,6 +195,11 @@ impl Tunnel {
         quiet(&mut command).is_ok()
     }
 
+    /// Where the master writes its messages; a pipe nobody reads would fill and stop it.
+    fn master_log(&self) -> PathBuf {
+        self.dir.join("ssh.log")
+    }
+
     /// Stop the master this process started, e.g. when the app quits.
     pub fn shutdown(&self) {
         let mut command = self.ssh();
@@ -202,18 +225,17 @@ impl Tunnel {
             "StreamLocalBindUnlink=yes",
         ]);
         command.arg(&self.target);
+        let log = std::fs::File::create(self.master_log())
+            .map_err(|err| format!("Could not write {}: {err}", self.master_log().display()))?;
         let mut child = command
             .stdout(Stdio::null())
-            .stderr(Stdio::piped())
+            .stderr(log)
             .spawn()
             .map_err(|err| format!("Could not run ssh: {err}"))?;
         let deadline = Instant::now() + Duration::from_secs(20);
         loop {
             if let Ok(Some(status)) = child.try_wait() {
-                let mut text = String::new();
-                if let Some(mut stderr) = child.stderr.take() {
-                    let _ = std::io::Read::read_to_string(&mut stderr, &mut text);
-                }
+                let text = std::fs::read_to_string(self.master_log()).unwrap_or_default();
                 let text = text.trim();
                 return Err(if text.is_empty() {
                     format!("ssh {} exited with {status}", self.target)
@@ -236,15 +258,14 @@ impl Tunnel {
     /// The server path of socket `index`, expanded by the server's shell if needed.
     fn remote_socket(&self, index: usize) -> Result<String, String> {
         let path = self.sockets.lock().unwrap()[index].clone();
-        if !path.contains('$') {
+        let Some(printf) = expand_command(&path) else {
             return Ok(path);
-        }
-        let output = self
-            .exec(&format!("printf %s \"{path}\""))
-            .output()
-            .map_err(|err| err.to_string())?;
-        let expanded = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-        if !output.status.success() || expanded.is_empty() {
+        };
+        let output = quiet(&mut self.exec(&printf));
+        let expanded = String::from_utf8_lossy(&output.unwrap_or_default())
+            .trim()
+            .to_owned();
+        if expanded.is_empty() {
             return Err(format!(
                 "Could not find {path} on the server; pass its path."
             ));
@@ -323,12 +344,39 @@ impl Tunnel {
     }
 }
 
-/// Run a short `ssh` control command; its stderr is the error.
+/// The server command that prints `path` with its leading [`RUNTIME_DIR`] expanded,
+/// the rest single-quoted so the shell takes it as written; `None` if nothing expands.
+fn expand_command(path: &str) -> Option<String> {
+    let rest = path.strip_prefix(RUNTIME_DIR)?;
+    Some(format!(
+        "printf %s \"{RUNTIME_DIR}\"'{}'",
+        rest.replace('\'', "'\\''")
+    ))
+}
+
+/// Run a short `ssh` control command for at most [`CONTROL_TIMEOUT`]; its stderr is
+/// the error.
 fn quiet(command: &mut Command) -> Result<Vec<u8>, String> {
-    let output = command
+    quiet_within(command, CONTROL_TIMEOUT)
+}
+
+fn quiet_within(command: &mut Command, timeout: Duration) -> Result<Vec<u8>, String> {
+    let mut child = command
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .output()
+        .spawn()
+        .map_err(|err| format!("Could not run ssh: {err}"))?;
+    let deadline = Instant::now() + timeout;
+    while matches!(child.try_wait(), Ok(None)) {
+        if Instant::now() > deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(format!("ssh did not answer in {} s", timeout.as_secs()));
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let output = child
+        .wait_with_output()
         .map_err(|err| format!("Could not run ssh: {err}"))?;
     if output.status.success() {
         Ok(output.stdout)
@@ -347,6 +395,60 @@ mod tests {
         assert_eq!(shown(Link::Connected, secs(99)), Link::Connected);
         assert_eq!(shown(Link::Reconnecting, secs(29)), Link::Reconnecting);
         assert_eq!(shown(Link::Reconnecting, secs(31)), Link::Offline);
+    }
+
+    #[test]
+    fn only_the_runtime_folder_is_expanded_by_the_servers_shell() {
+        assert_eq!(expand_command("/run/user/1000/x.sock"), None);
+        assert_eq!(expand_command("$HOME/x.sock"), None);
+        assert_eq!(
+            expand_command(AGENTS_SOCKET).unwrap(),
+            r#"printf %s "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"'/job-harness-agents.sock'"#
+        );
+        assert!(LEDGER_SOCKET.starts_with(RUNTIME_DIR));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_rest_of_a_socket_path_stays_literal_on_the_server() {
+        let odd = format!("{RUNTIME_DIR}/a'$(touch x)\"b");
+        let printf = expand_command(&odd)
+            .unwrap()
+            .replace(RUNTIME_DIR, "${XDG_RUNTIME_DIR:-/r}");
+        let out = Command::new("sh")
+            .args(["-c", &printf])
+            .env_remove("XDG_RUNTIME_DIR")
+            .output()
+            .unwrap();
+        assert_eq!(String::from_utf8(out.stdout).unwrap(), "/r/a'$(touch x)\"b");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_control_command_that_hangs_is_stopped() {
+        let started = Instant::now();
+        let mut sleep = Command::new("sleep");
+        sleep.arg("30");
+        assert!(quiet_within(&mut sleep, Duration::from_millis(300)).is_err());
+        assert!(started.elapsed() < Duration::from_secs(5));
+        let mut echo = Command::new("echo");
+        echo.arg("ok");
+        assert_eq!(quiet_within(&mut echo, CONTROL_TIMEOUT).unwrap(), b"ok\n");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_tunnel_folder_is_made_private_replacing_a_stale_one() {
+        use std::os::unix::fs::PermissionsExt;
+        let base = tempfile::tempdir().unwrap();
+        let dir = base.path().join("jh-1");
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o777)).unwrap();
+        std::fs::write(dir.join("0.sock"), "stale").unwrap();
+        private_dir(&dir).unwrap();
+        let mode = std::fs::metadata(&dir).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o700);
+        assert!(!dir.join("0.sock").exists());
     }
 
     #[test]

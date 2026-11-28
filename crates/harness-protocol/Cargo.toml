@@ -20,6 +20,9 @@ reqwest = { version = "0.13.4", default-features = false, features = ["json", "r
 notify = "8.2"
 futures-util = "0.3"
 
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
 [dev-dependencies]
 tempfile = "3"
 tower = { version = "0.5", features = ["util"] }

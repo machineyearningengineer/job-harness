@@ -3906,6 +3906,10 @@ impl JobHarnessApp {
                     .hover(|s| s.bg(theme::row_hover()))
                     .child(label)
                     .on_click(cx.listener(move |this, _, _, cx| {
+                        // Offline the answer would be lost; the card stays to try again.
+                        if this.refuse_offline(cx) {
+                            return;
+                        }
                         let (request, option) = (request.clone(), option.clone());
                         std::thread::spawn(move || {
                             crate::acp::respond(&request, option.as_deref())

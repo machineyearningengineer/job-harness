@@ -1138,7 +1138,7 @@ dependencies = [
 
 [[package]]
 name = "job-harness"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -1152,7 +1152,7 @@ dependencies = [
 
 [[package]]
 name = "job-harness-core"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "base64",
  "chrono",
@@ -1179,7 +1179,7 @@ dependencies = [
 
 [[package]]
 name = "job-harness-dev"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -1202,7 +1202,7 @@ dependencies = [
 
 [[package]]
 name = "job-harness-domain"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "chrono",
  "regex",
@@ -1215,13 +1215,14 @@ dependencies = [
 
 [[package]]
 name = "job-harness-protocol"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "anyhow",
  "axum",
  "futures-util",
  "http-body-util",
  "job-harness-core",
+ "libc",
  "notify",
  "reqwest",
  "rmcp",

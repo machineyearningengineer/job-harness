@@ -76,12 +76,15 @@ if [ -z "$BIN_SRC" ]; then
 fi
 
 mkdir -p "$BIN_DIR"
-rm -f "$BIN_DIR/job-harness" "$BIN_DIR/jh"
-install -m 755 "$BIN_SRC" "$BIN_DIR/job-harness"
+# Install beside the old binary, then rename over it: `jh` is never missing or half
+# written, and a running copy keeps its own file.
+install -m 755 "$BIN_SRC" "$BIN_DIR/.job-harness.new"
 if [ "$OS" = "Darwin" ] && command -v codesign >/dev/null 2>&1; then
-  codesign -s - --force "$BIN_DIR/job-harness" >/dev/null 2>&1 || true
+  codesign -s - --force "$BIN_DIR/.job-harness.new" >/dev/null 2>&1 || true
 fi
-ln -sf "$BIN_DIR/job-harness" "$BIN_DIR/jh"
+mv -f "$BIN_DIR/.job-harness.new" "$BIN_DIR/job-harness"
+ln -sf "$BIN_DIR/job-harness" "$BIN_DIR/.jh.new"
+mv -f "$BIN_DIR/.jh.new" "$BIN_DIR/jh"
 # Updating a server set up with `jh service install`: restart it on the new binary.
 if command -v systemctl >/dev/null 2>&1 && systemctl --user is-active --quiet job-harness.service 2>/dev/null; then
   systemctl --user restart job-harness.service && printf 'Restarted job-harness.service on %s.\n' "$VERSION"
