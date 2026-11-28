@@ -142,9 +142,15 @@ fn connect() -> std::io::Result<Stream> {
     ));
 }
 
+/// How long a request may wait for the host, which gives an agent 120 s to start.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(150);
+/// How long attaching may wait for the host's answer, which it gives at once.
+const ATTACH_TIMEOUT: Duration = Duration::from_secs(15);
+
 /// One request on its own connection; the host's `result`, or its error.
 fn request(body: &Value) -> Result<Value> {
     let mut stream = connect()?;
+    stream.set_read_timeout(Some(REQUEST_TIMEOUT))?;
     let mut body = body.clone();
     body["id"] = json!(1);
     writeln!(stream, "{body}")?;
@@ -393,11 +399,16 @@ fn image_mime(path: &Path) -> Option<&'static str> {
     })
 }
 
+const LOST: &str =
+    "Part of this reply was lost while offline; reopen the session from the list to see all of it.";
+
 /// Follow one session's events from the host, from `after` (or from now).
 struct Feed {
     reader: BufReader<Stream>,
     line: Vec<u8>,
     last: u64,
+    /// The host's run; another one means it restarted and this turn is gone.
+    boot: Value,
 }
 
 impl Feed {
@@ -405,15 +416,14 @@ impl Feed {
         let mut stream = connect()?;
         let body = json!({"id":1,"op":"attach","agent":agent.name,"session":session,"after":after});
         writeln!(stream, "{body}")?;
+        stream.set_read_timeout(Some(ATTACH_TIMEOUT))?;
         let mut reader = BufReader::new(stream);
         let mut line = String::new();
         reader.read_line(&mut line)?;
         let reply: Value =
             serde_json::from_str(&line).context("The agent host closed the connection")?;
         if reply["result"]["gap"] == true {
-            bail!(
-                "Part of this reply was lost while offline; reopen the session from the list to see all of it."
-            );
+            bail!(LOST);
         }
         reader
             .get_ref()
@@ -422,6 +432,7 @@ impl Feed {
             reader,
             line: Vec::new(),
             last: after.unwrap_or_else(|| reply["result"]["latest"].as_u64().unwrap_or(0)),
+            boot: reply["result"]["boot"].clone(),
         })
     }
 
@@ -480,10 +491,12 @@ pub fn stream_turn(
         set_option(&agent, &session, id, model)?;
     }
     let mut feed = Feed::attach(&agent, &session, None)?;
-    // The host runs the prompt; its end arrives on the feed, even after a reconnect.
+    // The host runs the prompt; its end arrives on the feed, even after a reconnect,
+    // named with this turn so a cancelled turn's late end is not taken for this one's.
+    let turn = json!(uuid::Uuid::new_v4().to_string());
     let mut prompt_stream = connect()?;
     let body = json!({"id":1,"op":"call","agent":agent.name,"method":"session/prompt",
-        "params":{"sessionId":session,"prompt":blocks}});
+        "turn":turn,"params":{"sessionId":session,"prompt":blocks}});
     writeln!(prompt_stream, "{body}")?;
     std::thread::spawn(move || {
         let mut ignored = String::new();
@@ -498,6 +511,7 @@ pub fn stream_turn(
             return Ok(());
         }
         match feed.next() {
+            Ok(Some(event)) if !of_turn(&event, &turn) => {}
             Ok(Some(event)) => {
                 for out in events(&event) {
                     let _ = tx.send(out);
@@ -518,17 +532,24 @@ pub fn stream_turn(
                         continue;
                     }
                     match Feed::attach(&agent, &session, Some(feed.last)) {
+                        Ok(next) if next.boot != feed.boot => bail!(LOST),
                         Ok(next) => {
                             let _ = tx.send(StreamEvent::Status("Thinking…".into()));
                             break next;
                         }
-                        Err(err) if err.to_string().contains("lost") => return Err(err),
+                        Err(err) if err.to_string() == LOST => return Err(err),
                         Err(_) => {}
                     }
                 };
             }
         }
     }
+}
+
+/// Whether `event` belongs to `turn`: only an end names its turn (a host before 0.5.1
+/// names none).
+fn of_turn(event: &Value, turn: &Value) -> bool {
+    event.get("end").is_none() || event["turn"].is_null() || event["turn"] == *turn
 }
 
 fn text_of(content: &Value) -> String {
@@ -639,6 +660,16 @@ mod tests {
         assert_eq!(events(&end), [StreamEvent::Usage { total_tokens: 12 }]);
         let failed = json!({"end":{"error":{"message":"boom"}}});
         assert_eq!(events(&failed), [StreamEvent::Error("boom".into())]);
+    }
+
+    #[test]
+    fn a_cancelled_turns_late_end_does_not_end_the_next_turn() {
+        let turn = json!("b");
+        let end = |turn: Value| json!({"end":{"result":{"stopReason":"end_turn"}},"turn":turn});
+        assert!(!of_turn(&end(json!("a")), &turn));
+        assert!(of_turn(&end(json!("b")), &turn));
+        assert!(of_turn(&end(Value::Null), &turn));
+        assert!(of_turn(&json!({"seq":1,"msg":{}}), &turn));
     }
 
     #[test]

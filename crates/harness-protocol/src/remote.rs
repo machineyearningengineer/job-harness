@@ -193,19 +193,32 @@ pub async fn serve(root: &Path, bind: &str) -> anyhow::Result<()> {
     anyhow::bail!("jh serve needs Unix sockets; run it on Linux or macOS ({root:?}, {path})");
 }
 
-/// Serve on a Unix socket: mode 0660, so its owner and group may call and nobody
-/// else may. The directory (made by the service manager) decides who can reach it.
+/// Listen on a Unix socket created with `mode`, never wider even for an instant.
 #[cfg(unix)]
-async fn serve_unix(root: &Path, path: &Path) -> anyhow::Result<()> {
+pub fn bind_unix(path: &Path, mode: u32) -> anyhow::Result<tokio::net::UnixListener> {
     use std::os::unix::fs::{FileTypeExt, PermissionsExt};
-    let (app, _watcher) = router(root)?;
     // A socket left by a stopped server would make bind fail; never remove anything else.
     if std::fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_socket()) {
         std::fs::remove_file(path)?;
     }
-    let listener = tokio::net::UnixListener::bind(path)
-        .map_err(|err| anyhow::anyhow!("Cannot listen on {}: {err}", path.display()))?;
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o660))?;
+    // The umask is process-wide: it keeps the owner's bits, so files other threads make
+    // meanwhile only lose group or other access.
+    let mask = 0o777 & !(mode | 0o700);
+    let old = unsafe { libc::umask(mask as libc::mode_t) };
+    let bound = tokio::net::UnixListener::bind(path);
+    unsafe { libc::umask(old) };
+    let listener =
+        bound.map_err(|err| anyhow::anyhow!("Cannot listen on {}: {err}", path.display()))?;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))?;
+    Ok(listener)
+}
+
+/// Serve on a Unix socket: mode 0660, so its owner and group may call and nobody
+/// else may. The directory (made by the service manager) decides who can reach it.
+#[cfg(unix)]
+async fn serve_unix(root: &Path, path: &Path) -> anyhow::Result<()> {
+    let (app, _watcher) = router(root)?;
+    let listener = bind_unix(path, 0o660)?;
     eprintln!(
         "job-harness {} remote server listening on unix:{}",
         env!("CARGO_PKG_VERSION"),

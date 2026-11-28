@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.5.1 — Chat and the SSH link no longer hang
+
+- **Every chat turn ends:** `jh agent-host` logs a turn's end even when its prompt fails before reaching the agent (one that cannot start, for example). Each end names its turn, so a cancelled turn's late end no longer ends the next one. An attach that resumes past the host's latest event, or from another run of the host (`boot` in the attach answer), reports a gap, so the app stops waiting for a turn that a restart lost. A client that falls too far behind is disconnected and reattaches from its last event, instead of waiting on a feed that had stopped; each client's queue is bounded.
+- **Sessions come back after an agent restart:** when an agent was stopped while idle or exited, the host reopens the session a call names (`session/resume`, else `session/load`) before sending it, and does not log the history that reopening replays. Logs of an agent stopped while idle are freed, and attaching to an agent the host does not run is refused.
+- **The SSH connection cannot freeze:** the app's `ssh` master writes its messages to a file in its private folder instead of a pipe nobody read, which once full stopped the master; `-O check`, forwards and the socket path lookup give up after 15 s. Agent host requests time out after 150 s and attaching after 15 s. Answering a permission prompt while offline says so and keeps the prompt.
+- **Private from the first instant:** `jh serve` and `jh agent-host` create their sockets under a umask, so they are never open to more users than their final mode (0660, 0600) allows, not even before it is set; the units `jh service install` and `install-agents` write set `UMask=0077`. The app's tunnel folder is created 0700 in one step and refused if it exists and is not its own. The server's shell expands only the leading `${XDG_RUNTIME_DIR:-/run/user/$(id -u)}` of a socket path; the rest is taken as written.
+- **`get.sh` replaces the binary atomically:** it installs beside the old one and renames over it, so `jh` is never missing during an update.
+
 ## 0.5.0 — A server over SSH, chat that survives disconnects
 
 - **Unix socket only:** `jh serve --bind unix:PATH` is the only way to serve a ledger; its file permissions decide who may call. The TCP listener, the bearer token (`JOB_HARNESS_SERVE_TOKEN`, `JOB_HARNESS_SERVE_TOKEN_FILE`), `jh configure --token-file` and the desktop's `--token-file` are gone. `jh service install` serves `$XDG_RUNTIME_DIR/job-harness/serve.sock`. **Breaking:** re-run `jh service install`, and `jh configure --remote unix:PATH` for agents in remote mode.

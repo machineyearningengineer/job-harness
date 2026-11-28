@@ -131,7 +131,7 @@ pub fn units(binary: &Path, root: &Path) -> [(&'static str, String); 3] {
             // The runtime directory is the user's own (/run/user/UID is 0700), so only
             // this user, and sshd forwarding for this user, can reach the 0660 socket.
             format!(
-                "[Unit]\nDescription=Job Harness ledger server on a Unix socket\n\n[Service]\nRuntimeDirectory=job-harness\nRuntimeDirectoryMode=0700\nExecStart={bin} --root {root} serve --bind unix:%t/{SOCKET}\nRestart=on-failure\nRestartSec=10\n\n[Install]\nWantedBy=default.target\n"
+                "[Unit]\nDescription=Job Harness ledger server on a Unix socket\n\n[Service]\nUMask=0077\nRuntimeDirectory=job-harness\nRuntimeDirectoryMode=0700\nExecStart={bin} --root {root} serve --bind unix:%t/{SOCKET}\nRestart=on-failure\nRestartSec=10\n\n[Install]\nWantedBy=default.target\n"
             ),
         ),
         (
@@ -154,7 +154,7 @@ pub fn agents_unit(binary: &Path, agents: &[String]) -> String {
         .map(|agent| format!(" --agent {}", unit_word(agent)))
         .collect();
     format!(
-        "[Unit]\nDescription=Job Harness agent host on a Unix socket\n\n[Service]\nExecStart={} agent-host --socket %t/{AGENTS_SOCKET}{agents}\nRestart=on-failure\nRestartSec=10\n\n[Install]\nWantedBy=default.target\n",
+        "[Unit]\nDescription=Job Harness agent host on a Unix socket\n\n[Service]\nUMask=0077\nExecStart={} agent-host --socket %t/{AGENTS_SOCKET}{agents}\nRestart=on-failure\nRestartSec=10\n\n[Install]\nWantedBy=default.target\n",
         unit_word(binary.display())
     )
 }
@@ -311,7 +311,7 @@ mod tests {
         assert!(
             serve
                 .1
-                .contains("RuntimeDirectory=job-harness\nRuntimeDirectoryMode=0700\n")
+                .contains("UMask=0077\nRuntimeDirectory=job-harness\nRuntimeDirectoryMode=0700\n")
         );
         assert!(serve.1.contains(
             "ExecStart=\"/opt/jh bin/job-harness\" --root \"/data/100%% $$ledger\" serve --bind unix:%t/job-harness/serve.sock\n"
@@ -501,6 +501,7 @@ mod tests {
             Path::new("/bin/jh"),
             &["bot=hermes -p bot acp".into(), "x=run 100%".into()],
         );
+        assert!(unit.contains("[Service]\nUMask=0077\n"));
         assert!(unit.contains(
             "ExecStart=\"/bin/jh\" agent-host --socket %t/job-harness-agents.sock --agent \"bot=hermes -p bot acp\" --agent \"x=run 100%%\"\n"
         ));
