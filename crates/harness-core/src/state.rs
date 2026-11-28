@@ -623,7 +623,11 @@ mod tests {
     fn bundled_sqlite_is_past_the_open_close_deadlock() {
         // `jh serve` opens a connection per call; SQLite 3.51.0 and 3.51.1 deadlock
         // when threads open and close the same WAL database at once.
-        assert!(rusqlite::version_number() >= 3_051_002, "{}", rusqlite::version());
+        assert!(
+            rusqlite::version_number() >= 3_051_002,
+            "{}",
+            rusqlite::version()
+        );
     }
     #[test]
     fn empty_pending_is_clean_without_changing_source_bytes() {
