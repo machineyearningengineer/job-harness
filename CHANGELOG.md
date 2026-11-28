@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.6 — `jh serve` no longer hangs
+
+- **SQLite 3.53.2:** `jh serve` opens the ledger per call, and the bundled SQLite 3.51.1 could deadlock threads opening and closing it at once; every call then hung while `/health` still answered. rusqlite 0.40 bundles 3.53.2, which has the fix (SQLite 3.51.2).
+
 ## 0.4.5 — Desktop chat on the server
 
 - **Chat runs where the agent lives:** opened with `jh open --ssh user@server`, the desktop app's chat runs that server's Hermes over SSH (`ssh -T user@server -- hermes chat ...`, prompt on stdin) instead of a local Hermes. New `jh open --hermes-profile NAME` and `--hermes-path PATH`. Over SSH, chat refuses attachments and does not list past sessions or the fast-mode setting, which live on the server.
